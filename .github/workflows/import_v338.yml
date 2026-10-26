@@ -1,0 +1,38 @@
+name: Import NERO V3.38
+
+on:
+  push:
+    paths:
+      - '.stage_v338/READY'
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reconstruct and extract release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .stage_v338/chunk_*.b64 | tr -d '\n\r' | base64 -d > /tmp/nero_v338.tar.xz
+          mkdir -p /tmp/nero_v338
+          tar -xJf /tmp/nero_v338.tar.xz -C /tmp/nero_v338
+          cp -a /tmp/nero_v338/. .
+          rm -rf .upload .stage_v338
+          rm -f .github/workflows/import_v338.yml
+          rmdir .github/workflows 2>/dev/null || true
+          rmdir .github 2>/dev/null || true
+      - name: Commit imported project
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Import NERO V3.38 project source'
+          git push origin HEAD:main
