@@ -19,7 +19,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat .stage_v338/chunk_*.b64 | tr -d '\n\r' | base64 -d > /tmp/nero_v338.tar.xz
+          : > /tmp/nero_v338.tar.xz
+          for f in .stage_v338/chunk_*.b64; do
+            base64 -d "$f" >> /tmp/nero_v338.tar.xz
+          done
+          xz -t /tmp/nero_v338.tar.xz
           mkdir -p /tmp/nero_v338
           tar -xJf /tmp/nero_v338.tar.xz -C /tmp/nero_v338
           cp -a /tmp/nero_v338/. .
