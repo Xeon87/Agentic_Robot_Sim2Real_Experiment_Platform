@@ -1,4 +1,4 @@
-name: Import NERO V3.38
+name: Recover and Import NERO V3.38
 
 on:
   push:
@@ -9,38 +9,61 @@ permissions:
   contents: write
 
 jobs:
-  import:
+  recover-import:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Diagnose staged payload
+      - name: Recover two missing Base64 chars and extract
         shell: bash
         run: |
-          set +e
-          DEBUG=v338_import_debug.txt
-          : > "$DEBUG"
-          echo "chunk_count=$(find .stage_v338 -maxdepth 1 -name 'chunk_*.b64' | wc -l)" >> "$DEBUG"
-          for f in .stage_v338/chunk_*.b64; do
-            echo "FILE $f bytes=$(wc -c < "$f")" >> "$DEBUG"
-          done
-
-          cat .stage_v338/chunk_*.b64 | tr -d '\n\r' | base64 -d -i > /tmp/concat.tar.xz 2>>"$DEBUG"
-          echo "concat_decode_rc=$? size=$(wc -c < /tmp/concat.tar.xz)" >> "$DEBUG"
-          xz -t /tmp/concat.tar.xz >>"$DEBUG" 2>&1
-          echo "concat_xz_rc=$?" >> "$DEBUG"
-
-          : > /tmp/each.tar.xz
-          for f in .stage_v338/chunk_*.b64; do
-            base64 -d -i "$f" >> /tmp/each.tar.xz 2>>"$DEBUG"
-            echo "decode $f rc=$? cumulative=$(wc -c < /tmp/each.tar.xz)" >> "$DEBUG"
-          done
-          xz -t /tmp/each.tar.xz >>"$DEBUG" 2>&1
-          echo "each_xz_rc=$? size=$(wc -c < /tmp/each.tar.xz)" >> "$DEBUG"
-
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, itertools, lzma, pathlib, sys
+          d = pathlib.Path('.stage_v338')
+          parts = [(d / f'chunk_{i:03d}.b64').read_text().strip() for i in range(10)]
+          prefix = ''.join(parts[:5])
+          suffix = ''.join(parts[5:])
+          alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+          found = None
+          # The only short chunk is chunk_004 (19998 instead of 20000), so first
+          # recover the two missing characters at its trailing boundary.
+          for a in alphabet:
+              for b in alphabet:
+                  s = prefix + a + b + suffix
+                  try:
+                      raw = base64.b64decode(s, validate=True)
+                      lzma.decompress(raw)
+                  except Exception:
+                      continue
+                  found = (a+b, raw)
+                  break
+              if found:
+                  break
+          if not found:
+              raise SystemExit('Could not recover the two missing Base64 characters at chunk_004 boundary')
+          pair, raw = found
+          pathlib.Path('/tmp/nero_v338.tar.xz').write_bytes(raw)
+          pathlib.Path('/tmp/recovered_pair.txt').write_text(pair + '\n')
+          print('Recovered missing pair:', pair)
+          PY
+          mkdir -p /tmp/nero_v338
+          tar -xJf /tmp/nero_v338.tar.xz -C /tmp/nero_v338
+          echo 'Recovered archive top-level:'
+          find /tmp/nero_v338 -maxdepth 2 -type f | head -40
+          cp -a /tmp/nero_v338/. .
+          rm -rf .upload .stage_v338
+          rm -f v338_import_debug.txt
+          rm -f .github/workflows/import_v338.yml
+          rmdir .github/workflows 2>/dev/null || true
+          rmdir .github 2>/dev/null || true
+      - name: Commit recovered project
+        shell: bash
+        run: |
+          set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add "$DEBUG"
-          git commit -m 'Record NERO V3.38 import diagnostics' || true
+          git add -A
+          git commit -m 'Recover and import NERO V3.38 project source'
           git push origin HEAD:main
