@@ -1,0 +1,22 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Runtime logs
+logs/
+*.log
+
+# Python environments
+.venv/
+venv/
+
+# Local secrets
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
