@@ -15,28 +15,57 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Reconstruct and extract release
+      - name: Reconstruct, diagnose, and import release
         shell: bash
         run: |
-          set -euo pipefail
-          : > /tmp/nero_v338.tar.xz
+          set -u
+          DEBUG=/tmp/v338-debug.txt
+          : > "$DEBUG"
+          echo "chunks:" >> "$DEBUG"
           for f in .stage_v338/chunk_*.b64; do
-            base64 -d "$f" >> /tmp/nero_v338.tar.xz
+            printf '%s bytes=%s tail=' "$f" "$(wc -c < "$f")" >> "$DEBUG"
+            tail -c 8 "$f" >> "$DEBUG" || true
+            echo >> "$DEBUG"
           done
-          xz -t /tmp/nero_v338.tar.xz
-          mkdir -p /tmp/nero_v338
-          tar -xJf /tmp/nero_v338.tar.xz -C /tmp/nero_v338
-          cp -a /tmp/nero_v338/. .
-          rm -rf .upload .stage_v338
-          rm -f .github/workflows/import_v338.yml
-          rmdir .github/workflows 2>/dev/null || true
-          rmdir .github 2>/dev/null || true
-      - name: Commit imported project
-        shell: bash
-        run: |
-          set -euo pipefail
+
+          cat .stage_v338/chunk_*.b64 | tr -d '\n\r' | base64 -d -i > /tmp/v338_concat.tar.xz 2>>"$DEBUG"
+          echo "concat_decode_rc=$? size=$(wc -c < /tmp/v338_concat.tar.xz)" >> "$DEBUG"
+          xz -t /tmp/v338_concat.tar.xz >>"$DEBUG" 2>&1
+          CONCAT_XZ=$?
+          echo "concat_xz_rc=$CONCAT_XZ" >> "$DEBUG"
+
+          : > /tmp/v338_each.tar.xz
+          EACH_RC=0
+          for f in .stage_v338/chunk_*.b64; do
+            base64 -d -i "$f" >> /tmp/v338_each.tar.xz 2>>"$DEBUG" || EACH_RC=$?
+          done
+          echo "each_decode_rc=$EACH_RC size=$(wc -c < /tmp/v338_each.tar.xz)" >> "$DEBUG"
+          xz -t /tmp/v338_each.tar.xz >>"$DEBUG" 2>&1
+          EACH_XZ=$?
+          echo "each_xz_rc=$EACH_XZ" >> "$DEBUG"
+
+          ARCHIVE=''
+          if [ "$CONCAT_XZ" -eq 0 ]; then ARCHIVE=/tmp/v338_concat.tar.xz; fi
+          if [ -z "$ARCHIVE" ] && [ "$EACH_XZ" -eq 0 ]; then ARCHIVE=/tmp/v338_each.tar.xz; fi
+
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
-          git commit -m 'Import NERO V3.38 project source'
-          git push origin HEAD:main
+
+          if [ -n "$ARCHIVE" ]; then
+            mkdir -p /tmp/nero_v338
+            tar -xJf "$ARCHIVE" -C /tmp/nero_v338
+            cp -a /tmp/nero_v338/. .
+            rm -rf .upload .stage_v338
+            rm -f .github/workflows/import_v338.yml
+            rmdir .github/workflows 2>/dev/null || true
+            rmdir .github 2>/dev/null || true
+            git add -A
+            git commit -m 'Import NERO V3.38 project source'
+            git push origin HEAD:main
+          else
+            cp "$DEBUG" v338_import_debug.txt
+            git add v338_import_debug.txt
+            git commit -m 'Record NERO V3.38 import diagnostics' || true
+            git push origin HEAD:main
+            exit 1
+          fi
