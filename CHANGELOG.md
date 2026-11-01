@@ -1,4 +1,195 @@
-# Changelog
+## V3.58 (2026-10-31) — Kinematic-Anchored Wide-Angle Intrinsic Solver + Per-View RANSAC Corner Pruning + Full-Quadrant Tilt Planner
+- **Robot-Kinematic Metric Focal-Length Anchoring (`calibrate_intrinsics` in `NERO_V349_Real_Wrist_Camera.py`)**: Fixes the planar homography focal-length singularity (`fx = 2147 / 3134 / 5164 px`, `z = 1147 mm`, `RMS = 1.058..2.166 px`) when calibrating a 130° wide-angle wrist camera on low-tilt tabletop ChArUco views. Couples the 1D wide-angle focal-length profile search (`[0.31*w, 0.78*w]`) directly with the robot arm's 3D metric FK (`T_base_flange`) via `solve_eye_in_hand`, locking `fx, fy` to the exact physical focal length (`~700 px`) and true tabletop distance (`~220..280 mm`).
+- **Subpixel ArUco/ChArUco Refinement & Per-View RANSAC Homography Corner Pruning (`detect_board_corners`, `calibrate_intrinsics`, `detect_charuco_pose`, `eih_samples_from_intr_samples`)**: Enables `CORNER_REFINE_SUBPIX` + `tryRefineMarkers` + post-detection `cornerSubPix` + Homography/IRLS barrel-surface corner screening and clean-subset undistorted RANSAC Homography corner pruning, automatically stripping individual corners pulled by black gripper shadows or plastic-sleeve specular glare (`2.3–2.4 px` -> `< 0.5 px`).
+- **4-Quadrant Adaptive Centroid Steering & Stronger Perspective Tilt (`plan_intr_auto_targets`)**: Seeds `used_uv` with the actual starting board position `s0_board["center_frac"]`, uses a realistic wide-angle prior (`fx = 0.38 * w`), and increases perspective tilt recipes to `18°–28°`.
+- **Wide-Range 2D `(alpha_xy, alpha_z)` Scale Recovery & One-Pass Auto-Save (`calibrate_eye_in_hand`, `NERO_V325_Camera.py`)**: Widens Stage B depth scale bounds to `az in [0.12, 1.85]`, preserves per-row `重投影 px` in the intrinsic table after saving, and automatically saves `config/wrist_handeye_calib.json` when one-pass ChArUco Eye-in-Hand calibration passes quality gates.
+
+# NERO Changelog
+
+## V3.57 (2026-10-31)
+- **桌面标定板全自动内参采集 + ChArUco 24 角点高精度腕部手眼标定 + 2D 焦距/尺度自校准 (`NERO_V349_Real_Wrist_Camera.py`, `NERO_V325_Camera.py`)**:
+  - **「内参标定」页新增 `▶ 自动采集` (`on_intr_auto`, `plan_intr_auto_targets`)**：将 ChArUco / 棋盘格标定板平放桌面，机械臂自动走完画面四角平移、4 向透视倾斜与远近尺度共 10 个姿态，自动完成内参计算、防过拟合正则化校验与保存，并可一趟轨迹直接同步算出腕部 Eye-in-Hand 手眼标定（`eih_samples_from_intr_samples`）。
+  - **ChArUco 标定板 24 对称十字内角点 6-DoF 姿态检测 (`detect_charuco_pose`)**：腕部手眼标定默认启用 `ChArUco标定板/单码自适应` 双引擎，优先检测桌面 ChArUco 标定板上最多 24 个黑白对称十字交叉内角点（跨度 `192×128 mm`，是 24 mm 单码的 8 倍），彻底免疫打印边缘发虚/墨水外扩，且局部遮挡或反光（只要见 ≥4 个角点）绝不丢帧；无标定板时自动回退到带 CLAHE 局部增强的单张 ArUco 码检测。
+  - **8 参数有理畸变防过拟合门控 (`_check_rational_sanity`)**：当标定板未铺满全屏角落导致 8 参数模型焦距漂移或边缘发散时，自动启用 5 参数针孔正则化，杜绝边缘坐标被拉伸到 `442 mm`。
+  - **2D 各向异性焦距与尺度联合自校准 (`calibrate_eye_in_hand` `pnp_scale` + `pnp_scale_z`)**：同时自适应校准平面标记尺寸比例 $\alpha_{xy}$ 与相机焦距深度比例 $\alpha_z$，即使内参焦距存在 `1.7x` 偏差也能将残差压至 `< 1.5 mm`。
+
+V3.56 (2026-10-31)
+- **腕部相机 Eye-in-Hand 手眼标定全面优化与加速 (`NERO_V349_Real_Wrist_Camera.py`, `NERO_V325_Camera.py`)**:
+  - **1080P 全分辨率 ROI 裁剪角点检测 (`detect_aruco`)**：消除半分辨率 `corners_h * 2.0 + cornerSubPix` 在 24 mm 腕部小标记上跳入内部编码黑格引起的 `14~17 mm` 静止抖动与 `30~60 mm` 深度跳变；同时在 `UsbWristSource.detect_marker` 中自动对齐画面实际分辨率与内参 `K` 尺度。
+  - **纯平移初值探测 + Kabsch 零 `rvec` 方向估计 (`on_wcalib_auto`, `estimate_eih_from_probes`)**：初值探测优先采用预计算雅可比 IK 执行 3 个固定姿态（$R_k = R_0$）的 `±3.8 cm` 纯平移微探，相机光轴不偏转、标记稳居视野中心不丢帧，并在数学上 100% 抵消未知杠杆臂 $R_0 t_X$，配合水平桌面法向与高度下限保护，彻底消除 `淘汰：太低 140` 与 `淘汰：倾角过大 101`。
+  - **Look-At Dome 注视穹顶选点与广角中心甜区约束 (`plan_eih_auto_targets`, `eih_pose_visible`)**：利用快速雅可比 IK 生成腕部自动反向偏转注视标记的穹顶采样姿态，将标记严格约束在 130° 广角镜头中心甜区（偏角 $\le 28^\circ$，避免落入 `[-378, -142, 293] mm` 等外圈严重畸变区），并按关节空间最近邻平滑排序执行路径。
+  - **物理杠杆臂约束 (`||t_X|| <= 160 mm`) + 单目尺度自校准 + LOO 离群点剔除 (`solve_eye_in_hand`, `calibrate_eye_in_hand`)**：防止外圈畸变点将 `link7→cam` 拉飞至 `+270 mm`，支持自动校准打印标记尺寸/焦距尺度偏差与剔除 LOO 异常点。
+  - **快速驻留、4 帧早停与盲区零重试跳过 (`_capture_wrist_sample`, `_capture_wrist_retry`, `_wmove_measure`)**：达到 4 帧且抖动 `<= 1.5 mm` 立即早停返回；`0.65 s` 内 0 帧检出立即判定盲区跳过且不再重复盲等。
+
+V3.55
+- Fast & High-Success Main Camera Hand-Eye Calibration (`NERO_V325_Camera.py` + `NERO_V312_Console.py`):
+  - **Precomputed Jacobian IK + Orientation-Diversity Planning (`build_fast_jacobian_ik` & `plan_auto_targets`)**:
+    precomputes the $6\times 7$ geometric Jacobian $J_0$ and damped-least-squares pseudoinverse once at $q_0$ (7 FK calls total),
+    solving candidate targets in 3-4 microsecond iterations (~10x faster than 150-iteration numerical `ik_tool`); enriches
+    candidate orientations with normal-roll + camera-facing tilts and selects farthest points in both 3D translation AND
+    3D orientation so pairwise `rot_span_deg` reaches $35^\circ\text{--}48^\circ$ (well above the $25^\circ$ requirement).
+  - **Fast Settle, 6-Frame Capture & Dual-Scale 720p ArUco (`_capture_sample`, `_move_measure`, `detect_aruco`)**:
+    enabled half-scale (`640x360`) pre-detection + full-res `cornerSubPix` on `1280x720` frames; widened depth window
+    (`0.20 * side_px`); reduced per-pose capture to 6 frames (early exit at 5 frames with jitter $\le 1.8\text{ mm}$,
+    0.8 s empty-pose fast skip, and 0.35 s settle).
+  - **Batch-Consistent Source Unification & LOO Outlier Rejection (`calibrate`)**:
+    records both `p_pnp` and `p_depth` per pose and automatically evaluates depth-scale-aligned unified PnP (`pnp_depth_scaled`)
+    when poses mix `depth` and `pnp`, eliminating cross-pose source jumps; tightened outlier rejection (`reject_mm=5.0`)
+    and added Leave-One-Out outlier rejection (`> 5.0 mm`).
+  - **Auto-Clear Stale Samples & Start-Pose PnP Fallback (`on_auto`, `MarkerModel.from_start_det`)**:
+    automatically clears leftover samples at the start of `on_auto` and falls back to `MarkerModel.from_start_det` if fewer
+    than 2 translation probes succeed.
+- Tests: `test_v3_55.py` (V1-V4), `test_v3_55_gui.py`.
+
+## V3.54
+- Firmware V1.2.1 (`NeroFW.V121`) Upgrade & Teach Mode Exit / Step 3 Enable Fix (`NERO_V313_Real_Robot.py` + `NERO_V312_Console.py` + `NERO_V325_Camera.py`):
+  - Default firmware version upgraded from `v111` to `v121` (`DEFAULT_FW_VERSION = "v121"`, `NeroFW.V121` for firmware `>= 1.21`), with GUI dropdown options `["v121", "v120", "v112", "v111", "default", ""]` and `_resolve_nero_fw` auto-fallback if an older `pyAgxArm` install lacks `NeroFW.V121`.
+  - Fixed `cmd_mode(mode="normal")` (exiting teach mode): on firmware `>= 1.12 / 1.2.1`, `set_normal_mode()` is a no-op and only `set_follower_mode()` exits `set_leader_mode()`. `cmd_mode(normal)` now calls both `set_follower_mode()` and `set_normal_mode()` before `enable()`, sets 10% speed + holds current 7-joint pose (`move_j`), and re-sends `set_follower_mode()` + `enable()` after `enable()` (since NERO controllers ignore mode-switch commands while disabled).
+  - Fixed `cmd_push` (Step 3 `CAN push / 使能`): stops `leader` reader if running, calls `set_follower_mode()` before, during, and after `enable()`, and holds current joint angles at 10% speed so an arm left in teach (`leader`) mode immediately switches back to follower mode and enables cleanly instead of timing out after 15 s.
+  - Leader angle feedback in teach mode (`cmd_mode(teach)` & `cmd_leader`) now uses `NeroFW.V121` (CAN `0x155-0x157 + 0x170`).
+- Tests: `test_v3_54.py` (V1-V4), `test_v3_54_gui.py`.
+
+## V3.53
+- Teach Mode Exit & Button Alignment (`NERO_V325_Camera.py` + `NERO_V312_Console.py` + `NERO_V313_Real_Robot.py`):
+  - `WorkflowLampBar`: packed `进入示教模式` and `退出示教模式` directly into `parent` (`side="right"`) alongside
+    `Copy Log` so all three buttons share the exact same horizontal centerline (`0 px` vertical offset).
+  - Kept `退出示教模式` (`b_teach_out`) always enabled (`state="normal"` when not busy) and removed the
+    `if not self.pipe.teach_mode: return` guard in `CameraTabUI.on_teach_exit` so the user can always exit teach mode
+    even on V111 firmware where `ctrl_mode` stays `0x01`.
+  - `RealPipeline.set_teach_mode`: detects V111 teach entry when `/feedback/joint_states` pauses after `set_leader_mode`;
+    preserves hand-guided joint angles across `> 2 s` confirmation dialogs (`_hand_pose_rad(max_age_s=600.0)`); clamps
+    any hand-guided joint exceeding URDF limits (including `> 0.2 rad`); `cmd_mode(normal)` reads current angles from
+    CAN `get_leader_joint_angles` / `get_joint_angles` when `--hold` is omitted and always reopens the control gate.
+- Real-Robot Debug Tab `待断电位置⚠` & `退出示教模式` Fixes (`NERO_V314_Joint_Control.py` + `NERO_V312_Console.py` + `NERO_V313_Real_Robot.py`):
+  - `实机NERO调试 -> 退出示教模式`: runs with `force=True` and `return_home=False` (locks arm in place at current pose).
+  - `JointPanelUI.go_park` (`待断电位置⚠`): auto-exits teach mode if active, temporarily relaxes the tabletop XY
+    polygon wall check (`ignore_xy_fence=True` and `apply_walls_fn(False)`) while preserving Z-axis table collision
+    protection (`z >= z_min_points` and `v315_table`) so folding over the base (`x = +0.31 m`) to Park Pose D succeeds
+    on the first click without requiring manual safety-zone expansion behind the base.
+- Default High-Resolution `1280×720` Depth in `视觉定位` (`NERO_V325_Camera.py`):
+  - `RealSenseSource.depth_res` and `CameraTabUI.v_dres` now default to `1280×720` (`DEPTH_RES[1]`), and legacy
+    `V3.47.1` locate settings files with `848×480` are auto-upgraded to `1280×720` on startup.
+- Tests: `test_v3_53.py` (V1-V4), `test_v3_53_gui.py` (P1-P3).
+
+## V3.52
+- Eye-in-Hand Performance & Non-Blocking UI (`NERO_V325_Camera.py` + `NERO_V349_Real_Wrist_Camera.py`):
+  - `on_wcalib_record` moved to background worker thread `self._run(job)` so the Tkinter GUI never freezes.
+  - `_capture_wrist_sample` reduced to 5 frames (`timeout=1.6 s`, seeded with fresh live detection); `detect_aruco`
+    uses half-scale (`960x540`) marker detection + full-res `cornerSubPix` refinement on `1920x1080` frames;
+    `evaluate_wrist_frame` computes Laplacian on 2x2 subsampled ROI.
+  - `plan_eih_auto_targets` uses fast multi-scale joint-space sampling + FK + visibility screening (`< 0.05 s`,
+    removing 180-step numerical IK loop); `on_wcalib_auto` auto-clears stale batch samples and uses
+    `initial_eih_prior_from_start` to keep the 3 initial probe moves inside the wrist camera FOV.
+- 8-Parameter Rational Distortion PnP Fix & Point-Duality Eye-in-Hand Solver (`NERO_V325_Camera.py` + `NERO_V349_Real_Wrist_Camera.py`):
+  - Fixed `detect_aruco` truncation bug (`dist[:5]`) that dropped `CALIB_RATIONAL_MODEL` denominator terms `k4..k6`:
+    now undistorts marker corners with the full distortion vector via `cv2.undistortPoints` before `solvePnP`.
+  - Upgraded `solve_eye_in_hand` with point-duality polish `solve_eye_to_hand([T_inv(A)], p_list)` ($X p_i \approx A_i^{-1} y$)
+    so PnP `rvec` planar flips on small 24 mm markers never corrupt `T_flange_cam`.
+- Unified `560x315` Main Camera Canvas Scaling (`NERO_V325_Camera.py`):
+  - `RealSenseSource.display_ppm` resizes preview to `(560, 315)`; `_px`, `_canvas_to_img`, `on_drag`, `on_release`,
+    and `_draw_yolo` all use `DW/1280, DH/720`, eliminating the upper-left offset between YOLO boxes and 3D crosshairs.
+- Log-Bar Teach Mode Buttons Left of `Copy Log` (`NERO_V313_Real_Robot.py` + `NERO_V325_Camera.py` + `NERO_V312_Console.py`):
+  - Added `进入示教模式` and `退出示教模式` buttons on `WorkflowLampBar` right to the left of `Copy Log`;
+    `RealPipeline.set_teach_mode(..., return_home=False)` locks the robot in place at the hand-guided marker-viewing
+    pose without returning to zero `[0]*7`.
+- Tests: `test_v3_52.py` (V1-V4), `test_v3_52_gui.py` (P1-P3).
+
+## V3.51
+- Independent Main & Wrist ArUco Marker Settings (`NERO_V325_Camera.py` + `NERO_V349_Real_Wrist_Camera.py`):
+  - Renamed sub-tab `'eye-in-hand 手眼标定功能'` under `手眼标定` to `'eye-in-hand手眼标定'`; `'主相机手眼标定'` GUI and
+    functionality unchanged.
+  - Added independent desktop ArUco marker controls (`v_wdict`, `v_wmid`, `v_wmsize` defaulting to `24 mm`, and
+    `生成桌面标记图片` button `b_wpng`) in `'eye-in-hand手眼标定'` Step ①, saved/loaded with `wrist_handeye_calib.json`.
+- Automatic Eye-in-Hand Calibration & Quick Check (`NERO_V349_Real_Wrist_Camera.py` + `NERO_V325_Camera.py`):
+  - `eih_pose_visible`, `estimate_eih_from_probes`, `plan_eih_auto_targets`: screens candidate arm poses for soft
+    limits, safety zone + interpolated path safety (`check_auto_path`), flange height floor (`>= marker_z + 8 cm`), and
+    marker visibility / viewing tilt (`<= 42 deg`), selecting diverse poses via farthest-point sampling.
+  - `_capture_wrist_sample`, `on_wcalib_auto` (`▶ 自动采集`), `on_wcalib_check` (`快速复核（走到存档姿态）`): 3-pose
+    initial probe when uncalibrated + N-pose automatic collection at `<= 10 %` speed + return to start + auto compute.
+- Full-Workflow Status Lamp Bar above the bottom Log frame (`NERO_V312_Console.py` + `NERO_V325_Camera.py`):
+  - `WORKFLOW_STEPS`, `evaluate_workflow_lamps`, `WorkflowLampBar`: 9 ordered stages (`① 实机驱动` .. `⑨ 腕部手眼`)
+    with solid rings for required steps, dashed outer rings (`optional`) for optional steps, and 4-state (`grey`,
+    `green`, `yellow`, `red`) diagnostic logic.
+- Tests: `test_v3_51.py` (U1-U4), `test_v3_51_gui.py` (N1-N4).
+
+## V3.50
+- Camera调试 — Dual 16:9 Live Monitor Canvases (`CameraTabUI.DW, DH = 560, 315` in `NERO_V325_Camera.py`):
+  - Upper canvas `self.cv` (`560x315`): fixed D435i global bird's-eye monitor + overlays.
+  - Lower canvas `self.cv_wrist` (`560x315`) + live status bar `self.v_wrist_live`: wrist USB 1080P 130° wide-angle
+    close-up monitor (`_poll_wrist`, `_redraw_wrist`), updating simultaneously with the main camera.
+- Wrist Camera Feature Extraction & Coarse-to-Fine Processing (`NERO_V349_Real_Wrist_Camera.py`):
+  - `evaluate_wrist_frame`: rolling-shutter motion & frame quality gate extracting inter-frame pixel diff
+    (`motion_diff`), joint step (`joint_step_deg`), center-ROI Laplacian sharpness (`sharpness`), and highlight
+    overexposure ratio (`overexp_frac`), rendered as a live badge on `self.cv_wrist`.
+  - `project_tcp_wrist`: projects the active TCP crosshair (`uv_tcp`), 21 mm egg-radius reference circle, gripper
+    opening axis line, and left/right fingertip drop-zone footprints onto the wrist camera image at working depth
+    `z_work_m`.
+  - `wrist_refine_target`: monocular plane-constrained 3D coarse-to-fine solver using dynamic wrist extrinsics
+    $T_{\text{base\_wrist}}(q) = T_{\text{base\_flange}}(q) \cdot T_{\text{flange\_cam}}$, full-mask ray-plane
+    centroid + 2D PCA orientation + perspective-cone size correction, fingertip drop-zone clearance check against
+    neighbouring masks (`clearance_ok`), and coarse-vs-fine discrepancy gate (`delta_coarse_mm <= 20 mm`).
+- 视觉定位 Coarse-to-Fine Loop (`on_wrist_refine`, `on_wrist_align`, buttons `◎ 腕部精定位` and `✥ 一键微调对齐`):
+  - Computes $(\Delta x, \Delta y, \Delta\psi)$ relative to the active TCP, updates the target row in `self.tv_eggs`,
+    visualizes the refinement vector on `self.cv_wrist`, and plans/executes a `<= 10 %` speed horizontal fine-alignment
+    move.
+- Added US Letter (8.5x11 inch, 300 DPI) printable calibration boards in `config/`:
+  `calib_charuco_7x5_32mm_Letter.png` and `calib_chessboard_9x6_24mm_Letter.png`.
+- Tests: `test_v3_50.py` (T1-T6), `test_v3_50_gui.py` (M1-M4).
+
+## V3.49
+- New standalone module `NERO_V349_Real_Wrist_Camera.py` (`NERO_V326_Wrist_Camera.py` and `NERO_V308_Camera_Perception.py`
+  untouched):
+  - `list_usb_cameras`, `UsbWristSource` (V4L2 UVC MJPG 1920x1080@30fps reader, auto-filters RealSense nodes, locks
+    exposure / white balance / autofocus, undistortion preview); wrist camera section added below main camera info in the
+    `相机信息` tab.
+  - New `内参标定` tab (placed right after `深度检查`): `generate_calib_board_png` (A4 300-DPI ChArUco & Chessboard PNGs
+    with 100 mm ruler, pre-generated in `config/`), `detect_board_corners`, `calibrate_intrinsics` (8-param rational
+    wide-angle, 5-param pinhole, 4-param fisheye, outlier rejection, saved to `config/wrist_intrinsics.json` +
+    `~/Downloads/cameracalib`), `undistort_rgb`.
+  - `手眼标定` tab split into two sub-tabs: `主相机手眼标定` (existing eye-to-hand UI + `check_auto_path` interpolated
+    path safety-zone check in `plan_auto_targets`) and `eye-in-hand 手眼标定功能` (`solve_eye_in_hand`,
+    `calibrate_eye_in_hand` solving $A_i X B_i \approx Y$ for $T_{\text{flange\_cam}}$ and $T_{\text{base\_marker}}$,
+    saved to `config/wrist_handeye_calib.json`).
+  - Zero-prior egg holder & slot localization (`locate_egg_holder`, `infer_holder_grid`, `agent_judge_holder`, button
+    `识别蛋托（Agent 算槽位）` in `视觉定位`): measures holder 3D OBB ($L, W, H, \text{yaw}$) from point cloud / contour
+    without prior dimensions, autonomously infers $(R \times C)$ layout and 3D coordinates + empty/occupied state of
+    `slot_1..slot_N`, and integrates with V3.48 hover verification.
+- Tests: `test_v3_49.py` (S1-S6), `test_v3_49_gui.py` (L1-L5).
+
+
+## V3.48
+- Camera调试 / 视觉定位 — TCP calibration & hover verification:
+  - `solve_3x3`, `solve_tcp_pivot`, `calibrate_tcp` (multi-pose single-point least squares with outlier rejection, LOO
+    cross-validation, and comparison against `nero_7dof_with_tcp.urdf` default `[+155.3, 0.0, -21.5] mm`), saved to
+    `config/tcp_calib.json` (+ copy in `~/Downloads/cameracalib`).
+  - `plan_hover_target`, `on_hover_target`, `on_hover_back`: moves the active TCP to hover `30..300 mm` (default `100 mm`)
+    directly above the selected (or first trusted) egg / object at `<= 10 %` speed after soft-limit, flange-above-TCP,
+    safety-zone, and confirmation checks.
+- Camera调试 / 视觉定位 — General YOLOE-26 object recognition (`on_objects`, `locate_objects`):
+  - `识别鸡蛋` kept unchanged; added `识别物体（按名称/词库）` and `识别物体名称` input (`v_obj_names`).
+  - `YoloEDetector` supports prompt-free checkpoints (`*-pf.pt`, `is_pf_model`, mode `'pf'`, 4,585 built-in classes
+    without `set_classes()` or `mobileclip2_b.ts`) with optional class-name filtering (`match_object_name`), as well as
+    open-vocabulary text prompts on `yoloe-26s-seg.pt`.
+  - `locate_objects()` computes 3D centre, height above the local 3-6 cm table plane, and footprint size in `base_link`.
+- Camera调试 / 手眼标定 — Clear calibration (`清除标定设定`, `on_calib_clear`):
+  - Clears active `self.calib` / `self.result` and removes `config/camera_calib.json` (preserving backup files in
+    `~/Downloads/cameracalib`) so a moved camera can be re-calibrated from scratch.
+- Tests: `test_v3_48.py` (R1-R6), `test_v3_48_gui.py` (K1-K4).
+
+
+## V3.47.2
+- Camera调试 tables (`self.tv_eggs`, `self.tv`): shared `treeview_style()` sets `rowheight = font linespace + 8` on both
+  tables; `autofit_treeview()` measures heading and cell text widths (`tk.call("font", "measure", ...)`) after every
+  table update, keeps numeric columns non-stretching, stretches only the description / joint column, and adds vertical +
+  horizontal scrollbars to `tv_eggs`.
+- Canvas overlay: in YOLO modes `self.eggs` draws only a small 3D-centre cross (no duplicate circle + `egg_k` text;
+  geometric V3.08 keeps its circle + label); YOLO box labels are shortened to `e1`, `e2` / `✗` and placed by
+  `place_yolo_labels()` (moves to bottom / right / left when top-left would clip or overlap an adjacent label / box).
+- 3D speed + device log: `fuse_depth(depths, dets2d)` fuses only merged padded ROIs (`roi_boxes`) around detected
+  candidates, and `local_plane` / mask morphology operate on cropped patches with identical results; `YoloEDetector`
+  reports `GPU` vs `CPU` (`device_name()`) in load and locate logs / status text.
+- Tests: `test_v3_47_2.py` (Q1-Q6), `test_v3_47_2_gui.py` (J1-J4).
+
 
 ## V3.47.1
 - 视觉定位: egg pose from the YOLO silhouette + local table plane (robust plane fit in a 3-6 cm band, other masks /

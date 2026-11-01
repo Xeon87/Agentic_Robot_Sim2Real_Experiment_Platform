@@ -24,7 +24,15 @@ import sys
 import threading
 import time
 
-VERSION = "V3.47.1"
+VERSION = "V3.58"
+# V3.51 WORKFLOW STATUS LAMP BAR ABOVE LOG
+# V3.52 TEACH MODE BUTTONS LEFT OF COPY LOG
+# V3.53 TEACH EXIT & PARK FIX + ALIGNED TEACH BUTTONS + DEFAULT 1280x720 DEPTH
+# V3.54 FIRMWARE V1.2.1 (v121 DEFAULT) + FOLLOWER MODE TEACH EXIT + STEP 3 PUSH RECOVERY
+# V3.55 FAST MAIN CAMERA HAND-EYE CALIB + UNIFIED PNP/DEPTH SOURCE + LOO OUTLIER REJECTION
+# V3.56 FAST WRIST EYE-IN-HAND CALIB + LOOK-AT DOME PLANNER + FULL-RES ROI ARUCO + SCALE/LEVER-ARM SOLVER
+# V3.57 AUTO TABLETOP CHARUCO INTRINSICS + CHARUCO EIH + 2D FOCAL/SCALE SELF-CALIB
+# V3.58 KINEMATIC-ANCHORED WIDE-ANGLE INTRINSICS + FULL-QUADRANT TILT + ROBUST CHARUCO EIH
 HERE = os.path.dirname(os.path.realpath(__file__))
 SIM_SCRIPT = os.environ.get("NERO_V312_SIM_SCRIPT", os.path.join(HERE, "start_nero_sim.sh"))
 
@@ -452,7 +460,7 @@ def run_console(initial_tab="sim"):
     btn_params.configure(command=toggle_params)
     v_port = tk.StringVar(value=RR.CAN_PORT_DEFAULT)
     v_eff = tk.StringVar(value="none")
-    v_fw = tk.StringVar(value="v111")
+    v_fw = tk.StringVar(value=RR.DEFAULT_FW_VERSION)
     v_speed = tk.IntVar(value=10)
     v_unlock = tk.BooleanVar(value=False)
     v_gate = tk.BooleanVar(value=False)
@@ -468,7 +476,7 @@ def run_console(initial_tab="sim"):
     cb_eff = ttk.Combobox(r0, textvariable=v_eff, values=["none", "agx_gripper"], width=11, state="readonly")
     cb_eff.pack(side="left", padx=(2, 10))
     ttk.Label(r0, text="fw_version").pack(side="left")
-    ttk.Combobox(r0, textvariable=v_fw, values=["v111", ""], width=6, state="readonly").pack(side="left", padx=(2, 10))
+    ttk.Combobox(r0, textvariable=v_fw, values=["v121", "v120", "v112", "v111", "default", ""], width=7, state="readonly").pack(side="left", padx=(2, 10))
     ttk.Label(r0, text="ROS_DOMAIN_ID").pack(side="left")
     ttk.Entry(r0, textvariable=v_domain, width=4).pack(side="left", padx=(2, 10))
     r1 = ttk.Frame(pf)
@@ -497,7 +505,7 @@ def run_console(initial_tab="sim"):
         except Exception:
             dom = int(RR.DEFAULT_DOMAIN_ID)
         return {"can_port": v_port.get().strip() or "can0", "effector_type": v_eff.get(), "fw_version": v_fw.get(),
-                "push_fw": v_fw.get() or "v111", "speed_percent": int(v_speed.get()), "speed_unlocked": bool(v_unlock.get()),
+                "push_fw": v_fw.get() or RR.DEFAULT_FW_VERSION, "speed_percent": int(v_speed.get()), "speed_unlocked": bool(v_unlock.get()),
                 "auto_control_gate": bool(v_gate.get()), "follow": bool(v_follow.get()), "use_rviz": bool(v_rviz.get()),
                 "domain_id": dom}
 
@@ -542,17 +550,26 @@ def run_console(initial_tab="sim"):
             if suffix == "park":                           # V3.24: park pose D before 去使能 / power off
                 jpanel.go_park()
                 return
-            if suffix == "exit_teach_mode":                # V3.19: service + pyAgxArm normal mode + enable
-                if not messagebox.askyesno("退出示教模式", "NERO 切回正常控制（先保持当前位置），然后以 10% 速度经 MoveIt "
-                                                       "回零位。\n请扶稳机械臂、手在急停上。继续？"):
+            if suffix == "exit_teach_mode":                # V3.19/V3.53: service + pyAgxArm normal mode + enable (hold current pose)
+                if not messagebox.askyesno("退出示教模式", "NERO 将退出示教模式并切回正常控制（直接保持并锁在当前姿态，不强制回零位；如需回零可点旁边「回 Home⚠」）。\n请扶稳机械臂、手在急停上。继续？"):
                     return
                 if safe_tab.mode == "teach":
+                    safe_tab._teach_exiting = True
                     safe_tab.v_mode.set("edit")
                     safe_tab.on_mode()
+                    safe_tab._teach_exiting = False
+                try:
+                    cam_tab.stop_flag = True
+                except Exception:
+                    pass
                 start_job("退出示教模式", lambda: pipe.set_teach_mode(False, home_model=getattr(jpanel, "model", None),
-                                                                 home_fn=safe_tab.exit_home))
+                                                                 home_fn=safe_tab.exit_home, return_home=False), force=True)
                 return
             if warn and not messagebox.askyesno(t_, warn):
+                return
+            if suffix == "enable_agx_arm" and val is True and (pipe.teach_mode or pipe.leader_active() or not pipe.monitor.running()):
+                start_job("使能（退出示教）", lambda: pipe.set_teach_mode(False, home_model=getattr(jpanel, "model", None),
+                                                                      home_fn=safe_tab.exit_home, return_home=False), force=True)
                 return
             pipe.call_service(suffix, val)
         b_ = ttk.Button(ob, text=t_, command=_op)
@@ -567,9 +584,12 @@ def run_console(initial_tab="sim"):
     real_nb.add(jp_holder, text="关节控制")
     real_nb.add(cons_holder, text="一致性测试")
     real_nb.add(safe_holder, text="工作区安全")
+    real_wf_bar = ttk.Frame(real_tab)
+    real_wf_bar.pack(fill="x", pady=(4, 0))
     real_log = make_log(real_tab)
     real_log.configure(height=12)
     ttk.Button(ob, text="Copy Log", command=lambda: copy_text(real_log)).pack(side="right")
+    ttk.Button(real_wf_bar, text="Copy Log", command=lambda: copy_text(real_log)).pack(side="right")
 
     # ---- controller
     ask_q = queue.Queue()      # V3.14: worker threads never touch Tk; real_poll (main thread) shows the dialogs
@@ -631,9 +651,11 @@ def run_console(initial_tab="sim"):
         cam_q.put(line)
     cam_tab = CAM.CameraTabUI(tk, ttk, cam_main, pipe, jpanel, safe_tab, real_cfg, log=cam_log_line,
                               ask=confirm_from_worker, visible_fn=lambda: nb.select() == str(cam_outer))
+    cam_tab.attach_workflow_bar(real_wf_bar)
+    cam_tab.attach_workflow_bar(cam_bar)
 
-    def start_job(name, fn):
-        if real_job["t"] is not None and real_job["t"].is_alive():
+    def start_job(name, fn, force=False):
+        if not force and real_job["t"] is not None and real_job["t"].is_alive():
             log_append(real_log, f"[WARN] busy: {real_job['name']} still running")
             return
         if runner.running():
@@ -727,6 +749,7 @@ def run_console(initial_tab="sim"):
                 if ui_flags.get(key_) != str(exc):
                     ui_flags[key_] = str(exc)
                     log_append(real_log, f"[FAIL] [V3.15] {name_} refresh: {exc}")
+        cam_tab.update_workflow_lamps()
         update_mode()
         root.after(200, real_poll)
 

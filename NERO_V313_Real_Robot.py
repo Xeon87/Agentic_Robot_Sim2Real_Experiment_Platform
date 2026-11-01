@@ -30,7 +30,10 @@ import sys
 import threading
 import time
 
-VERSION = "V3.47.1"
+VERSION = "V3.58"
+# V3.54 FIRMWARE V1.2.1 (NeroFW.V121) + FOLLOWER MODE TEACH EXIT + STEP 3 PUSH RECOVERY
+DEFAULT_FW_VERSION = "v121"
+SUPPORTED_FW_VERSIONS = ("v121", "v120", "v112", "v111", "default")
 HERE = os.path.dirname(os.path.realpath(__file__))
 
 ROS_DISTRO = os.environ.get("ROS_DISTRO") or "humble"
@@ -382,10 +385,41 @@ def launch_args(cfg):
             f"auto_control_gate:={'true' if cfg.get('auto_control_gate', False) else 'false'}",
             "fast_mode:=false", f"speed_percent:={speed}",
             f"use_rviz:={'true' if cfg.get('use_rviz', True) else 'false'}"]
-    fw = str(cfg.get("fw_version", "v111") or "").strip()
+    fw = str(cfg.get("fw_version", DEFAULT_FW_VERSION) if "fw_version" not in cfg else (cfg.get("fw_version") or "")).strip()
     if fw:
-        args.append(f"fw_version:={fw}")
+        args.append(f"fw_version:={resolve_ros_driver_fw(fw)}")
     return args
+
+
+def resolve_ros_driver_fw(fw):
+    """V3.54: if AGX_ARM_WS exists on the real robot PC and agx_arm_ctrl only knows older fw strings (e.g. v120/v112/v111),
+    map fw_version for ros2 launch automatically; otherwise pass fw as-is (default 'v121')."""
+    fw_s = str(fw or "").strip()
+    if not fw_s or not os.path.isdir(AGX_ARM_WS):
+        return fw_s
+    low = fw_s.lower()
+    if low not in ("v121", "v120", "v112"):
+        return fw_s
+    ctrl_dir = os.path.join(AGX_ARM_WS, "install", "agx_arm_ctrl")
+    if not os.path.isdir(ctrl_dir):
+        return fw_s
+    try:
+        found = set()
+        for root, _dirs, files in os.walk(ctrl_dir):
+            for fn in files:
+                if fn.endswith((".py", ".yaml", ".xml")):
+                    txt = Path(os.path.join(root, fn)).read_text(encoding="utf-8", errors="ignore").lower()
+                    for cand in ("v121", "v120", "v112", "v111"):
+                        if cand in txt:
+                            found.add(cand)
+        if not found or low in found:
+            return fw_s
+        for cand in ("v121", "v120", "v112", "v111"):
+            if cand <= low and cand in found:
+                return cand
+    except Exception:
+        pass
+    return fw_s
 
 
 def launch_command(cfg):
@@ -517,7 +551,7 @@ class ProcRunner:
     def _escalate(self, proc, grace_s):
         t_end = time.time() + grace_s
         while time.time() < t_end:
-            if proc.poll() is not None:
+            if proc is None or proc.poll() is not None:
                 return
             time.sleep(0.2)
         self.lines.put(f"[V3.13] {self.tag} still alive after {grace_s:.0f}s -> SIGKILL")
@@ -560,9 +594,29 @@ def _emit(**kw):
     print(json.dumps(kw, ensure_ascii=False), flush=True)
 
 
+def _resolve_nero_fw(NeroFW, fw):
+    """V3.54: resolve firmware selector ('v121', 'v120', 'v112', 'v111', 'default', '1.2.1') to (fw_attr, fw_const).
+    If the installed pyAgxArm is slightly older and lacks NeroFW.V121/V120, falls back down ('V121'->'V120'->'V112'->'V111'->'DEFAULT')
+    while preserving fw_attr >= 'V112' semantics for mode switching."""
+    raw = str(fw if fw is not None else DEFAULT_FW_VERSION).strip().upper().replace(".", "")
+    if raw in ("", "AUTO"):
+        raw = "V121"
+    if raw and raw[0].isdigit():
+        raw = "V" + raw
+    if hasattr(NeroFW, raw):
+        return raw, getattr(NeroFW, raw)
+    if raw in ("V121", "V120", "V112"):
+        for cand in ("V121", "V120", "V112", "V111", "DEFAULT"):
+            if cand <= raw and hasattr(NeroFW, cand):
+                return raw, getattr(NeroFW, cand)
+    return raw, None
+
+
 def cmd_push(channel="can0", fw="v111", timeout_s=15.0, period_s=0.5, max_reports=0):
-    """The user's nero_start.py: connect, set_normal_mode() until enable() succeeds, then report joints/status
-    every period_s until SIGINT/SIGTERM (max_reports > 0 only for tests)."""
+    """The user's nero_start.py (V3.54 upgraded for firmware V1.2.1 / NeroFW.V121):
+    connect, exit teach/leader mode via set_follower_mode() + set_normal_mode() if needed, hold current pose at 10% speed,
+    enable() (and re-confirm set_follower_mode() once enabled since V1.2.1 ignores mode switches while disabled),
+    then report joints/status every period_s until SIGINT/SIGTERM (max_reports > 0 only for tests)."""
     stop = threading.Event()
     for s in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -574,12 +628,12 @@ def cmd_push(channel="can0", fw="v111", timeout_s=15.0, period_s=0.5, max_report
     except Exception as exc:
         _emit(event="error", stage="import", error=f"pyAgxArm import failed: {exc}")
         return 1
-    fw_attr = str(fw or "v111").upper()
-    if not hasattr(NeroFW, fw_attr):
+    fw_attr, fw_const = _resolve_nero_fw(NeroFW, fw)
+    if fw_const is None:
         _emit(event="error", stage="config", error=f"NeroFW has no {fw_attr}")
         return 1
     try:
-        cfg = create_agx_arm_config(robot=ArmModel.NERO, firmeware_version=getattr(NeroFW, fw_attr),
+        cfg = create_agx_arm_config(robot=ArmModel.NERO, firmeware_version=fw_const,
                                     interface="socketcan", channel=channel)
         robot = AgxArmFactory.create_arm(cfg)
         _emit(event="connecting", channel=channel, fw=fw_attr)
@@ -588,6 +642,34 @@ def cmd_push(channel="can0", fw="v111", timeout_s=15.0, period_s=0.5, max_report
     except Exception as exc:
         _emit(event="error", stage="connect", error=str(exc)[:300])
         return 1
+    has_follower = callable(getattr(robot, "set_follower_mode", None))
+    hold_q = None
+    if has_follower:
+        try:
+            # V3.54: if the arm was left in teach (leader) mode, pull it back to follower mode first
+            time.sleep(0.25)
+            for gfn in ("get_leader_joint_angles", "get_joint_angles"):
+                gf = getattr(robot, gfn, None)
+                if callable(gf):
+                    hold_q = _angles7(gf())
+                    if hold_q:
+                        break
+            robot.set_follower_mode()
+            if fw_attr < "V112" and callable(getattr(robot, "set_normal_mode", None)):
+                robot.set_normal_mode()
+            time.sleep(0.25)
+            if not hold_q:
+                for gfn in ("get_joint_angles", "get_leader_joint_angles"):
+                    gf = getattr(robot, gfn, None)
+                    if callable(gf):
+                        hold_q = _angles7(gf())
+                        if hold_q:
+                            break
+            _call_first(robot, SPEED_APIS, 10)
+            if hold_q:
+                _call_first(robot, MOVEJ_APIS, list(hold_q))
+        except Exception as exc:
+            _emit(event="warn", error=str(exc)[:200])
     t_end = time.time() + float(timeout_s)
     attempts = 0
     enabled = False
@@ -595,16 +677,37 @@ def cmd_push(channel="can0", fw="v111", timeout_s=15.0, period_s=0.5, max_report
         attempts += 1
         try:
             if robot.enable():
+                if has_follower:
+                    # V3.54: on firmware >= 1.12 / 1.2.1, controller only applies mode switches once enabled;
+                    # send set_follower_mode() again after enable() and lock current pose at 10% speed.
+                    robot.set_follower_mode()
+                    if fw_attr < "V112" and callable(getattr(robot, "set_normal_mode", None)):
+                        robot.set_normal_mode()
+                    time.sleep(0.2)
+                    _call_first(robot, SPEED_APIS, 10)
+                    if not hold_q:
+                        for gfn in ("get_joint_angles", "get_leader_joint_angles"):
+                            gf = getattr(robot, gfn, None)
+                            if callable(gf):
+                                hold_q = _angles7(gf())
+                                if hold_q:
+                                    break
+                    if hold_q:
+                        _call_first(robot, MOVEJ_APIS, list(hold_q))
+                    robot.enable()
                 enabled = True
                 break
-            robot.set_normal_mode()
+            if has_follower:
+                robot.set_follower_mode()
+            if callable(getattr(robot, "set_normal_mode", None)):
+                robot.set_normal_mode()
         except Exception as exc:
             _emit(event="warn", error=str(exc)[:200])
-        time.sleep(0.01)
+        time.sleep(0.15 if has_follower else 0.01)
     if not enabled:
         _emit(event="timeout" if not stop.is_set() else "stopped", attempts=attempts)
         return 2 if not stop.is_set() else 0
-    _emit(event="enabled", attempts=attempts)
+    _emit(event="enabled", attempts=attempts, fw=fw_attr)
     n = 0
     while not stop.is_set():
         try:
@@ -680,7 +783,7 @@ def _leader_stamp(robot):
     if not a:
         return None, None
     ts = None
-    for attr in ("timestamp", "_timestamp"):
+    for attr in ("timestamp", "_timestamp", "time_stamp", "hz"):
         try:
             ts = v[attr] if isinstance(v, dict) else getattr(v, attr)
         except Exception:
@@ -710,19 +813,26 @@ MOVEJ_APIS = ("move_j", "move_joint", "joint_ctrl", "set_joint_angles")
 
 
 def cmd_mode(channel="can0", fw="v111", mode="teach", enable_timeout_s=6.0, verify_s=3.0, hold=None, speed_pct=10):
-    """V3.19 TEACH MODE (V3.20: correct API + verification). The ROS driver offers no way to enter hand guiding.
+    """V3.19 TEACH MODE (V3.20/V3.54: upgraded for firmware V1.2.1 / NeroFW.V121).
     teach  -> set_leader_mode() (pyAgxArm nero_api: leader = linkage teaching input, moved by hand); older
-              pyAgxArm: set_master_mode(). Verified: ctrl_mode must become 0x06 / 0x02.
-    normal -> set_normal_mode() (fw <= 1.11) or set_follower_mode() (fw >= 1.12), then enable().
+              pyAgxArm: set_master_mode(). Verified: ctrl_mode becomes 0x06 / 0x02 or leader angles stream
+              (0x155-0x157+0x170 on >=1.12 / 1.2.1, 0x501-0x507 on <=1.11).
+    normal -> calls BOTH set_follower_mode() and set_normal_mode() (since set_normal_mode is a no-op on >=1.12 / 1.2.1
+              and set_follower_mode is the paired exit for set_leader_mode on all firmwares), sets 10% speed + holds
+              current pose, calls enable(), and re-sends set_follower_mode() + enable() once enabled (because on NERO
+              controllers mode-switch commands only take effect when enabled).
     AgileX: wait ~1 s before and after a mode switch. Prints a 'diag' line (available mode APIs, ctrl_mode)."""
     try:
         from pyAgxArm import create_agx_arm_config, AgxArmFactory, ArmModel, NeroFW
     except Exception as exc:
         _emit(event="mode_result", ok=False, mode=mode, error=f"pyAgxArm import failed: {exc}")
         return 1
-    fw_attr = str(fw or "v111").upper()
+    fw_attr, fw_const = _resolve_nero_fw(NeroFW, fw)
+    if fw_const is None:
+        _emit(event="mode_result", ok=False, mode=mode, error=f"NeroFW has no {fw_attr}")
+        return 1
     try:
-        cfg = create_agx_arm_config(robot=ArmModel.NERO, firmeware_version=getattr(NeroFW, fw_attr),
+        cfg = create_agx_arm_config(robot=ArmModel.NERO, firmeware_version=fw_const,
                                     interface="socketcan", channel=channel)
         robot = AgxArmFactory.create_arm(cfg)
         robot.connect()
@@ -746,30 +856,61 @@ def cmd_mode(channel="can0", fw="v111", mode="teach", enable_timeout_s=6.0, veri
             ts0, a0 = _leader_stamp(robot)
             getattr(robot, fn_name)()
             time.sleep(1.0)
-            # V3.22: on NERO V111 ctrl_mode may keep reporting 0x01 although the arm is limp and streams leader
-            # angles (CAN 0x501-0x507) -> leader angles that start / keep updating also count as "entered".
+            # V3.22/V3.54: on NERO ctrl_mode may keep reporting 0x01 although the arm is limp and streams leader
+            # angles (V121/V112: CAN 0x155-0x157+0x170; V111: CAN 0x501-0x507) -> leader angles that start / keep
+            # updating also count as "entered".
             cm, evidence, t_end = None, None, time.time() + float(verify_s)
+            resent = False
             while time.time() < t_end:
                 cm = ctrl_mode_of(status())
                 if is_teach_ctrl_mode(cm):
                     evidence = f"ctrl_mode=0x{cm:02X}"
                     break
                 ts, a = _leader_stamp(robot)
-                if a is not None and (a0 is None or (ts is not None and ts != ts0)):
+                if a is not None and (a0 is None or (ts is not None and ts != ts0) or
+                                      (len(a) == len(a0) and max(abs(x - y) for x, y in zip(a, a0)) > 1e-5)):
                     evidence = "主导臂角度在更新（get_leader_joint_angles）"
                     break
+                if not resent and t_end - time.time() < float(verify_s) * 0.5:
+                    resent = True
+                    try:
+                        getattr(robot, fn_name)()
+                    except Exception:
+                        pass
                 time.sleep(0.1)
             ok = evidence is not None
             _emit(event="mode_result", ok=ok, mode=mode, api=fn_name, ctrl_mode=cm, ctrl_mode_before=cm0,
-                  evidence=evidence, status=_jsonable(status()),
+                  evidence=evidence, status=_jsonable(status()), fw=fw_attr,
                   error=None if ok else f"{fn_name}() 已发送，但 ctrl_mode = {cm} 且没有主导臂角度")
             return 0 if ok else 2
-        fn_name = next((n for n in (("set_follower_mode", "set_normal_mode") if fw_attr >= "V112"
-                                    else ("set_normal_mode", "set_follower_mode"))
-                        if callable(getattr(robot, n, None))), None)
-        if fn_name:
-            getattr(robot, fn_name)()
+        # V3.53/V3.54: if hold was not supplied by caller, read current pose from leader/joint angles on CAN before switching mode
+        if not hold:
+            for gfn in ("get_leader_joint_angles", "get_joint_angles"):
+                gf = getattr(robot, gfn, None)
+                if callable(gf):
+                    try:
+                        hold = _angles7(gf())
+                        if hold:
+                            break
+                    except Exception:
+                        pass
+        order = ("set_follower_mode", "set_normal_mode") if fw_attr >= "V112" else ("set_normal_mode", "set_follower_mode")
+        exit_fns = [n for n in order if callable(getattr(robot, n, None))]
+        fn_name = exit_fns[0] if exit_fns else None
+        for fn in exit_fns:
+            getattr(robot, fn)()
+        if exit_fns:
             time.sleep(1.0)
+        if not hold:
+            for gfn in ("get_joint_angles", "get_leader_joint_angles"):
+                gf = getattr(robot, gfn, None)
+                if callable(gf):
+                    try:
+                        hold = _angles7(gf())
+                        if hold:
+                            break
+                    except Exception:
+                        pass
         # V3.22 SLOW EXIT: low speed + hold the current pose BEFORE the motors are enabled again, so the firmware
         # does not jump back to its last target (the zero pose) at full speed.
         sp_api = _call_first(robot, SPEED_APIS, int(speed_pct))
@@ -779,20 +920,28 @@ def cmd_mode(channel="can0", fw="v111", mode="teach", enable_timeout_s=6.0, veri
             if robot.enable():
                 enabled = True
                 break
-            if fn_name:
-                getattr(robot, fn_name)()
-            time.sleep(0.05)
+            for fn in exit_fns:
+                getattr(robot, fn)()
+            time.sleep(0.15 if fw_attr >= "V112" else 0.05)
         if enabled:
+            # V3.54: on NERO controllers (nero_api.md), mode-switch commands (set_follower_mode) are ignored while the
+            # arm is disabled; re-send set_follower_mode() once enabled, lock current pose at low speed, and re-verify enable().
+            if callable(getattr(robot, "set_follower_mode", None)):
+                robot.set_follower_mode()
+            if fw_attr < "V112" and callable(getattr(robot, "set_normal_mode", None)) and is_teach_ctrl_mode(ctrl_mode_of(status())):
+                robot.set_normal_mode()
             _call_first(robot, SPEED_APIS, int(speed_pct))
             if hold:
                 for _k in range(5):
                     mj_api = _call_first(robot, MOVEJ_APIS, list(hold)) or mj_api
                     time.sleep(0.1)
-        _emit(event="diag", hold=hold, speed_api=sp_api, movej_api=mj_api, speed_pct=speed_pct)
+            if callable(getattr(robot, "set_follower_mode", None)):
+                robot.enable()
+        _emit(event="diag", hold=hold, speed_api=sp_api, movej_api=mj_api, speed_pct=speed_pct, exit_apis=exit_fns, fw=fw_attr)
         cm = ctrl_mode_of(status())
         ok = bool(enabled) and not is_teach_ctrl_mode(cm)
-        _emit(event="mode_result", ok=ok, mode=mode, api=fn_name, enabled=enabled, ctrl_mode=cm, ctrl_mode_before=cm0,
-              status=_jsonable(status()), speed_api=sp_api, movej_api=mj_api,
+        _emit(event="mode_result", ok=ok, mode=mode, api=fn_name, exit_apis=exit_fns, enabled=enabled, ctrl_mode=cm,
+              ctrl_mode_before=cm0, fw=fw_attr, status=_jsonable(status()), speed_api=sp_api, movej_api=mj_api,
               error=None if ok else (f"ctrl_mode 仍是 {cm}（示教）" if enabled else "enable() 没有成功"))
         return 0 if ok else 2
     except Exception as exc:
@@ -834,7 +983,10 @@ def cmd_leader(channel="can0", fw="v111", period_s=0.05, max_reports=0):
             pass
     try:
         from pyAgxArm import create_agx_arm_config, AgxArmFactory, ArmModel, NeroFW
-        cfg = create_agx_arm_config(robot=ArmModel.NERO, firmeware_version=getattr(NeroFW, str(fw or "v111").upper()),
+        _fw_attr, fw_const = _resolve_nero_fw(NeroFW, fw)
+        if fw_const is None:
+            raise RuntimeError(f"NeroFW has no {_fw_attr}")
+        cfg = create_agx_arm_config(robot=ArmModel.NERO, firmeware_version=fw_const,
                                     interface="socketcan", channel=channel)
         robot = AgxArmFactory.create_arm(cfg)
         robot.connect()
@@ -1171,6 +1323,9 @@ def cmd_monitor(period_s=1.0):
                             return
                         viol = CS.path_fence_check(urdf, mv.get("arm_joints") or mv["joints"], names, pts,
                                                    mv.get("base") or "base_link", fence, mv.get("tool_T"))
+                        if viol and mv.get("ignore_xy_fence"):
+                            z_v = [v_ for v_ in (viol.get("violations") or []) if v_.get("axis") == "z"]
+                            viol = dict(viol, violations=z_v) if z_v else None
                     except Exception as exc:
                         finish(ok=False, error=f"FENCE: check failed ({exc}) -> not executed"[:300], **info)
                         return
@@ -1676,7 +1831,14 @@ class RealPipeline:
         if line is None:
             self.mon_status = None
             return
+        if not line.strip():
+            return
         ev = self._json(line)
+        if not ev and "}{" in line:
+            for sub in line.replace("}{", "}\n{").splitlines():
+                if self._json(sub):
+                    self._on_monitor(sub)
+            return
         if not ev:
             self.log(f"[ros_monitor] {line}")
             return
@@ -1780,13 +1942,18 @@ class RealPipeline:
             self.set("push", GREY, "cancelled by user")
             return GREY
         cfg = self.cfg_fn()
+        if self.leader.running():
+            self.leader.stop(signal.SIGINT, 2.0)
+            self.wait_until(lambda: not self.leader.running(), 2.0, 0.05)
+        fw_use = cfg.get("push_fw") or cfg.get("fw_version") or DEFAULT_FW_VERSION
         self.push_info = {"enabled": False, "last": None, "error": None, "joints": None}
         self.push.start(helper_argv("push", "--channel", cfg.get("can_port", "can0"),
-                                    "--fw", cfg.get("push_fw", "v111") or "v111", "--timeout", "15"))
-        self.set("push", YELLOW, "connecting + set_normal_mode() until enable() ...")
+                                    "--fw", fw_use, "--timeout", "15"))
+        self.set("push", YELLOW, f"connecting ({fw_use}) + set_follower_mode() + enable() ...")
         ok = self.wait_until(lambda: self.push_info.get("enabled") or self.push_info.get("error")
                              or not self.push.running(), 25.0)
         if self.push_info.get("enabled"):
+            self.teach_mode = False
             self.wait_until(lambda: self.push_info.get("joints") is not None, 3.0)
             self.set("push", GREEN, f"enabled; joints={self.push_info.get('joints')}")
             return GREEN
@@ -1830,7 +1997,7 @@ class RealPipeline:
                 keep_push = True
                 self.push_info = {"enabled": False, "last": None, "error": None, "joints": None}
                 self.push.start(helper_argv("push", "--channel", cfg.get("can_port", "can0"),
-                                            "--fw", cfg.get("push_fw", "v111") or "v111", "--timeout", "15"))
+                                            "--fw", cfg.get("push_fw") or cfg.get("fw_version") or DEFAULT_FW_VERSION, "--timeout", "15"))
                 if not self.wait_until(lambda: self.push_info.get("enabled") or not self.push.running(), 20.0) \
                         or not self.push_info.get("enabled"):
                     self.set("driver", RED, "push helper could not re-enable before the driver start")
@@ -1949,21 +2116,43 @@ class RealPipeline:
         js_silent = self.last_js_t is None or now - self.last_js_t > self.FRESH_S
         return (ljs or pl) and js_silent
 
-    def _hand_pose_rad(self):
-        """current hand-guided pose (rad, joint1..7) from the leader sources, else joint_states."""
+    def _hand_pose_rad(self, max_age_s=2.0):
+        """current hand-guided pose (rad, joint1..7) from the leader sources, else joint_states.
+        V3.53: when exiting teach mode after a dialog pause (>2s), falls back to the newest cached 7-joint reading."""
         _n, js, t = self.feedback_source()
         pos = (js or {}).get("position") or []
-        if t is None or time.time() - t > 2.0 or len(pos) < 7:
-            return None
+        if t is None or time.time() - t > max_age_s or len(pos) < 7:
+            if max_age_s <= 2.0:
+                return None
+            # Fallback across all known sources (newest timestamp wins)
+            cands = []
+            for js_c, t_c in (
+                (self.last_ljs, self.last_ljs_t),
+                ({"names": None, "position": self.last_pleader} if self.last_pleader else None, self.last_pleader_t),
+                ({"names": None, "position": self.last_pjoints} if self.last_pjoints else None, self.last_pjoints_t),
+                (self.last_js, self.last_js_t),
+            ):
+                p_c = (js_c or {}).get("position") or []
+                if t_c is not None and time.time() - t_c <= max_age_s and len(p_c) >= 7:
+                    cands.append((t_c, js_c, p_c))
+            if not cands:
+                return None
+            cands.sort(key=lambda x: x[0], reverse=True)
+            _t, js, pos = cands[0]
         names = list((js or {}).get("names") or [])
         want = [f"joint{i}" for i in range(1, 8)]
         if all(n in names for n in want):
             return [float(pos[names.index(n)]) for n in want]
         return [float(v) for v in pos[:7]]
 
+    def _fw_cfg(self):
+        cfg = self.cfg_fn()
+        return cfg.get("push_fw") or cfg.get("fw_version") or DEFAULT_FW_VERSION
+
     def _run_mode_helper(self, on, timeout_s, hold=None):
         cfg = self.cfg_fn()
-        argv = helper_argv("mode", "--channel", cfg.get("can_port", "can0"), "--fw", cfg.get("push_fw", "v111") or "v111",
+        fw_use = self._fw_cfg()
+        argv = helper_argv("mode", "--channel", cfg.get("can_port", "can0"), "--fw", fw_use,
                            "--mode", "teach" if on else "normal", "--speed", str(int(round(self.EXIT_SPEED * 100))))
         if hold:
             argv += ["--hold", json.dumps([round(v, 5) for v in hold])]
@@ -1983,10 +2172,10 @@ class RealPipeline:
                                           f"{(getattr(p, 'stderr', '') or '')[-300:]}"}
         for d in diags:
             if d.get("apis") is not None:
-                self.log(f"[INFO] [V3.20 teach] pyAgxArm 模式接口: {', '.join(d.get('apis') or [])} | "
+                self.log(f"[INFO] [V3.20 teach] pyAgxArm 模式接口 ({d.get('fw') or fw_use}): {', '.join(d.get('apis') or [])} | "
                          f"切换前 ctrl_mode={d.get('ctrl_mode_before')}")
             if "hold" in d:
-                self.log(f"[INFO] [V3.22 teach] 重新使能前：速度接口={d.get('speed_api') or '无'}（{d.get('speed_pct')}%）"
+                self.log(f"[INFO] [V3.22 teach] 重新使能前：退出接口={d.get('exit_apis') or '-'} · 速度接口={d.get('speed_api') or '无'}（{d.get('speed_pct')}%）"
                          f" · 保持当前位姿接口={d.get('movej_api') or '无'}")
         return ev
 
@@ -2004,48 +2193,66 @@ class RealPipeline:
                  f"{(r or {}).get('topic') or ''} {(r or {}).get('error') or ('' if r else 'no result')}")
         return r
 
-    def set_teach_mode(self, on, timeout_s=30.0, home_model=None, home_fn=None):
-        """V3.20: on = close the driver's control gate, pyAgxArm set_leader_mode (hand guiding), verify;
-        off = exit_teach_mode service (if offered), set_normal_mode / set_follower_mode + enable, reopen the gate.
-        V3.22: entry is also confirmed by leader angles that start streaming (ctrl_mode may stay 0x01 on V111);
-        exit holds the current pose (driver gate closed, ROS controller synced, firmware target = current pose,
-        speed 10 %) and then — with home_model — returns to the zero pose via MoveIt at 10 %.
-        Blocking (worker thread). -> result dict"""
+    def set_teach_mode(self, on, timeout_s=30.0, home_model=None, home_fn=None, return_home=True):
+        """V3.20/V3.54: on = close the driver's control gate, pyAgxArm set_leader_mode (hand guiding), verify;
+        off = exit_teach_mode service (if offered), set_follower_mode + set_normal_mode + enable, reopen the gate.
+        V3.22/V3.54: entry is also confirmed by leader angles that start streaming (0x155-0x157+0x170 on V1.2.1,
+        0x501-0x507 on V1.11) or joint_states pausing after set_leader_mode; exit holds the current pose and optionally returns home."""
         if on:
+            if self.push.running():
+                self.push.stop(signal.SIGINT, 2.0)
+                self.wait_until(lambda: not self.push.running(), 2.0, 0.05)
             self._gate(False)
             t0 = time.time()
-            ev = self._run_mode_helper(True, timeout_s)
+            js_was_fresh = self.last_js_t is not None and (t0 - self.last_js_t) <= 2.0
+            ev = self._run_mode_helper(True, min(float(timeout_s), 10.0))
+            cfg = self.cfg_fn()
+            fw_use = self._fw_cfg()
+            if not ev.get("ok") and (self.driver.running() or js_was_fresh):
+                if not self.leader.running():
+                    try:
+                        self.leader.start(helper_argv("leader", "--channel", cfg.get("can_port", "can0"),
+                                                      "--fw", fw_use))
+                    except Exception:
+                        pass
             if not ev.get("ok"):
-                # V3.22: the ROS leader topic / silent joint_states are evidence too
-                ok2 = self.wait_until(lambda: self.last_ljs_t is not None and self.last_ljs_t > t0 and self.leader_active(),
-                                      2.5, 0.1)
-                if ok2:
-                    ev = dict(ev, ok=True, evidence="/feedback/leader_joint_states 在更新且 /feedback/joint_states 停发",
-                              error=None)
+                # V3.22/V3.54: the ROS leader topic, pyAgxArm leader stream, or paused joint_states after set_leader_mode are evidence
+                def _entered():
+                    if self.last_ljs_t is not None and self.last_ljs_t > t0 and self.leader_active():
+                        return "/feedback/leader_joint_states 在更新且 /feedback/joint_states 停发"
+                    if self.last_pleader_t is not None and self.last_pleader_t > t0:
+                        return "pyAgxArm 主导臂角度在更新"
+                    if js_was_fresh and (self.last_js_t is None or time.time() - self.last_js_t > 0.8) and ev.get("api") == "set_leader_mode":
+                        return f"set_leader_mode 已发送且 /feedback/joint_states 停发（{fw_use} 零力示教已生效）"
+                    return None
+                why_ok = self.wait_until(_entered, 2.5, 0.1)
+                if why_ok:
+                    ev = dict(ev, ok=True, evidence=why_ok, error=None)
             if ev.get("ok"):
                 self.teach_mode = True
-                cfg = self.cfg_fn()
                 if not self.leader.running():
                     self.leader.start(helper_argv("leader", "--channel", cfg.get("can_port", "can0"),
-                                                  "--fw", cfg.get("push_fw", "v111") or "v111"))
+                                                  "--fw", fw_use))
             elif not self.leader_active():
+                if self.leader.running():
+                    self.leader.stop(signal.SIGINT, 1.0)
                 self._gate(True)                   # entering really failed: give control back to the driver
             cm = ev.get("ctrl_mode")
             self.log(f"{'[OK]' if ev.get('ok') else '[FAIL]'} [V3.22 teach] 进入示教模式（手动拖动）: api={ev.get('api')} "
                      f"ctrl_mode={cm if cm is None else hex(cm)} 依据={ev.get('evidence') or '-'} {ev.get('error') or ''}"[:500])
             return ev
         # ---------------- exit
-        q = self._hand_pose_rad()
+        q = self._hand_pose_rad(max_age_s=600.0)
         if q and home_model:
             lim = home_model.get("limits") or []
             for j, (lo, hi) in enumerate(lim[:7]):
                 c = min(max(q[j], lo + 0.01), hi - 0.01)
-                if abs(c - q[j]) > 1e-6 and abs(c - q[j]) <= 0.2:
+                if abs(c - q[j]) > 1e-6:
                     self.log(f"[INFO] [V3.22 teach] J{j + 1} {math.degrees(q[j]):+.1f}° 超出关节限位，"
                              f"保持点取 {math.degrees(c):+.1f}°（10% 速度微调）")
                     q[j] = c
         self.log(f"[INFO] [V3.22 teach] 退出示教：保持当前位姿 "
-                 f"{'[' + ', '.join(f'{math.degrees(v):+.1f}' for v in q) + ']°' if q else '（没有当前角度）'}")
+                 f"{'[' + ', '.join(f'{math.degrees(v):+.1f}' for v in q) + ']°' if q else '（由底层读取当前角度）'}")
         self._gate(False)                          # driver must not replay its stale (zero) command meanwhile
         self._sync_fake_controller(q)
         if self.service_name("exit_teach_mode"):
@@ -2055,16 +2262,26 @@ class RealPipeline:
                      f"{(r or {}).get('response') or (r or {}).get('error') or 'no result'}")
         if self.leader.running():
             self.leader.stop(signal.SIGINT, 3.0)
+            self.wait_until(lambda: not self.leader.running(), 2.0, 0.05)
         ev = self._run_mode_helper(False, timeout_s, hold=q)
+        if not ev.get("ok") and self.service_name("enable_agx_arm"):
+            cid_en = self.call_service("enable_agx_arm", True, timeout_s=6.0)
+            r_en = self.wait_call(cid_en, 7.0) if cid_en else None
+            if r_en and r_en.get("ok"):
+                ev = dict(ev, ok=True, enabled=True, error=None)
         if ev.get("ok"):
             self.teach_mode = False
-            self.wait_until(lambda: self.last_js_t is not None and time.time() - self.last_js_t < 0.5, 5.0, 0.1)
-            self._sync_fake_controller(self._hand_pose_rad() or q)
+            if self.monitor.running():
+                self.wait_until(lambda: self.last_js_t is not None and time.time() - self.last_js_t < 0.5, 5.0, 0.1)
+            self._sync_fake_controller(self._hand_pose_rad(max_age_s=10.0) or q)
+            self._gate(True)
+        else:
+            self.teach_mode = False
             self._gate(True)
         cm = ev.get("ctrl_mode")
         self.log(f"{'[OK]' if ev.get('ok') else '[FAIL]'} [V3.22 teach] 退出示教模式: "
                  f"api={ev.get('api')} ctrl_mode={cm if cm is None else hex(cm)} {ev.get('error') or ''}"[:500])
-        if ev.get("ok") and home_model:
+        if ev.get("ok") and home_model and return_home:
             time.sleep(1.0)
             a = self.actual_arm_deg(home_model)
             if a is not None and max(abs(x) for x in a) < 0.2:
@@ -2157,9 +2374,10 @@ class RealPipeline:
             self.log(f"[WARN] [V3.15 safety] safety settings unavailable: {exc}")
             return None
 
-    def fence_goal_check(self, model, target_rad):
-        """V3.15: target pose vs the software fence (FK with the driver URDF, else the sim URDF).
-        -> (ok, text, violations)"""
+    def fence_goal_check(self, model, target_rad, ignore_xy_fence=False):
+        """V3.15/V3.53: target pose vs the software fence (FK with the driver URDF, else the sim URDF).
+        When ignore_xy_fence=True (e.g. folding back over the base to Park Pose D), only z violations (table/ceiling)
+        are enforced. -> (ok, text, violations)"""
         sf = self.safety()
         if not sf or not sf.get("fence"):
             return True, "", []
@@ -2169,9 +2387,12 @@ class RealPipeline:
             return False, "FENCE: no URDF for the fence check -> refused", []
         ok, v, _pts = CS.fence_check(urdf, model["joints"], target_rad, model.get("base_link") or "base_link",
                                      sf["fence"], sf.get("tool_T"))
+        if not ok and ignore_xy_fence:
+            v = [v_ for v_ in v if v_.get("axis") == "z"]
+            ok = len(v) == 0
         return ok, ("" if ok else "FENCE: 目标姿态越界 -> 未发送: " + CS.violation_text(v, sf["fence"], sf.get("corners"))), v
 
-    def move_joints(self, model, target_rad, speed, label="move", timeout_s=None, plan_only=False):
+    def move_joints(self, model, target_rad, speed, label="move", timeout_s=None, plan_only=False, ignore_xy_fence=False):
         import NERO_V314_Joint_Control as JC
         if self.sim_active_fn():
             return {"ok": False, "error": "simulation is running"}
@@ -2183,10 +2404,12 @@ class RealPipeline:
         for i, (q, (lo, hi)) in enumerate(zip(target_rad, lims)):
             if not (lo - 1e-6 <= q <= hi + 1e-6):
                 return {"ok": False, "error": f"J{i + 1} target {math.degrees(q):.1f} deg outside limit"}
-        ok, txt, v = self.fence_goal_check(model, target_rad)
+        ok, txt, v = self.fence_goal_check(model, target_rad, ignore_xy_fence=ignore_xy_fence)
         if not ok:
             return {"ok": False, "error": txt, "fence_violation": {"waypoint": "goal", "violations": v}}
         extra = {"plan_only": bool(plan_only)}
+        if ignore_xy_fence:
+            extra["ignore_xy_fence"] = True
         sf = self.safety()
         if sf and sf.get("max_speed"):                 # V3.16: teach / inspect modes cap the speed
             speed = min(float(speed), float(sf["max_speed"]))
@@ -2196,9 +2419,11 @@ class RealPipeline:
         return self._send_move(label, model["arm_group"], model["joints"], target_rad, speed,
                                timeout_s or JC.MOVE_TIMEOUT_S, extra)
 
-    def move_and_settle(self, model, target_rad, speed, label="move", plan_only=False, settle_s=0.8, timeout_s=None):
+    def move_and_settle(self, model, target_rad, speed, label="move", plan_only=False, settle_s=0.8, timeout_s=None,
+                        ignore_xy_fence=False):
         """move_joints + settle + final error + one row in logs/real_motion_log.csv."""
-        res = self.move_joints(model, target_rad, speed, label=label, timeout_s=timeout_s, plan_only=plan_only)
+        res = self.move_joints(model, target_rad, speed, label=label, timeout_s=timeout_s, plan_only=plan_only,
+                               ignore_xy_fence=ignore_xy_fence)
         res = dict(res or {"ok": False, "error": "no result"})
         tgt = [math.degrees(v) for v in target_rad]
         act = None

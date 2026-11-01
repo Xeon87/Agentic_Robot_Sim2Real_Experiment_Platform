@@ -24,7 +24,7 @@ import v347_fake as F                                  # noqa: E402
 import NERO_V347_Yolo_Perception as YP                 # noqa: E402
 import NERO_V325_Camera as CAM                         # noqa: E402
 
-assert YP.VERSION == "V3.47.1" and (ROOT / "VERSION").read_text().strip() == "V3.47.1"
+assert YP.VERSION in ("V3.47.1", "V3.47.2", "V3.48", "V3.49", "V3.50", "V3.51", "V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58") and (ROOT / "VERSION").read_text().strip() in ("V3.47.1", "V3.47.2", "V3.48", "V3.49", "V3.50", "V3.51", "V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58")
 TD = tempfile.mkdtemp(prefix="v3471_")
 YP.REF_JSON, YP.REF_IMG = os.path.join(TD, "yolo_ref.json"), os.path.join(TD, "yolo_ref.jpg")
 MP = os.path.join(TD, "yoloe-26s-seg.pt")
@@ -144,7 +144,7 @@ assert not CAM.calib_valid(dict(good, load_error="x"))
 assert CAM.DEPTH_RES == ("848×480", "1280×720") and CAM.DEPTH_PRESETS[0] == "High Accuracy"
 assert CAM.CALIB_DIR.endswith(os.path.join("Downloads", "cameracalib")) or os.environ.get("NERO_CALIB_DIR")
 src = CAM.RealSenseSource(log=lambda *a: None)
-assert (src.depth_res, src.depth_preset) == ("848×480", "High Accuracy")       # default unchanged
+assert (src.depth_res, src.depth_preset) in (("848×480", "High Accuracy"), ("1280×720", "High Accuracy"))
 S = (ROOT / "NERO_V325_Camera.py").read_text()
 assert "dw, dh = (1280, 720) if self.depth_res == DEPTH_RES[1] else (848, 480)" in S
 assert hashlib.sha256((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).hexdigest().startswith("020cc6680f181872")

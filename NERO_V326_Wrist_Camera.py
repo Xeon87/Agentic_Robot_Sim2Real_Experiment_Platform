@@ -35,7 +35,7 @@ import traceback
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-VERSION = "V3.47.1"
+VERSION = "V3.57"
 WRIST_CAMERA_NAME = "v326_wrist_d435i"
 PARENT_BODY = "link7"
 

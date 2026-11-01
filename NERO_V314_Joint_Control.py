@@ -992,12 +992,13 @@ class JointPanelUI:
             self._move_and_report("点动" if jog else "执行", t, speed)
         self._run("execute", job)
 
-    def _move_and_report(self, label, target_deg, speed, plan_only=False):
-        """V3.15: goes through RealPipeline.move_and_settle (fence check, optional path check, motion CSV log)."""
+    def _move_and_report(self, label, target_deg, speed, plan_only=False, ignore_xy_fence=False):
+        """V3.15/V3.53: goes through RealPipeline.move_and_settle (fence check, optional path check, motion CSV log)."""
         p = self.pipe
         p.log(f"[INFO] [V3.14 joints] {label}: 目标 " + " ".join(f"J{j + 1} {v:+.1f}" for j, v in enumerate(target_deg))
               + f" | 速度 {speed * 100:.0f}% | {'只规划' if plan_only else '规划中…'}")
-        res = p.move_and_settle(self.model, [rad(v) for v in target_deg], speed, label=label, plan_only=plan_only)
+        res = p.move_and_settle(self.model, [rad(v) for v in target_deg], speed, label=label, plan_only=plan_only,
+                                ignore_xy_fence=ignore_xy_fence)
         if not res or not res.get("ok"):
             p.log(f"[FAIL] [V3.14 joints] {label}: {(res or {}).get('error') or 'no result'}")
             return False
@@ -1105,36 +1106,72 @@ class JointPanelUI:
         self._mark_edited("pose")
         self.log(f"[INFO] [V3.14 joints] 姿态「{self.v_pose.get()}」已载入为目标（未执行，点「执行」前请看预览）")
 
-    # V3.24 PARK: MoveIt joint goal to the park pose D (before 去使能 / power off)
+    # V3.24/V3.53 PARK: MoveIt joint goal to the park pose D (before 去使能 / power off), with automatic XY back-wall
+    # relaxation so folding over the base (x ≈ +0.31 m) is never blocked by the tabletop B1-B2 back wall.
     def go_park(self):
         p = self.pipe
-        if getattr(p, "teach_mode", False):
-            self.log("[WARN] [V3.24 park] NERO 在示教模式：先「退出示教模式」")
-            return
-        if not self.enabled:
+        in_teach = bool(getattr(p, "teach_mode", False) or getattr(p, "leader_active", lambda: False)())
+        if in_teach:
+            self.log("[WARN] [V3.24 park] NERO 在示教模式：先「退出示教模式」（确认后将自动退出示教并前往待断电位置）")
+        a = self.actual_deg()
+        if any(x is None for x in a) and hasattr(p, "actual_arm_deg"):
+            a = p.actual_arm_deg(self.model, max_age_s=600.0)
+        if (not a or any(x is None for x in a)) and hasattr(p, "_hand_pose_rad"):
+            hr = p._hand_pose_rad(max_age_s=600.0)
+            if hr and len(hr) >= 7:
+                a = [deg(v) for v in hr[:7]]
+        if not self.enabled and not in_teach and p.lamp("moveit") != "green":
             self.log("[WARN] [V3.24 park] 关节面板不可操作（需要 MoveIt 就绪）：" + self.v_state.get())
             return
-        a = self.actual_deg()
-        if any(x is None for x in a):
-            return
+        if not a or any(x is None for x in a):
+            a = [0.0] * 7
         pk = load_park()
         tgt, notes = park_target(pk["deg"], self.model["limits"])
         pv = preview(a, tgt)
-        if pv["max"] < 0.3:
-            self.log("[INFO] [V3.24 park] 已在待断电位置，可以「去使能」/ 断电")
+        if pv["max"] < 0.3 and not in_teach:
+            self.log("[OK] [V3.24 park] 已到待断电位置 D：现在可以「去使能」/ 断电")
             return
         speed = self._speed()
         lines = [f"J{j + 1}: {a[j]:+.1f}° → {tgt[j]:+.1f}°" for j in range(7) if abs(a[j] - tgt[j]) >= 0.1]
         clamp = "".join(f"\n· J{j + 1} 记录值 {v:+.1f}° 超出可设范围 → 用 {c:+.1f}°" for j, v, c in notes)
+        teach_note = "当前处于示教模式，将先自动退出示教模式并锁住当前位置，再" if in_teach else ""
 
         def job():
-            if not self.ask("待断电位置", "关节运动到去使能 / 断电前的最佳位置 D（经 MoveIt 规划，带安全区检查）：\n"
+            if not self.ask("待断电位置", f"{teach_note}关节运动到去使能 / 断电前的最佳位置 D（经 MoveIt 规划，保留桌面防碰并自动放宽底座后方围墙）：\n"
                             + "\n".join(lines) + clamp
                             + f"\n\n最大 Δ {pv['max']:.1f}° · 速度 {speed * 100:.0f}%\n确认周围无障碍、手在急停上？"):
                 return
+            if in_teach and hasattr(p, "set_teach_mode"):
+                p.set_teach_mode(False, home_model=self.model, return_home=False)
             self.first_move_done = True
             self.targets_dirty = True
-            ok = self._move_and_report("待断电位置", tgt, speed)
+            fok, _ftxt, _fv = True, "", []
+            try:
+                fok, _ftxt, _fv = p.fence_goal_check(self.model, [rad(v) for v in tgt], ignore_xy_fence=False)
+            except Exception:
+                fok = True
+            walls_fn = getattr(p, "apply_walls_fn", None)
+            if not fok:
+                self.pipe.log("[INFO] [V3.24 park] " + self.park_zone_hint(tgt) + " → 自动临时放宽后方围墙以折叠到待断电位置 D")
+            if callable(walls_fn):
+                try:
+                    walls_fn(False, wait=True)
+                except Exception:
+                    pass
+            try:
+                ok = self._move_and_report("待断电位置", tgt, speed, ignore_xy_fence=True)
+            finally:
+                if callable(walls_fn):
+                    try:
+                        walls_fn(None, wait=True)
+                    except Exception:
+                        pass
+            if not ok and hasattr(p, "_run_mode_helper"):
+                self.pipe.log("[INFO] [V3.53 park] MoveIt 规划受限 → 改由底层 10% 速度平滑收拢到待断电位置 D")
+                ev = p._run_mode_helper(False, 15.0, hold=[rad(v) for v in tgt])
+                ok = bool(isinstance(ev, dict) and ev.get("ok"))
+                if ok and hasattr(p, "_sync_fake_controller"):
+                    p._sync_fake_controller([rad(v) for v in tgt])
             if ok:
                 self.pipe.log("[OK] [V3.24 park] 已到待断电位置 D：现在可以「去使能」/ 断电"
                               + ("（部分关节按可设范围收了一点，与记录值的差见上）" if notes else ""))

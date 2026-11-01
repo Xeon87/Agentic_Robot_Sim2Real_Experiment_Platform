@@ -20,7 +20,7 @@ import NERO_V315_Consistency_Safety as CS  # noqa: E402
 import NERO_V314_Joint_Control as JC  # noqa: E402
 import NERO_V313_Real_Robot as RR  # noqa: E402
 
-assert RR.VERSION.startswith(("V3.2", "V3.3", "V3.4"))
+assert RR.VERSION.startswith(("V3.2", "V3.3", "V3.4", "V3.5"))
 U = CS.load_sim_urdf()
 J = [f"joint{i}" for i in range(1, 8)]
 LIM = JC.build_model((ROOT / "config" / "nero.urdf").read_text(), None, None)["limits"]
