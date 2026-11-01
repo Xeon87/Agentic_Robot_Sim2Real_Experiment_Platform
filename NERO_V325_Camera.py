@@ -63,6 +63,8 @@ DEFAULT_LOCATE_PATH = LOCATE_PATH
 # V3.57 AUTO TABLETOP CHARUCO INTRINSICS + CHARUCO EIH + 2D FOCAL/SCALE SELF-CALIB
 # V3.58 KINEMATIC-ANCHORED WIDE-ANGLE INTRINSICS + FULL-QUADRANT TILT + ROBUST CHARUCO EIH
 # V3.59 SKILL STRATEGY KNOBS + MULTI-POINT HOVER DRY-RUN + CALIB BADGE CONSISTENCY
+# V3.60 V3.58-EXACT HOVER DEFAULTS + WRIST HOVER INDEPENDENT OF SKILLS (hover field is written by a skill only on an
+#   explicit apply; wrist micro-align / crosshair and the saved locate settings keep the user's own hover value)
 # V3.48 TCP + HOVER + OBJECTS + CLEAR CALIB: TCP pivot calibration, hover verification, general objects, clear calib
 TCP_CALIB_PATH = os.path.join(HERE, "config", "tcp_calib.json")
 DEFAULT_TCP_CALIB_PATH = TCP_CALIB_PATH
@@ -1700,6 +1702,8 @@ class CameraTabUI:
         self.workflow_bars = []
         self.workflow_state = []
         self._btn_state = {}
+        self._hover_strategy_str = None      # V3.60: hover text last written by a skill (None = field is the user's)
+        self._hover_user_val = None          # V3.60: the user's hover text that the skill value temporarily replaced
         self._det_busy = False
         self._ui_q = []
         self._load_saved()
@@ -2542,7 +2546,7 @@ class CameraTabUI:
              "prompts": self.v_yprompt.get(), "egg_mm": [self.v_egg_l.get(), self.v_egg_w.get()],
              "white_geometric": bool(self.v_white.get()), "save_samples": bool(self.v_ysave.get()),
              "depth_res": self.v_dres.get(), "depth_preset": self.v_dpreset.get(),
-              "obj_names": self.v_obj_names.get(), "hover_mm": self.v_hover_mm.get()}
+              "obj_names": self.v_obj_names.get(), "hover_mm": self._hover_user_str()}   # V3.60: never the skill value
         r = self.ref
         if r:
             try:
@@ -2559,6 +2563,9 @@ class CameraTabUI:
                          (self.v_yprompt, "prompts"), (self.v_obj_names, "obj_names"), (self.v_hover_mm, "hover_mm")):
             if d.get(key) not in (None, ""):
                 var.set(str(d[key]))
+        if d.get("hover_mm") not in (None, ""):      # V3.60: a loaded settings file is the user's own hover value
+            self._hover_strategy_str = None
+            self._hover_user_val = None
         if d.get("method") in LOCATE_METHODS:
             self.v_method.set(d["method"])
         if d.get("depth_res") in DEPTH_RES:
@@ -3223,7 +3230,7 @@ class CameraTabUI:
         tcp_proj = None
         if K_w and he and he.get("T_flange_cam"):
             try:
-                z_work = max(0.06, float(self.v_hover_mm.get()) / 1000.0) if hasattr(self, "v_hover_mm") else 0.10
+                z_work = max(0.06, float(self._hover_user_str()) / 1000.0) if hasattr(self, "v_hover_mm") else 0.10
             except Exception:
                 z_work = 0.10
             tcp_proj = self.W49.project_tcp_wrist(K_w, he["T_flange_cam"], self._active_tcp_T(),
@@ -4320,15 +4327,38 @@ class CameraTabUI:
         u = self._urdf_tcp_vec()
         self.log(f"[OK] [V3.48 tcp] 已恢复 URDF 默认 TCP 偏移：({u[0] * 1000:+.1f}, {u[1] * 1000:+.1f}, {u[2] * 1000:+.1f}) mm")
 
-    def apply_strategy_profile(self, profile):
-        """V3.59: Synchronize active StrategyProfile knobs with CameraTabUI hover & dry-run parameters."""
+    def _hover_user_str(self):
+        """V3.60: the hover height the USER set (field text, unless the field currently shows the value a skill wrote
+        there).  Used by the wrist USB micro-align, the wrist TCP crosshair and the saved locate settings, so these
+        never follow a skill.  If the user edits the field after a skill wrote it, the edit is the user's value."""
+        cur = self.v_hover_mm.get()
+        if self._hover_strategy_str is None:
+            return cur
+        if cur == self._hover_strategy_str and self._hover_user_val is not None:
+            return self._hover_user_val
+        self._hover_strategy_str = None          # field was edited by the user -> it is the user's value again
+        self._hover_user_val = None
+        return cur
+
+    def apply_strategy_profile(self, profile, set_hover=True):
+        """V3.59: Synchronize active StrategyProfile knobs with CameraTabUI hover & dry-run parameters.
+        V3.60: set_hover=False (start-up) only stores the profile (target order); the hover field is written only on
+        an explicit apply / preset choice, and the wrist USB functions keep the user's own value (_hover_user_str)."""
         if profile is None:
             return
         self.strategy_profile = profile
-        if hasattr(self, "v_hover_mm"):
+        if set_hover and hasattr(self, "v_hover_mm"):
             h_mm = float(profile.get("cam_hover_verify_height_mm", HOVER_DEFAULT_MM))
             if HOVER_RANGE_MM[0] <= h_mm <= HOVER_RANGE_MM[1]:
-                self.v_hover_mm.set(f"{h_mm:.0f}")
+                new = f"{h_mm:.0f}"
+                user = self._hover_user_str()
+                if new == user:
+                    self._hover_strategy_str, self._hover_user_val = None, None
+                else:
+                    self._hover_strategy_str, self._hover_user_val = new, user
+                    self.log(f"[INFO] [V3.60 策略] 技能 {getattr(profile, 'code', '') or profile.skill_id}：悬停复核 / 多点预演高度 "
+                             f"{user} → {new} mm；腕部 USB 微调对齐与准星仍用 {user} mm（不跟随技能）")
+                self.v_hover_mm.set(new)
         self._update_calib_ui()
 
     def _selected_hover_target(self):
@@ -4405,6 +4435,8 @@ class CameraTabUI:
             urdf, model["joints"], model["limits"], q0r, tool_T, targets,
             z_table_m=zt, base=base, fence_fn=fence_fn, knobs=k, plan_hover_fn=plan_hover_target,
         )
+        for w360 in plan.get("warnings") or []:
+            self.log(f"[WARN] [V3.60 dry-run] {w360}")
         if plan.get("ok"):
             self.log(f"[OK] [V3.59 dry-run] 预演航线规划校验通过：{plan['summary']}")
         else:
@@ -5936,7 +5968,7 @@ class CameraTabUI:
             self.log("[WARN] [V3.50 wrist] 先点「◎ 腕部精定位」算出微调偏移量 (Δx, Δy, Δψ)")
             return
         try:
-            hover_mm = float(self.v_hover_mm.get())
+            hover_mm = float(self._hover_user_str())          # V3.60: independent of the skill strategy
             assert HOVER_RANGE_MM[0] <= hover_mm <= HOVER_RANGE_MM[1]
         except Exception:
             self.log(f"[WARN] [V3.50 wrist] 悬停高度请填 {HOVER_RANGE_MM[0]:.0f}–{HOVER_RANGE_MM[1]:.0f} mm")

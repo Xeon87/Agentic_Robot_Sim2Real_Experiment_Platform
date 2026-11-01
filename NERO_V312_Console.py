@@ -24,8 +24,9 @@ import sys
 import threading
 import time
 
-VERSION = "V3.59"
+VERSION = "V3.60"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
+# V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.51 WORKFLOW STATUS LAMP BAR ABOVE LOG
 # V3.52 TEACH MODE BUTTONS LEFT OF COPY LOG
 # V3.53 TEACH EXIT & PARK FIX + ALIGNED TEACH BUTTONS + DEFAULT 1280x720 DEPTH
@@ -158,6 +159,7 @@ class SimRunner:
         self.log_path = log_path
         self._stop_requested = False
         self.exit_code = None
+        self.strategy_env = {}               # V3.60 SIM ENV INJECTION: set by the console before start()
 
     def running(self):
         return self.proc is not None and self.proc.poll() is None
@@ -169,6 +171,7 @@ class SimRunner:
         env["NERO_NO_FAIL_PAUSE"] = "1"      # never block on "Press Enter" when started from the console
         env["PYTHONUNBUFFERED"] = "1"
         env.update(extra_env or {})
+        env.update(getattr(self, "strategy_env", None) or {})     # V3.60: applied skill -> backend env (only diffs)
         self._stop_requested = False
         self.exit_code = None
         self.proc = subprocess.Popen(
@@ -664,6 +667,9 @@ def run_console(initial_tab="sim"):
         log=cam_log_line, ask=confirm_from_worker,
     )
     cam_tab.strategy_tab = strat_tab
+    # V3.60: a skill applied in the simulation GUI tab shows up here when this tab is opened
+    nb.bind("<<NotebookTabChanged>>",
+            lambda _e: strat_tab.reload_active_if_changed() if nb.select() == str(strat_outer) else None, add="+")
 
     def start_job(name, fn, force=False):
         if not force and real_job["t"] is not None and real_job["t"].is_alive():
@@ -792,6 +798,19 @@ def run_console(initial_tab="sim"):
         sim_log.configure(state="disabled")
         scene = sim_scene_by_label.get(sim_scene_var.get(), DEFAULT_SIM_SCENE)
         log_append(sim_log, f"[V3.12 CONSOLE] starting {SIM_SCRIPT} | V3.44 scene={scene}")
+        runner.strategy_env = {}
+        try:                                        # V3.60 SIM ENV INJECTION (applied skill; baseline EB injects nothing)
+            prof360 = ST59.read_active_strategy_file() or strat_tab.profile
+            env360, notes360 = ST59.strategy_sim_env(prof360, base_env=clean_child_env())
+            runner.strategy_env = env360
+            n_inj = sum(1 for k_ in env360 if not k_.startswith("NERO_V360_SKILL_"))
+            log_append(sim_log, f"[OK] [V3.60 策略] 本次仿真技能 {prof360.label()} ({prof360.skill_id})："
+                                + (f"注入 {n_inj} 个后端参数" if n_inj else "与基准 EB 相同，后端参数保持默认"))
+            for n_ in notes360:
+                log_append(sim_log, n_)
+        except Exception as exc:
+            runner.strategy_env = {}
+            log_append(sim_log, f"[WARN] [V3.60 策略] 技能注入失败，按后端默认参数启动：{exc}")
         try:
             pid = runner.start(extra_env=scene_env(scene))
         except Exception as exc:

@@ -30,7 +30,7 @@ os.environ.pop("NERO_V343_ACTIVE_SCENE", None)
 import NERO_V343_Scenes as S          # noqa: E402
 import NERO_V326_Wrist_Camera as W    # noqa: E402
 
-assert S.VERSION == "V3.44" and W.VERSION in ("V3.44", "V3.45", "V3.46", "V3.47", "V3.47.1", "V3.47.2", "V3.48", "V3.49", "V3.50", "V3.51", "V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59") and (ROOT / "VERSION").read_text().strip() in ("V3.44", "V3.45", "V3.46", "V3.47", "V3.47.1", "V3.47.2", "V3.48", "V3.49", "V3.50", "V3.51", "V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59")
+assert S.VERSION == "V3.44" and W.VERSION in ("V3.44", "V3.45", "V3.46", "V3.47", "V3.47.1", "V3.47.2", "V3.48", "V3.49", "V3.50", "V3.51", "V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60") and (ROOT / "VERSION").read_text().strip() in ("V3.44", "V3.45", "V3.46", "V3.47", "V3.47.1", "V3.47.2", "V3.48", "V3.49", "V3.50", "V3.51", "V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60")
 assert hashlib.sha256((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).hexdigest().startswith("020cc6680f181872")
 
 B = (ROOT / "NERO_V2_7_1_Unified_Backend.py").read_text()
@@ -188,7 +188,7 @@ for val, ok in (("", True), ("store_in_safe", True), ("nope", False)):
     assert (r.returncode == 0) == ok and (("OK " in r.stdout) == ok), (val, r.stdout)
 sys.modules.pop("tkinter", None)
 import NERO_V312_Console as C  # noqa: E402
-assert C.VERSION in ("V3.44", "V3.45", "V3.46", "V3.47", "V3.47.1", "V3.47.2", "V3.48", "V3.49", "V3.50", "V3.51", "V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59") and C.DEFAULT_SIM_SCENE == "fill_egg_holder" and [k for k, _ in C.SIM_SCENES] == list(S.SCENES)
+assert C.VERSION in ("V3.44", "V3.45", "V3.46", "V3.47", "V3.47.1", "V3.47.2", "V3.48", "V3.49", "V3.50", "V3.51", "V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60") and C.DEFAULT_SIM_SCENE == "fill_egg_holder" and [k for k, _ in C.SIM_SCENES] == list(S.SCENES)
 assert C.scene_env("store_in_safe") == {"NERO_SCENE": "store_in_safe"}
 try:
     C.scene_env("nope")

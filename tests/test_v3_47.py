@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 import v347_fake as F                                  # noqa: E402
 import NERO_V347_Yolo_Perception as YP                 # noqa: E402
 
-assert YP.VERSION in ("V3.47", "V3.47.1", "V3.47.2", "V3.48", "V3.49", "V3.50", "V3.51", "V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59") and (ROOT / "VERSION").read_text().strip() in ("V3.47", "V3.47.1", "V3.47.2", "V3.48", "V3.49", "V3.50", "V3.51", "V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59")
+assert YP.VERSION in ("V3.47", "V3.47.1", "V3.47.2", "V3.48", "V3.49", "V3.50", "V3.51", "V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60") and (ROOT / "VERSION").read_text().strip() in ("V3.47", "V3.47.1", "V3.47.2", "V3.48", "V3.49", "V3.50", "V3.51", "V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60")
 TD = tempfile.mkdtemp(prefix="v347_")
 YP.REF_JSON, YP.REF_IMG, YP.SAMPLES_DIR = os.path.join(TD, "yolo_ref.json"), os.path.join(TD, "yolo_ref.jpg"), \
     os.path.join(TD, "samples")

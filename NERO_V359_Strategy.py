@@ -22,18 +22,27 @@ import glob
 import json
 import math
 import os
+import re
 import time
 
-VERSION = "V3.59"
+VERSION = "V3.60"
+# V3.60 BASELINE-EXACT DEFAULTS + SKILL CODES + READ-ONLY RELEASE FILES + SIM ENV INJECTION + SIM TAB
+#   * defaults restore V3.58 real behaviour (hover 100 mm, table order + trusted first)
+#   * every skill has short_name (English) + 2-letter code (EB / DP / HD / QH ...)
+#   * nothing inside the release folder is written at run time: the active choice lives in logs/,
+#     user presets in ~/Downloads/cameracalib/strategies (NERO_V360_USER_STRATEGY_DIR)
+#   * simulation: the 6 knobs the backend already reads from the environment are injected (only when they differ
+#     from the baseline); every knob carries a "wired" tag (sim_env / real / none) shown in the GUI
 HERE = os.path.dirname(os.path.realpath(__file__))
-STRATEGY_DIR = os.environ.get("NERO_V359_STRATEGY_DIR", os.path.join(HERE, "config", "strategies"))
+STRATEGY_DIR = os.environ.get("NERO_V359_STRATEGY_DIR", os.path.join(HERE, "config", "strategies"))   # shipped, read-only
+USER_STRATEGY_DIR = os.environ.get("NERO_V360_USER_STRATEGY_DIR") or os.path.join(
+    os.environ.get("NERO_CALIB_DIR") or os.path.expanduser("~/Downloads/cameracalib"), "strategies")
 BASELINE_SKILL_ID = "egg_grasp_v345_baseline"
-ACTIVE_STRATEGY_FILE = os.environ.get(
-    "NERO_V359_ACTIVE_STRATEGY",
-    os.path.join(STRATEGY_DIR, f"{BASELINE_SKILL_ID}.json"),
-)
+ACTIVE_STRATEGY_FILE = os.environ.get("NERO_V360_ACTIVE_STRATEGY_FILE") or os.path.join(
+    HERE, "logs", "v360_active_strategy.json")
+SKILL_CODE_RE = re.compile(r"^[A-Z]{2}$")
 
-# --------------------------------------------------------------------------- 5 knob groups & 34 exact baseline specs
+# --------------------------------------------------------------------------- 5 knob groups & 45 exact baseline specs (V3.60: count fixed)
 KNOB_GROUPS = [
     ("grasp_scoring", "① 候选抓取方向与防碰打分 (V2.7 + V3.04)"),
     ("gripper_approach", "② 夹爪预张开裕量与两段慢速下探 (V2.7 + V3.04)"),
@@ -43,7 +52,9 @@ KNOB_GROUPS = [
 ]
 
 SLOT_FILL_ORDERS = ("numeric_1_to_8", "nearest_to_egg", "far_to_near")
-TARGET_ORDER_MODES = ("confidence_then_nearest", "nearest_first", "clearance_first", "table_row_order")
+# V3.60: table_trusted_first = V3.58 _selected_hover_target (first trusted row in table order, else first row)
+TARGET_ORDER_MODES = ("table_trusted_first", "confidence_then_nearest", "nearest_first", "clearance_first",
+                      "table_row_order")
 
 KNOB_SPECS = [
     # --- Group 1: Grasp candidate generation & scoring (Unified_Backend.py:15269-15371) ---
@@ -140,10 +151,11 @@ KNOB_SPECS = [
         "group": "grasp_scoring",
         "label": "多目标默认巡检/抓取顺序",
         "type": "enum",
-        "default": "confidence_then_nearest",
+        "default": "table_trusted_first",
         "choices": list(TARGET_ORDER_MODES),
         "unit": "模式",
-        "desc": "未手动指定行时多目标排序策略：可信度优先+最近距离 / 最近优先 / 空旷度优先 / 表格原序",
+        "desc": "未手动选中行时的目标顺序：table_trusted_first=表格顺序+可信优先（V3.58 原逻辑，默认）/ "
+                "可信度优先+离基座最近 / 最近优先 / 空旷度优先 / 表格原序",
     },
     # --- Group 2: Gripper aperture & two-stage approach (Unified_Backend.py:4589-4665, 9374-9378, 15085-15093) ---
     {
@@ -472,11 +484,12 @@ KNOB_SPECS = [
         "group": "hover_dry_run",
         "label": "实机目标悬停复核高度",
         "type": "float",
-        "default": 60.0,
+        "default": 100.0,
         "min": 40.0,
         "max": 250.0,
         "unit": "mm",
-        "desc": "实机 Camera 页单点悬停与多点 Dry-Run 时 TCP 距目标顶部的悬停高度 (原值 60.0 mm)",
+        "desc": "实机「悬停复核」与多点 Dry-Run 时 TCP 在目标定位点（物心）正上方的高度；只在「应用/选择技能」时写入"
+                "悬停输入框，腕部 USB 相机微调对齐与准星不跟随 (V3.48 原值 HOVER_DEFAULT_MM = 100 mm)",
     },
     {
         "key": "cam_hover_soft_limit_deg",
@@ -542,6 +555,24 @@ KNOB_SPECS = [
     },
 ]
 
+# V3.60 WIRING: where a knob really acts in this version.
+#   sim_env : injected into the simulation backend through the environment variable it already reads
+#   real    : used by the real-robot Camera tab (hover verify target / multi-point dry-run)
+#   none    : formula parameterised and equivalence-tested, but nothing reads it yet (kept for later versions)
+SIM_ENV_KNOBS = {   # knob -> (environment variable, backend default string, scale knob->env)
+    "egg_open_margin_mm": ("NERO_V304_EGG_APERTURE_MARGIN_MM", "16", 1.0),
+    "final_approach_dist_mm": ("NERO_V304_FINAL_APPROACH_M", "0.020", 0.001),
+    "final_approach_slow_factor": ("NERO_V304_FINAL_APPROACH_SLOW", "3.5", 1.0),
+    "grasp_z_settle_comp_mm": ("NERO_V304_GRASP_Z_COMP_M", "0.0025", 0.001),
+    "limit_margin_required_deg": ("NERO_V341_LIMIT_MARGIN_DEG", "8", 1.0),
+    "limit_margin_relaxed_deg": ("NERO_V341_LIMIT_MARGIN_MIN_DEG", "4", 1.0),
+}
+REAL_KNOBS = ("target_order_mode", "cam_hover_verify_height_mm", "cam_hover_soft_limit_deg", "cam_hover_max_speed_pct",
+              "dry_run_transit_z_lift_mm", "dry_run_dwell_s", "dry_run_wrist_refine", "dry_run_return_home")
+WIRING_LABELS = {"sim_env": "仿真✓", "real": "实机✓", "none": "未接入"}
+for _s360 in KNOB_SPECS:
+    _s360["wired"] = "sim_env" if _s360["key"] in SIM_ENV_KNOBS else ("real" if _s360["key"] in REAL_KNOBS else "none")
+
 KNOB_BY_KEY = {s["key"]: s for s in KNOB_SPECS}
 BASELINE_KNOBS = {s["key"]: s["default"] for s in KNOB_SPECS}
 
@@ -563,12 +594,13 @@ BASELINE_SKILL_CARD = {
     "scene_tags": ["egg", "fragile", "egg_holder", "baseline", "short_axis_pinch", "sim2real_verified"],
     "sim_benchmark": {
         "trained_scene": "fill_egg_holder",
-        "noise_level": "camera_perceived_v340",
-        "success_rate": 1.0,
-        "avg_cycle_time_s": 16.5,
-        "notes": "V2.7 ~ V3.45 历次仿真与实机调试定型的黄金基准参数（零偏差还原）",
+        "noise_level": None,
+        "success_rate": None,          # V3.60: not measured yet (filled by the sim optimizer later)
+        "avg_cycle_time_s": None,
+        "notes": "V2.7 ~ V3.58 调好的基准参数；成功率 / 耗时尚未测量",
     },
 }
+BASELINE_SHORT_NAME, BASELINE_CODE = "Egg Baseline", "EB"
 
 
 # --------------------------------------------------------------------------- validation & diff helpers
@@ -597,7 +629,7 @@ def coerce_knob_value(key, val):
 
 
 def sanitize_knobs(raw_knobs=None):
-    """Return a full dict of all 35 knobs, filling missing keys from BASELINE_KNOBS."""
+    """Return a full dict of all knobs (len(KNOB_SPECS) = 45), filling missing keys from BASELINE_KNOBS."""
     out = dict(BASELINE_KNOBS)
     if isinstance(raw_knobs, dict):
         for k, v in raw_knobs.items():
@@ -652,11 +684,9 @@ def diff_vs_baseline(knobs):
 
 
 def is_baseline_equivalent(knobs):
-    """True when all core manipulation knobs (Groups 1-4) match BASELINE_KNOBS exactly."""
-    for k, spec, _v, _b in diff_vs_baseline(knobs):
-        if spec["group"] != "hover_dry_run":
-            return False
-    return True
+    """True when every knob matches BASELINE_KNOBS (V3.60: the hover group counts too, because the real-robot
+    hover height / target order now really act; V3.59 ignored group 5)."""
+    return not diff_vs_baseline(knobs)
 
 
 def describe_diff_vs_baseline(knobs):
@@ -850,10 +880,12 @@ def order_empty_slots(slots_dict, ref_xy_m=None, knobs=None):
 def rank_detected_targets(targets, ref_xy_m=(0.0, 0.0), knobs=None):
     """Order detected visual targets (eggs, objects, slots) according to `target_order_mode`."""
     k = BASELINE_KNOBS if knobs is None else knobs
-    mode = str(k.get("target_order_mode", "confidence_then_nearest"))
+    mode = str(k.get("target_order_mode", "table_trusted_first"))
     valid = [t for t in (targets or []) if t.get("xyz_m") and t.get("status") != "rejected"]
     if mode == "table_row_order" or len(valid) <= 1:
         return list(valid)
+    if mode == "table_trusted_first":          # V3.60: == V3.58 (trusted rows first, table order kept)
+        return [t for t in valid if t.get("trusted")] + [t for t in valid if not t.get("trusted")]
     rx, ry = float(ref_xy_m[0]), float(ref_xy_m[1])
 
     def _dist(t):
@@ -889,8 +921,15 @@ def rank_detected_targets(targets, ref_xy_m=(0.0, 0.0), knobs=None):
 class StrategyProfile:
     """In-memory representation of a strategy JSON file (`skill_card` + `knobs`)."""
 
-    def __init__(self, skill_id=BASELINE_SKILL_ID, skill_card=None, knobs=None, version=VERSION, saved="", path=None):
+    def __init__(self, skill_id=BASELINE_SKILL_ID, skill_card=None, knobs=None, version=VERSION, saved="", path=None,
+                 short_name=None, code=None):
         self.skill_id = str(skill_id or BASELINE_SKILL_ID).strip()
+        # V3.60 SKILL CODES: short English name + 2-letter code (unique, used in logs / scores)
+        if short_name is None and code is None and self.skill_id == BASELINE_SKILL_ID:
+            short_name, code = BASELINE_SHORT_NAME, BASELINE_CODE
+        self.short_name = str(short_name or "").strip()
+        c360 = str(code or "").strip().upper()
+        self.code = c360 if SKILL_CODE_RE.match(c360) else ""
         self.version = str(version or VERSION)
         self.knobs = sanitize_knobs(knobs)
         self.skill_card = sanitize_skill_card(skill_card, skill_id=self.skill_id, knobs=self.knobs)
@@ -910,6 +949,7 @@ class StrategyProfile:
 
     def reset_to_baseline(self):
         self.skill_id = BASELINE_SKILL_ID
+        self.short_name, self.code = BASELINE_SHORT_NAME, BASELINE_CODE
         self.knobs = dict(BASELINE_KNOBS)
         self.skill_card = copy.deepcopy(BASELINE_SKILL_CARD)
         return self
@@ -921,6 +961,8 @@ class StrategyProfile:
     def to_dict(self):
         return {
             "skill_id": self.skill_id,
+            "short_name": self.short_name,
+            "code": self.code,
             "version": self.version,
             "saved": self.saved or time.strftime("%Y-%m-%d %H:%M:%S"),
             "is_baseline": is_baseline_equivalent(self.knobs),
@@ -942,13 +984,21 @@ class StrategyProfile:
             version=d.get("version", VERSION),
             saved=d.get("saved", ""),
             path=path,
+            short_name=d.get("short_name"),
+            code=d.get("code"),
         )
+
+    def label(self):
+        """V3.60: 'EB Egg Baseline' style tag for logs and scores."""
+        return f"{self.code or '??'} {self.short_name or self.skill_id}"
 
     def llm_brief(self):
         """Compact summary dictionary for LLM `observe_scene` and system prompt reference."""
         c = self.skill_card
         return {
             "skill_id": self.skill_id,
+            "code": self.code,
+            "short_name": self.short_name,
             "name": c.get("name", self.skill_id),
             "is_baseline": is_baseline_equivalent(self.knobs),
             "when_to_use": c.get("when_to_use", ""),
@@ -990,10 +1040,10 @@ def builtin_strategy_presets():
         "scene_tags": ["egg", "fragile", "high_clutter", "neighbor_close", "anti_poke"],
         "sim_benchmark": {
             "trained_scene": "fill_egg_holder",
-            "noise_level": "pos_2mm_yaw_1.5deg",
-            "success_rate": 0.95,
-            "avg_cycle_time_s": 18.8,
-            "notes": "针对贴靠鸡蛋场景收窄预张开裕量并强化邻蛋净空排序的防碰预设",
+            "noise_level": None,
+            "success_rate": None,
+            "avg_cycle_time_s": None,
+            "notes": "人工示例预设，未经仿真测量 / 寻优",
         },
     }
     dense = StrategyProfile(
@@ -1001,6 +1051,8 @@ def builtin_strategy_presets():
         skill_card=dense_card,
         knobs=dense_knobs,
         saved="2026-11-01 00:00:00",
+        short_name="Dense Anti-Poke",
+        code="DP",
     )
 
     dry_knobs = dict(BASELINE_KNOBS)
@@ -1016,21 +1068,21 @@ def builtin_strategy_presets():
     dry_card = {
         "name": "无夹爪实机多点悬停预演技能 (Hover Dry-Run)",
         "when_to_use": (
-            "在实机夹爪（如 SO-101）尚未通电或首次验证视觉-运动闭环时使用："
+            "在实机夹爪尚未接入或首次验证视觉-运动闭环时使用："
             "机械臂依次在目标物体 A 正上方 60 mm 悬停 -> 抬升 40 mm 跨点过渡 -> 下一目标点/蛋托孔 B 正上方 60 mm 悬停 -> 回起点。"
         ),
         "when_not_to_use": "需要真正下探闭合夹爪抓取实物入槽时，请切换回 egg_grasp_v345_baseline。",
         "behavior_summary": (
-            "底层运动学与 IK 权重 100% 保持抓鸡蛋基准逻辑，启用 60 mm 安全悬停、40 mm 跨点抬升过渡、"
+            "抓取相关旋钮与基准相同；实机悬停高度 60 mm（基准 100 mm）、40 mm 跨点抬升过渡、"
             "1.5 s 驻留观察与腕部准星自动复核，全程不下探、不驱动夹爪。"
         ),
         "scene_tags": ["dry_run", "hover_only", "no_gripper", "calibration_verify", "real_robot"],
         "sim_benchmark": {
             "trained_scene": "real_tabletop_dry_run",
-            "noise_level": "real_d435i_wrist_usb",
-            "success_rate": 1.0,
-            "avg_cycle_time_s": 12.0,
-            "notes": "专为无夹爪阶段实机多目标悬停巡检与抓放动线预演设计",
+            "noise_level": None,
+            "success_rate": None,
+            "avg_cycle_time_s": None,
+            "notes": "专为无夹爪阶段实机多目标悬停巡检与抓放动线预演设计；未经测量",
         },
     }
     dry = StrategyProfile(
@@ -1038,16 +1090,49 @@ def builtin_strategy_presets():
         skill_card=dry_card,
         knobs=dry_knobs,
         saved="2026-11-01 00:00:00",
+        short_name="Hover Dry-Run",
+        code="HD",
     )
-    return [baseline, dense, dry]
+
+    # V3.60: the V3.59 real-robot defaults (60 mm hover + confidence/nearest target order) as a NON-default preset
+    qh_knobs = dict(BASELINE_KNOBS)
+    qh_knobs.update({"cam_hover_verify_height_mm": 60.0, "target_order_mode": "confidence_then_nearest"})
+    qh_card = {
+        "name": "近距悬停复核技能 (Quick Hover)",
+        "when_to_use": "实机「悬停复核」想用更低的 60 mm 悬停、并且未选中行时优先选置信度高、离基座近的目标时使用。",
+        "when_not_to_use": "需要与 V3.58 完全一致的悬停复核行为（100 mm、表格顺序）时，请用基准 EB。",
+        "behavior_summary": describe_diff_vs_baseline(qh_knobs),
+        "scene_tags": ["real_robot", "hover_only", "verify"],
+        "sim_benchmark": {"trained_scene": None, "noise_level": None, "success_rate": None,
+                          "avg_cycle_time_s": None, "notes": "V3.59 的实机默认值，V3.60 起改为非默认预设；未经测量"},
+    }
+    qh = StrategyProfile(
+        skill_id="quick_hover_verify",
+        skill_card=qh_card,
+        knobs=qh_knobs,
+        saved="2026-11-01 00:00:00",
+        short_name="Quick Hover",
+        code="QH",
+    )
+    return [baseline, dense, dry, qh]
+
+
+def _inside(path, folder):
+    try:
+        rp, rf = os.path.realpath(path), os.path.realpath(folder)
+        return os.path.commonpath([rp, rf]) == rf
+    except ValueError:
+        return False
 
 
 def save_strategy_file(profile, path=None):
-    """Save a StrategyProfile to JSON disk file."""
+    """Save a StrategyProfile to JSON (V3.60: user presets go to USER_STRATEGY_DIR; the shipped release folder
+    config/strategies/ is read-only and refused)."""
     if isinstance(profile, dict):
         profile = StrategyProfile.from_dict(profile, path=path)
-    os.makedirs(STRATEGY_DIR, exist_ok=True)
-    target = path or profile.path or os.path.join(STRATEGY_DIR, f"{profile.skill_id}.json")
+    target = path or os.path.join(USER_STRATEGY_DIR, f"{profile.skill_id}.json")
+    if _inside(target, STRATEGY_DIR) or _inside(target, HERE) and not _inside(target, os.path.join(HERE, "logs")):
+        raise ValueError(f"不能写入发布文件夹（{target}）：发布包内的文件只读；请另存到 {USER_STRATEGY_DIR}")
     os.makedirs(os.path.dirname(os.path.realpath(target)), exist_ok=True)
     profile.saved = time.strftime("%Y-%m-%d %H:%M:%S")
     profile.path = target
@@ -1067,47 +1152,64 @@ def load_strategy_file(path):
 
 
 def ensure_builtin_strategies(strategy_dir=None):
-    """Ensure `egg_grasp_v345_baseline.json`, `default.json`, and built-in presets exist in `strategy_dir`."""
-    sdir = strategy_dir or STRATEGY_DIR
-    os.makedirs(sdir, exist_ok=True)
-    presets = builtin_strategy_presets()
-    for p in presets:
-        fp = os.path.join(sdir, f"{p.skill_id}.json")
-        if not os.path.isfile(fp):
-            data = p.to_dict()
-            with open(fp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-    default_fp = os.path.join(sdir, "default.json")
-    base_fp = os.path.join(sdir, f"{BASELINE_SKILL_ID}.json")
-    if not os.path.isfile(default_fp) and os.path.isfile(base_fp):
-        with open(base_fp, "r", encoding="utf-8") as f:
-            d = json.load(f)
-        with open(default_fp, "w", encoding="utf-8") as f:
-            json.dump(d, f, ensure_ascii=False, indent=2)
-    return base_fp
+    """V3.60: never writes anything (the release folder is read-only).  Returns the shipped baseline file path, or
+    None when it is missing (the built-in in-memory presets are used instead)."""
+    base_fp = os.path.join(strategy_dir or STRATEGY_DIR, f"{BASELINE_SKILL_ID}.json")
+    return base_fp if os.path.isfile(base_fp) else None
 
 
-def list_strategy_files(strategy_dir=None):
-    """Return sorted list of (skill_id, display_name, file_path, profile) from `strategy_dir`."""
+BUILTIN_SKILL_IDS = tuple(p.skill_id for p in builtin_strategy_presets())
+
+
+def list_strategy_files(strategy_dir=None, user_dir=None):
+    """Return list of (skill_id, display_name, file_path_or_None, profile): shipped presets (built-in order, file
+    if present else the in-memory copy), then user presets from USER_STRATEGY_DIR.  Duplicate skill_ids / codes
+    are skipped (the first one wins)."""
     sdir = strategy_dir or STRATEGY_DIR
-    ensure_builtin_strategies(sdir)
-    out = []
-    seen_ids = set()
-    files = sorted(glob.glob(os.path.join(sdir, "*.json")))
-    # Put egg_grasp_v345_baseline first
-    files.sort(key=lambda p: (0 if os.path.basename(p) == f"{BASELINE_SKILL_ID}.json" else 1, os.path.basename(p)))
-    for fp in files:
+    udir = user_dir or USER_STRATEGY_DIR
+    out, seen_ids, seen_codes = [], set(), set()
+
+    def _add(prof, fp):
+        if prof.skill_id in seen_ids or (prof.code and prof.code in seen_codes):
+            return
+        seen_ids.add(prof.skill_id)
+        if prof.code:
+            seen_codes.add(prof.code)
+        out.append((prof.skill_id, prof.skill_card.get("name", prof.skill_id), fp, prof))
+
+    for bp in builtin_strategy_presets():
+        fp = os.path.join(sdir, f"{bp.skill_id}.json")
+        try:
+            _add(load_strategy_file(fp) if os.path.isfile(fp) else bp, fp if os.path.isfile(fp) else None)
+        except Exception:
+            _add(bp, None)
+    extra = sorted(glob.glob(os.path.join(sdir, "*.json"))) + sorted(glob.glob(os.path.join(udir, "*.json")))
+    for fp in extra:
         if os.path.basename(fp) == "default.json":
             continue
         try:
-            prof = load_strategy_file(fp)
-            if prof.skill_id in seen_ids:
-                continue
-            seen_ids.add(prof.skill_id)
-            out.append((prof.skill_id, prof.skill_card.get("name", prof.skill_id), fp, prof))
+            _add(load_strategy_file(fp), fp)
         except Exception:
             continue
     return out
+
+
+def validate_new_skill(profile, existing=None):
+    """V3.60: a user preset needs its own skill_id, short English name and unique 2-letter code.
+    -> error string or None"""
+    existing = list_strategy_files() if existing is None else existing
+    if profile.skill_id in BUILTIN_SKILL_IDS:
+        return f"skill_id `{profile.skill_id}` 是内置技能（只读）：请改一个新的 skill_id 再保存"
+    if not re.match(r"^[A-Za-z0-9_\-]+$", profile.skill_id or ""):
+        return "skill_id 只能用英文字母、数字、下划线和减号"
+    if not profile.short_name:
+        return "请填写技能英文短名 (short_name)，例如 Dense Anti-Poke"
+    if not profile.code:
+        return "请填写两个大写英文字母的技能缩写 (code)，例如 DP"
+    for sid, _n, _fp, prof in existing:
+        if sid != profile.skill_id and prof.code == profile.code:
+            return f"缩写 {profile.code} 已被 `{sid}` 使用：请换一个"
+    return None
 
 
 def export_llm_skill_catalog(strategy_dir=None, active_profile=None):
@@ -1116,6 +1218,7 @@ def export_llm_skill_catalog(strategy_dir=None, active_profile=None):
     act = active_profile or get_active_strategy()
     return {
         "active_skill_id": act.skill_id,
+        "active_skill_code": act.code,
         "active_skill_name": act.skill_card.get("name", act.skill_id),
         "active_is_baseline": is_baseline_equivalent(act.knobs),
         "active_skill_card": act.llm_brief(),
@@ -1131,63 +1234,84 @@ def export_llm_skill_catalog(strategy_dir=None, active_profile=None):
 _ACTIVE_PROFILE = None
 
 
-def get_active_strategy():
-    """Return the active StrategyProfile (loads `egg_grasp_v345_baseline.json` by default)."""
-    global _ACTIVE_PROFILE
-    if _ACTIVE_PROFILE is not None:
-        return _ACTIVE_PROFILE
-    base_fp = ensure_builtin_strategies(STRATEGY_DIR)
-    target = ACTIVE_STRATEGY_FILE if os.path.isfile(ACTIVE_STRATEGY_FILE) else base_fp
+def read_active_strategy_file(path=None):
+    """V3.60: the last applied profile (logs/v360_active_strategy.json) or None."""
+    fp = path or ACTIVE_STRATEGY_FILE
     try:
-        _ACTIVE_PROFILE = load_strategy_file(target)
+        with open(fp, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        prof = StrategyProfile.from_dict(d.get("profile", d), path=d.get("source_path"))
+        return prof
     except Exception:
-        _ACTIVE_PROFILE = StrategyProfile()
+        return None
+
+
+def get_active_strategy(reload=False):
+    """Return the active StrategyProfile: the last applied one (logs/) or the built-in baseline EB."""
+    global _ACTIVE_PROFILE
+    if _ACTIVE_PROFILE is not None and not reload:
+        return _ACTIVE_PROFILE
+    prof = read_active_strategy_file()
+    if prof is None:
+        prof = builtin_strategy_presets()[0]
+        base_fp = ensure_builtin_strategies(STRATEGY_DIR)
+        if base_fp:
+            try:
+                prof = load_strategy_file(base_fp)
+            except Exception:
+                pass
+    _ACTIVE_PROFILE = prof
     return _ACTIVE_PROFILE
 
 
 def set_active_strategy(profile, sync_default_json=True):
-    """Set the active StrategyProfile in memory and optionally write `config/strategies/default.json`."""
+    """Set the active StrategyProfile in memory; with sync_default_json (name kept from V3.59) also persist it to
+    logs/v360_active_strategy.json so the console and the simulation GUI share it.  Never writes config/."""
     global _ACTIVE_PROFILE
     if isinstance(profile, dict):
         profile = StrategyProfile.from_dict(profile)
     _ACTIVE_PROFILE = profile
     if sync_default_json:
         try:
-            os.makedirs(STRATEGY_DIR, exist_ok=True)
-            dfp = os.path.join(STRATEGY_DIR, "default.json")
-            with open(dfp, "w", encoding="utf-8") as f:
-                json.dump(profile.to_dict(), f, ensure_ascii=False, indent=2)
+            os.makedirs(os.path.dirname(os.path.realpath(ACTIVE_STRATEGY_FILE)), exist_ok=True)
+            tmp = ACTIVE_STRATEGY_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"applied": time.strftime("%Y-%m-%d %H:%M:%S"), "source_path": profile.path,
+                           "profile": profile.to_dict()}, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, ACTIVE_STRATEGY_FILE)
         except Exception:
             pass
     return _ACTIVE_PROFILE
 
 
-def strategy_sim_env(profile=None):
-    """Return environment variable dict exporting active strategy knobs to `start_nero_sim.sh` / Unified Backend."""
-    prof = profile or get_active_strategy()
-    k = prof.knobs
-    fp = prof.path or os.path.join(STRATEGY_DIR, f"{prof.skill_id}.json")
-    return {
-        "NERO_V359_ACTIVE_STRATEGY": str(fp),
-        "NERO_V359_SKILL_ID": str(prof.skill_id),
-        "NERO_V304_EGG_APERTURE_MARGIN_MM": f"{float(k.get('egg_open_margin_mm', 16.0)):g}",
-        "NERO_V304_FINAL_APPROACH_M": f"{float(k.get('final_approach_dist_mm', 20.0)) / 1000.0:g}",
-        "NERO_V304_FINAL_APPROACH_SLOW": f"{float(k.get('final_approach_slow_factor', 3.5)):g}",
-        "NERO_V304_GRASP_Z_COMP_M": f"{float(k.get('grasp_z_settle_comp_mm', 2.5)) / 1000.0:g}",
-        "NERO_V341_LIMIT_MARGIN_DEG": f"{float(k.get('limit_margin_required_deg', 8.0)):g}",
-        "NERO_V341_LIMIT_MARGIN_MIN_DEG": f"{float(k.get('limit_margin_relaxed_deg', 4.0)):g}",
-    }
+def strategy_sim_env(profile=None, base_env=None):
+    """V3.60 SIM ENV INJECTION -> (env dict for start_nero_sim.sh, list of log notes).
 
-
-def install_backend_hooks(backend_mod, profile=None):
-    """Non-intrusively bind StrategyProfile scoring & wrist weights into an imported Unified_Backend module."""
+    Identity variables (skill id / code / name) are always set.  Each of the 6 SIM_ENV_KNOBS is set only when the
+    knob differs from the baseline, so the baseline EB never overrides anything (the backend keeps its own
+    defaults, and a value the user exported in the shell stays in effect, as in V3.58)."""
     prof = profile or get_active_strategy()
-    if hasattr(backend_mod, "_v272_wrist_score"):
-        backend_mod._v272_wrist_score = lambda d: compute_wrist_reorient_score(d, knobs=prof.knobs)
-    if hasattr(backend_mod, "_v272_wrist_plan_ok"):
-        lims = getattr(backend_mod, "V272_JOINT_STEP_LIMIT_DEG", None)
-        backend_mod._v272_wrist_plan_ok = lambda d: check_wrist_reorient_bounded(d, step_limits_deg=lims, knobs=prof.knobs)
-    return prof
+    k = sanitize_knobs(prof.knobs)
+    base_env = os.environ if base_env is None else base_env
+    env = {"NERO_V360_SKILL_ID": str(prof.skill_id), "NERO_V360_SKILL_CODE": str(prof.code or "??"),
+           "NERO_V360_SKILL_NAME": str(prof.short_name or prof.skill_id)}
+    notes = []
+    req, rel = float(k["limit_margin_required_deg"]), float(k["limit_margin_relaxed_deg"])
+    if rel > req:
+        notes.append(f"[WARN] [V3.60 策略] 放宽限位裕量 {rel:g}° > 首选 {req:g}°：注入时按 {req:g}° 处理")
+        k["limit_margin_relaxed_deg"] = req
+    for key, (var, _dflt, scale) in SIM_ENV_KNOBS.items():
+        v, b = float(k[key]), float(BASELINE_KNOBS[key])
+        if abs(v - b) <= 1e-9 and not (key == "limit_margin_relaxed_deg" and rel > req):
+            if var in base_env:
+                notes.append(f"[INFO] [V3.60 策略] {var}={base_env[var]} 来自终端环境变量（基准值不覆盖它）")
+            continue
+        val = f"{v * scale:.6g}"
+        if var in base_env and base_env[var] != val:
+            notes.append(f"[WARN] [V3.60 策略] 终端里的 {var}={base_env[var]} 被技能 {prof.code} 的 {val} 覆盖")
+        env[var] = val
+        notes.append(f"[OK] [V3.60 策略] 注入 {var}={val}（{KNOB_BY_KEY[key]['label']}，基准 {b:g}）")
+    return env, notes
 
 # --------------------------------------------------------------------------- Multi-Point Hover Dry-Run Planner
 def parse_waypoint_spec(text, fallback_id="target_B"):
@@ -1208,9 +1332,16 @@ def parse_waypoint_spec(text, fallback_id="target_B"):
     nums = [float(x) for x in re.findall(r"[-+]?\d+(?:\.\d+)?", s)]
     if len(nums) < 2:
         return None
+    # V3.60 FIX: decide mm vs m from the numbers the user typed only (V3.59 also looked at the default z = 35,
+    # so "-0.51, 0.123" in metres was read as millimetres -> a point 0.5 mm from the base).
+    given = nums[:3]
+    in_mm = max(abs(v) for v in given) > 2.5
     x, y = nums[0], nums[1]
-    z = nums[2] if len(nums) >= 3 else 35.0
-    if max(abs(x), abs(y), abs(z)) > 2.5:
+    if len(nums) >= 3:
+        z = nums[2]
+    else:
+        z = 35.0 if in_mm else 0.035
+    if in_mm:
         xyz_m = [x / 1000.0, y / 1000.0, z / 1000.0]
     else:
         xyz_m = [x, y, z]
@@ -1312,6 +1443,7 @@ def plan_hover_dry_run_sequence(urdf, joints, limits_rad, q0_rad, tool_T, target
     return_home = bool(k.get("dry_run_return_home", True))
 
     steps = []
+    warnings = []
     q_prev = [float(v) for v in q0_rad]
     prev_hover_xyz = None
 
@@ -1340,6 +1472,8 @@ def plan_hover_dry_run_sequence(urdf, joints, limits_rad, q0_rad, tool_T, target
                         urdf, joints, limits_rad, q_prev, tool_T, transit_xyz,
                         base=base, fence_fn=fence_fn, soft_deg=soft_deg,
                     )
+                if q_tr is None:      # V3.60: say so instead of silently moving hover -> hover
+                    warnings.append(f"{det_id} 之前的跨点抬升过渡点规划失败（{info_tr}），将直接从上一悬停点移到该悬停点")
                 if q_tr is not None:
                     steps.append({
                         "kind": "transit",
@@ -1363,6 +1497,7 @@ def plan_hover_dry_run_sequence(urdf, joints, limits_rad, q0_rad, tool_T, target
             return {
                 "ok": False,
                 "steps": steps,
+                "warnings": warnings,
                 "failed_target": det_id,
                 "error": f"目标 {det_id} 悬停点 ({hover_xyz[0]*1000:+.0f}, {hover_xyz[1]*1000:+.0f}, {hover_xyz[2]*1000:+.0f}) mm 规划失败：{info_hov}",
             }
@@ -1409,6 +1544,7 @@ def plan_hover_dry_run_sequence(urdf, joints, limits_rad, q0_rad, tool_T, target
         "dwell_s": dwell_s,
         "return_home": return_home,
         "summary": f"共 {len(hover_ids)} 个悬停站（{chain_txt}），悬停高 {hover_mm:.0f} mm，跨点抬升 +{transit_lift_mm:.0f} mm",
+        "warnings": warnings,
         "error": None,
     }
 
@@ -1504,23 +1640,25 @@ def execute_hover_dry_run(plan_res, move_fn, actual_q_fn=None, fk_tcp_fn=None, w
 class SkillStrategyTabUI:
     """Dedicated GUI tab for managing Strategy Profiles, editing Skill Cards, tuning knobs, and running Hover Dry-Run."""
 
-    def __init__(self, tk, ttk, parent, cam_tab=None, pipe=None, jpanel=None, log=None, ask=None):
+    def __init__(self, tk, ttk, parent, cam_tab=None, pipe=None, jpanel=None, log=None, ask=None, mode="real"):
         self.tk = tk
         self.ttk = ttk
         self.parent = parent
+        self.mode = "sim" if mode == "sim" else "real"       # V3.60 SIM TAB: "sim" hides the real dry-run panel
         self.cam_tab = cam_tab
         self.pipe = pipe
         self.jpanel = jpanel
         self.log = log or (lambda msg: None)
         self.ask = ask or (lambda _t, _q: True)
 
-        ensure_builtin_strategies(STRATEGY_DIR)
         self.profile = get_active_strategy()
         self.knob_vars = {}
         self._last_dry_plan = None
+        self._active_mtime = self._active_file_mtime()
 
         self._build_ui()
-        self.load_profile_into_ui(self.profile, announce=False)
+        # V3.60: startup only shows the active profile; it never rewrites files or the Camera-tab hover field
+        self.load_profile_into_ui(self.profile, announce=False, persist=False, set_hover=False)
 
     def _build_ui(self):
         tk, ttk = self.tk, self.ttk
@@ -1548,7 +1686,7 @@ class SkillStrategyTabUI:
             canvas.bind_all(seq, lambda e: _wheel(e) if str(e.widget).startswith(str(outer)) else None, add="+")
 
         # ---- 1. Top Strategy Bar ----
-        top_lf = ttk.LabelFrame(main, text="技能参数包选择与存储（默认 100% 还原 V2.7~V3.45 调好抓鸡蛋基准逻辑）", padding=6)
+        top_lf = ttk.LabelFrame(main, text="技能参数包选择与存储（默认 EB = 还原 V2.7~V3.58 调好的抓鸡蛋逻辑）", padding=6)
         top_lf.pack(fill="x", pady=(0, 6))
 
         r_top = ttk.Frame(top_lf)
@@ -1561,7 +1699,7 @@ class SkillStrategyTabUI:
 
         self.b_apply = ttk.Button(r_top, text="✓ 应用当前参数", command=self.on_apply)
         self.b_apply.pack(side="left", padx=2)
-        self.b_save = ttk.Button(r_top, text="💾 保存到当前 .json", command=self.on_save)
+        self.b_save = ttk.Button(r_top, text="💾 保存为用户技能", command=self.on_save)
         self.b_save.pack(side="left", padx=2)
         self.b_save_as = ttk.Button(r_top, text="另存为新技能…", command=self.on_save_as)
         self.b_save_as.pack(side="left", padx=2)
@@ -1575,6 +1713,12 @@ class SkillStrategyTabUI:
         self.v_status = tk.StringVar(value="")
         JC.fixed_label(tk, top_lf, 2, textvariable=self.v_status, font=("TkFixedFont", 9), fg="#1b5e20",
                        wraplength=1200, justify="left", anchor="nw", pack={"fill": "x", "pady": (4, 0)})
+        note360 = ("标签：[仿真✓] = 下次「启动仿真」时经环境变量注入后端（仅与基准不同时注入）；[实机✓] = Camera 页悬停复核 / "
+                   "多点预演使用；[未接入] = 只记录，本版本还没有代码读取。内置技能只读，用户技能保存到 "
+                   f"{USER_STRATEGY_DIR}；当前选择保存在 logs/。")
+        if self.mode == "sim":
+            note360 = ("仿真窗口：这里「应用」的参数在下次启动仿真时生效（本次运行已按启动时的技能注入）。 " + note360)
+        ttk.Label(top_lf, text=note360, foreground="#607d8b", wraplength=1200, justify="left").pack(fill="x", pady=(2, 0))
 
         # ---- 2. Skill Card (自然语言技能名片) ----
         card_lf = ttk.LabelFrame(main, text="技能名片（Skill Card · 写入 .json 供 LLM/VLM 理解应用场景与调参依据）", padding=6)
@@ -1591,6 +1735,17 @@ class SkillStrategyTabUI:
         ttk.Label(rc1, text="场景标签 (逗号分隔):").pack(side="left")
         self.v_card_tags = tk.StringVar(value="")
         ttk.Entry(rc1, textvariable=self.v_card_tags, width=28).pack(side="left", padx=4)
+
+        rc1b = ttk.Frame(card_lf)          # V3.60 SKILL CODES
+        rc1b.pack(fill="x", pady=2)
+        ttk.Label(rc1b, text="英文短名 (short_name):", width=16).pack(side="left")
+        self.v_short_name = tk.StringVar(value="")
+        ttk.Entry(rc1b, textvariable=self.v_short_name, width=28).pack(side="left", padx=(0, 12))
+        ttk.Label(rc1b, text="两字母缩写 (code):").pack(side="left")
+        self.v_code = tk.StringVar(value="")
+        ttk.Entry(rc1b, textvariable=self.v_code, width=4).pack(side="left", padx=4)
+        ttk.Label(rc1b, text="（两个大写字母、唯一，用于日志与任务打分，如 EB / DP / HD / QH）",
+                  foreground="#607d8b").pack(side="left", padx=4)
 
         rc2 = ttk.Frame(card_lf)
         rc2.pack(fill="x", pady=2)
@@ -1617,7 +1772,8 @@ class SkillStrategyTabUI:
             text="无夹爪多点悬停预演测试台（Hover Dry-Run · 从物体 A 上方悬停 → 安全抬升 → 下一目标点 B 上方悬停 → 回原位）",
             padding=6,
         )
-        dry_lf.pack(fill="x", pady=(0, 6))
+        if self.mode != "sim":            # V3.60 SIM TAB: the dry-run drives the real arm -> console only
+            dry_lf.pack(fill="x", pady=(0, 6))
 
         rd1 = ttk.Frame(dry_lf)
         rd1.pack(fill="x", pady=2)
@@ -1685,7 +1841,9 @@ class SkillStrategyTabUI:
                 self.knob_vars[k] = var
                 def_txt = "启用" if spec["default"] is True else ("关闭" if spec["default"] is False else f"{spec['default']}")
                 u_txt = f" {spec['unit']}" if spec.get("unit") else ""
-                ttk.Label(gf, text=f"{u_txt} (默认: {def_txt})", foreground="#607d8b", width=18, anchor="w").grid(
+                wired = spec.get("wired", "none")
+                ttk.Label(gf, text=f"{u_txt} (默认: {def_txt}) [{WIRING_LABELS[wired]}]",
+                          foreground=("#2e7d32" if wired != "none" else "#9e9e9e"), width=26, anchor="w").grid(
                     row=r_i, column=c_i + 2, sticky="w", padx=(2, 6), pady=2
                 )
                 ttk.Label(gf, text=spec["desc"], foreground="#555555", wraplength=340, justify="left").grid(
@@ -1702,7 +1860,7 @@ class SkillStrategyTabUI:
         labels = []
         cur_label = None
         for sid, name, fp, prof in items:
-            lab = f"{sid} — {name}"
+            lab = f"{prof.code or '??'} · {sid} — {name}" + ("（内置）" if sid in BUILTIN_SKILL_IDS else "（用户）")
             self._preset_map[lab] = (sid, fp, prof)
             labels.append(lab)
             if sid == self.profile.skill_id:
@@ -1713,10 +1871,14 @@ class SkillStrategyTabUI:
         elif labels:
             self.v_preset.set(labels[0])
 
-    def load_profile_into_ui(self, profile, announce=True):
+    def load_profile_into_ui(self, profile, announce=True, persist=True, set_hover=True):
         self.profile = profile
-        set_active_strategy(profile)
+        set_active_strategy(profile, sync_default_json=persist)
+        if persist:
+            self._active_mtime = self._active_file_mtime()
         self.v_skill_id.set(profile.skill_id)
+        self.v_short_name.set(profile.short_name)
+        self.v_code.set(profile.code)
         c = profile.skill_card
         self.v_card_name.set(c.get("name", ""))
         self.v_when_use.set(c.get("when_to_use", ""))
@@ -1733,12 +1895,12 @@ class SkillStrategyTabUI:
                 var.set(str(val))
             else:
                 var.set(f"{float(val):g}" if isinstance(val, (int, float)) else str(val))
-        self._sync_to_camera_tab()
+        self._sync_to_camera_tab(set_hover=set_hover)
         self._refresh_preset_dropdown()
         self._update_status_banner()
         if announce:
             self.log(
-                f"[OK] [V3.59 策略] 已加载技能参数包 `{profile.skill_id}`（{c.get('name', '')}）· "
+                f"[OK] [V3.60 策略] 已加载技能 {profile.label()} `{profile.skill_id}`（{c.get('name', '')}）· "
                 f"{'100% 还原抓鸡蛋原版基准 ✓' if is_baseline_equivalent(profile.knobs) else describe_diff_vs_baseline(profile.knobs)}"
             )
 
@@ -1757,33 +1919,57 @@ class SkillStrategyTabUI:
             "scene_tags": [x.strip() for x in self.v_card_tags.get().split(",") if x.strip()],
             "sim_benchmark": copy.deepcopy(self.profile.skill_card.get("sim_benchmark") or {}),
         }
+        same = sid == self.profile.skill_id
         return StrategyProfile(
             skill_id=sid,
             skill_card=card,
             knobs=knobs,
-            path=self.profile.path,
+            path=self.profile.path if same else None,
+            short_name=self.v_short_name.get().strip(),
+            code=self.v_code.get().strip(),
         )
 
-    def _sync_to_camera_tab(self):
+    def _sync_to_camera_tab(self, set_hover=True):
         if self.cam_tab is not None and hasattr(self.cam_tab, "apply_strategy_profile"):
             try:
-                self.cam_tab.apply_strategy_profile(self.profile)
-            except Exception:
-                pass
+                self.cam_tab.apply_strategy_profile(self.profile, set_hover=set_hover)
+            except Exception as exc:
+                self.log(f"[WARN] [V3.60 策略] 同步到 Camera 页失败：{exc}")
+
+    @staticmethod
+    def _active_file_mtime():
+        try:
+            return os.path.getmtime(ACTIVE_STRATEGY_FILE)
+        except OSError:
+            return None
+
+    def reload_active_if_changed(self):
+        """V3.60: the other window (console <-> simulation GUI) applied a skill -> show it here too (no hover write)."""
+        mt = self._active_file_mtime()
+        if mt is None or mt == self._active_mtime:
+            return False
+        self._active_mtime = mt
+        prof = read_active_strategy_file()
+        if prof is None:
+            return False
+        self.load_profile_into_ui(prof, announce=False, persist=False, set_hover=False)
+        self.log(f"[INFO] [V3.60 策略] 另一个窗口已应用技能 {prof.label()}，本页已同步显示")
+        return True
 
     def _update_status_banner(self):
         knobs = self.profile.knobs
         eq = is_baseline_equivalent(knobs)
         diffs = diff_vs_baseline(knobs)
         src_fp = self.profile.path or os.path.join(STRATEGY_DIR, f"{self.profile.skill_id}.json")
+        src_fp = self.profile.path or "内置（内存）"
         if eq and not diffs:
             self.v_status.set(
-                f"当前生效：{self.profile.skill_id}（{self.profile.skill_card.get('name', '')}） | "
-                f"状态：100% 严格还原 V2.7~V3.45 抓鸡蛋基准逻辑 ✓（34/34 项参数零偏差） | 文件：{src_fp}"
+                f"当前生效：{self.profile.label()} · {self.profile.skill_id}（{self.profile.skill_card.get('name', '')}） | "
+                f"与基准 EB 完全相同（{len(KNOB_SPECS)}/{len(KNOB_SPECS)} 项） | 来源：{src_fp}"
             )
         else:
             self.v_status.set(
-                f"当前生效：{self.profile.skill_id} | {describe_diff_vs_baseline(knobs)} | 文件：{src_fp}"
+                f"当前生效：{self.profile.label()} · {self.profile.skill_id} | {describe_diff_vs_baseline(knobs)} | 来源：{src_fp}"
             )
 
     def on_select_preset(self):
@@ -1809,10 +1995,12 @@ class SkillStrategyTabUI:
         prof = self.collect_profile_from_ui()
         self.profile = prof
         set_active_strategy(prof, sync_default_json=True)
-        self._sync_to_camera_tab()
+        self._active_mtime = self._active_file_mtime()
+        self._sync_to_camera_tab(set_hover=True)
         self._update_status_banner()
         self.log(
-            f"[OK] [V3.59 策略] 已应用技能参数包 `{prof.skill_id}`："
+            f"[OK] [V3.60 策略] 已应用技能 {prof.label()} `{prof.skill_id}`"
+            + ("（仿真：下次启动仿真时生效）" if self.mode == "sim" else "") + "："
             f"悬停 {prof.get('cam_hover_verify_height_mm'):.0f} mm · "
             f"鸡蛋张开 +{prof.get('egg_open_margin_mm'):.1f} mm · "
             f"限位裕量 >={prof.get('limit_margin_required_deg'):.0f}° · "
@@ -1821,14 +2009,23 @@ class SkillStrategyTabUI:
 
     def on_save(self, path=None):
         prof = self.collect_profile_from_ui()
-        target = path or os.path.join(STRATEGY_DIR, f"{prof.skill_id}.json")
-        saved_fp = save_strategy_file(prof, path=target)
+        err = validate_new_skill(prof)
+        if err:
+            self.log(f"[FAIL] [V3.60 策略] 没有保存：{err}")
+            return None
+        target = path or os.path.join(USER_STRATEGY_DIR, f"{prof.skill_id}.json")
+        try:
+            saved_fp = save_strategy_file(prof, path=target)
+        except Exception as exc:
+            self.log(f"[FAIL] [V3.60 策略] 保存失败：{exc}（下一步：检查 {USER_STRATEGY_DIR} 的写权限）")
+            return None
         self.profile = prof
         set_active_strategy(prof, sync_default_json=True)
-        self._sync_to_camera_tab()
+        self._active_mtime = self._active_file_mtime()
+        self._sync_to_camera_tab(set_hover=True)
         self._refresh_preset_dropdown()
         self._update_status_banner()
-        self.log(f"[OK] [V3.59 策略] 技能参数包与技能名片已保存 → {saved_fp}")
+        self.log(f"[OK] [V3.60 策略] 用户技能 {prof.label()} 已保存 → {saved_fp}")
         return saved_fp
 
     def on_save_as(self, path=None):
@@ -1839,7 +2036,7 @@ class SkillStrategyTabUI:
             path = filedialog.asksaveasfilename(
                 parent=self.parent,
                 title="另存为新技能参数包 (.json)",
-                initialdir=STRATEGY_DIR,
+                initialdir=USER_STRATEGY_DIR,
                 initialfile=init_name,
                 defaultextension=".json",
                 filetypes=[("JSON 技能参数包", "*.json"), ("所有文件", "*.*")],
@@ -1858,7 +2055,7 @@ class SkillStrategyTabUI:
             path = filedialog.askopenfilename(
                 parent=self.parent,
                 title="读取技能参数包 (.json)",
-                initialdir=STRATEGY_DIR,
+                initialdir=USER_STRATEGY_DIR if os.path.isdir(USER_STRATEGY_DIR) else STRATEGY_DIR,
                 filetypes=[("JSON 技能参数包", "*.json"), ("所有文件", "*.*")],
             )
         if not path:
@@ -1867,23 +2064,17 @@ class SkillStrategyTabUI:
             prof = load_strategy_file(path)
             self.load_profile_into_ui(prof, announce=True)
         except Exception as exc:
-            self.log(f"[FAIL] [V3.59 策略] 读取策略文件失败 ({path})：{exc}")
+            self.log(f"[FAIL] [V3.60 策略] 读取策略文件失败 ({path})：{exc}")
 
     def on_reset_baseline(self):
-        base_fp = ensure_builtin_strategies(STRATEGY_DIR)
-        prof = StrategyProfile(
-            skill_id=BASELINE_SKILL_ID,
-            skill_card=copy.deepcopy(BASELINE_SKILL_CARD),
-            knobs=dict(BASELINE_KNOBS),
-            path=base_fp,
-        )
-        save_strategy_file(prof, path=base_fp)
-        self.load_profile_into_ui(prof, announce=False)
-        self.log("[OK] [V3.59 策略] 已一键还原为 V2.7~V3.45 抓鸡蛋标准基准参数 (egg_grasp_v345_baseline) ✓")
+        prof = builtin_strategy_presets()[0]          # V3.60: in-memory baseline, no file is written
+        prof.path = ensure_builtin_strategies(STRATEGY_DIR)
+        self.load_profile_into_ui(prof, announce=False, persist=True, set_hover=True)
+        self._active_mtime = self._active_file_mtime()
+        self.log("[OK] [V3.60 策略] 已还原为基准技能 EB Egg Baseline (egg_grasp_v345_baseline) ✓")
 
     def on_copy_llm_catalog(self):
-        self.on_apply()
-        cat = export_llm_skill_catalog(STRATEGY_DIR, active_profile=self.profile)
+        cat = export_llm_skill_catalog(STRATEGY_DIR, active_profile=self.collect_profile_from_ui())
         txt = json.dumps(cat, ensure_ascii=False, indent=2)
         try:
             self.parent.clipboard_clear()
@@ -1934,3 +2125,18 @@ class SkillStrategyTabUI:
         if self.cam_tab is not None:
             self.cam_tab.on_stop()
             self.v_dry_status.set("已发送停止信号 ■")
+
+
+# --------------------------------------------------------------------------- V3.60 SIM TAB
+def add_sim_strategy_tab(tk, ttk, notebook, log=None):
+    """V3.60 SIM TAB: add the same 「技能参数旋钮」 tab (without the real-robot dry-run panel) to the simulation GUI
+    notebook, as its own top-level tab next to "NERO SimAgent".  Called from one line inside an existing
+    `# V3.43 A2` block of the backend GUI (test_v3_44 invariants unchanged).  -> SkillStrategyTabUI"""
+    outer = ttk.Frame(notebook, padding=6)
+    notebook.add(outer, text="技能参数旋钮")
+    ui = SkillStrategyTabUI(tk, ttk, outer, cam_tab=None, pipe=None, jpanel=None, log=log, mode="sim")
+    run = os.environ.get("NERO_V360_SKILL_CODE")
+    if log is not None:
+        log(f"[V3.60 SKILL TAB] 本次仿真按启动时注入的技能运行：{run or '未注入（后端默认 = EB）'}"
+            f"{' ' + os.environ.get('NERO_V360_SKILL_NAME', '') if run else ''}；在此页「应用」的技能下次启动仿真时生效")
+    return ui

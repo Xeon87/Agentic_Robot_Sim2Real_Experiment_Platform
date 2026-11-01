@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 import NERO_V313_Real_Robot as RR      # noqa: E402
 import NERO_V312_Console as C          # noqa: E402
 
-assert RR.VERSION in ("V3.46", "V3.47", "V3.47.1", "V3.47.2", "V3.48", "V3.49", "V3.50", "V3.51", "V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59") and C.VERSION == RR.VERSION and (ROOT / "VERSION").read_text().strip() == RR.VERSION
+assert RR.VERSION in ("V3.46", "V3.47", "V3.47.1", "V3.47.2", "V3.48", "V3.49", "V3.50", "V3.51", "V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60") and C.VERSION == RR.VERSION and (ROOT / "VERSION").read_text().strip() == RR.VERSION
 CV = "/home/u/.local/lib/python3.10/site-packages/cv2/qt/plugins"
 FD = "/home/u/.local/lib/python3.10/site-packages/cv2/qt/fonts"
 

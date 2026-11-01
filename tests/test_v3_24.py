@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 import NERO_V314_Joint_Control as JC  # noqa: E402
 import NERO_V313_Real_Robot as RR  # noqa: E402
 
-assert RR.VERSION.startswith(("V3.2", "V3.3", "V3.4", "V3.5"))
+assert RR.VERSION.startswith(("V3.2", "V3.3", "V3.4", "V3.5", "V3.6"))
 assert JC.PARK_DEFAULT_DEG == [0.1, -100.6, 1.2, 126.0, -0.1, -0.2, 97.3]
 tmp = Path(tempfile.mkdtemp(prefix="v324_")) / "park.json"
 d = JC.load_park(str(tmp))

@@ -1,3 +1,21 @@
+## V3.60 (2026-11-01) — 默认技能严格还原 V3.58 + 技能编号 + 发布包只读 + 仿真注入 + 仿真技能页 + 任务打分 Y
+- **默认值严格还原（`NERO_V359_Strategy.py`、`NERO_V325_Camera.py`）**：
+  - 实机悬停复核默认高度改回 **100 mm**（= V3.48 `HOVER_DEFAULT_MM`）；未选中行时的悬停目标默认改为新模式 `table_trusted_first`（表格顺序 + 可信优先，= V3.58 `_selected_hover_target`）。V3.59 的 60 mm + 「置信度 → 离基座最近」改为非默认技能 **QH Quick Hover**。
+  - 启动控制台时不再改写「悬停高度」输入框；只有在技能页「应用 / 选择技能 / 还原基准」时才写入。
+  - `is_baseline_equivalent()` 现在比较全部 45 项（V3.59 忽略了悬停组，导致 60 mm 的预设也被标成“基准”）。
+- **腕部 USB 相机与技能独立（用户确认）**：腕部「微调对齐」高度、腕部画面 TCP 准星投影、保存到 `locate_settings.json` 的悬停高度，一律使用用户自己的悬停值（`_hover_user_str()`），不跟随技能；用户在技能写入后再手动改输入框，即视为用户值。
+- **技能编号**：每个技能有英文短名 `short_name` + 两字母缩写 `code`（唯一）：EB Egg Baseline、DP Dense Anti-Poke、HD Hover Dry-Run、QH Quick Hover。用户新建技能必须填写，不能与已有缩写重复，不能用内置 skill_id。
+- **发布包运行时只读**：不再在运行时写 `config/strategies/`（V3.59 每次启动 / 应用都会改写 `default.json`，导致 SHA256 校验报不一致）。当前生效的技能存到 `logs/v360_active_strategy.json`；用户技能存到 `~/Downloads/cameracalib/strategies/`（`NERO_V360_USER_STRATEGY_DIR` 可改）；「还原基准」不再写文件。发布 JSON 改为 0644。
+- **技能名片不再写未测量的数字**：所有内置技能的 `sim_benchmark.success_rate / avg_cycle_time_s` 置为 `null`（V3.59 写的 1.0 / 16.5 s、0.95 / 18.8 s、1.0 / 12 s 没有测量依据）；HD 名片去掉了具体夹爪型号。
+- **仿真接入（方案 A，`NERO_V312_Console.py`）**：点「▶ 启动仿真」时，把最近一次「应用」的技能里 6 个后端已读取的环境变量注入仿真：`NERO_V304_EGG_APERTURE_MARGIN_MM`、`NERO_V304_FINAL_APPROACH_M`、`NERO_V304_FINAL_APPROACH_SLOW`、`NERO_V304_GRASP_Z_COMP_M`、`NERO_V341_LIMIT_MARGIN_DEG`、`NERO_V341_LIMIT_MARGIN_MIN_DEG`。**只注入与基准不同的值**，所以基准 EB 不改变后端任何参数，终端里自己 export 的值也不会被 EB 覆盖；被其他技能覆盖时打印 WARN。另外总是传 `NERO_V360_SKILL_ID / _CODE / _NAME` 供打分使用。每个旋钮在界面上标注 `[仿真✓]`（6 项）/ `[实机✓]`（8 项）/ `[未接入]`（31 项，只记录，本版本无代码读取，例如碰歪 / 急停重试加宽量）。
+- **仿真 GUI 新增同一个「技能参数旋钮」独立 tab**（在 NERO SimAgent 旁边，仿真窗口里不显示实机多点预演面板）：后端只在已有的一个 `# V3.43 A2` 块里加了一行调用 `NERO_V359_Strategy.add_sim_strategy_tab()`，`test_v3_44` 的 C1 / C2 / C3 字节级校验不变。仿真窗口里「应用」的技能在下次启动仿真时生效；控制台打开技能页时会同步显示另一个窗口应用的技能。
+- **仿真任务打分 Y（`NERO_V2_7_1_Agent.py`）**：每次仿真任务结束，在 `[TASK SUMMARY]` 和 `[V3.42 TASK STATS]` 之后打印一行 `[V3.60 SKILL SCORE] skill=… | s=… | t=… min | z=… LLM rounds | Y = s/(t*z)*100 = …`，并追加到 `logs/v360_skill_scores.jsonl`。s = 成功入槽的蛋 / 任务蛋（任务点名的蛋；"all eggs" 时为首次 observe_scene 时不在蛋托里的蛋），t = 任务开始到结束的分钟数（成败都算），z = LLM 请求-响应往返次数；t·z = 0 时 Y = 0。
+- **修复**：`parse_waypoint_spec` 只输入 x、y（单位 m）时，V3.59 把缺省的 z=35 也算进单位判断，整点被当成 mm（离基座 0.5 mm）；多点预演跨点抬升规划失败时，V3.59 会静默跳过、直接平移，现在打印 WARN。删除了从未被调用的 `install_backend_hooks()`。
+- **更正 V3.59 条目**：V3.59 实际**没有**修改仿真后端，也**没有**把技能目录注入 `observe_scene`（`export_llm_skill_catalog()` 只用于「复制 LLM 技能目录」按钮）；参数总数是 45 项，不是 35 项。
+- **主相机标定标签（V3.59 带入，单独说明）**：`_calib_text()` 第一行的「合格 / 未达标」改为优先使用标定结果自带的 `good`；LOO 合格但有朝向 / 范围警告时显示「未达标 ⚠（留一精度已合格，需补够下方朝向/范围要求）」；没有 `good` 字段时与 V3.58 相同（只看 LOO）。只影响显示文字，不影响标定计算。
+- **测试**：新增 `tests/test_v3_60.py`（F1–F9，含从后端源码 AST 抽取原函数的零偏差等价测试）、`tests/test_v3_60_gui.py`；补上 V3.59 发布时缺失的 `tests/test_v3_59.py`、`tests/test_v3_59_gui.py`；老测试版本白名单扩展到 V3.60。`SHA256SUMS.txt` 现在扫描三层目录，包含 `config/strategies/*.json`。
+- **仓库**：去掉 V3.47.1 时期遗留、任何发布包都没有的 `config/camera_calib.json`、`config/yolo_ref.*`。
+
 ## V3.59 (2026-11-01) — Baseline-Equivalent Strategy Knobs Tab + LLM Skill Cards + Multi-Point Hover Dry-Run
 - **100% Baseline-Equivalent Decomposed Strategy Knobs (`NERO_V359_Strategy.py`, `config/strategies/egg_grasp_v345_baseline.json`, `NERO_V2_7_1_Unified_Backend.py`)**:
   - Decomposes the verified V2.7 / V2.7.2 / V2.9 / V2.16 / V3.02 / V3.04 / V3.40 / V3.41 / V3.48 manipulation logic into 5 groups and 35 explicit parameters (`grasp_scoring`, `gripper_approach`, `ik_posture`, `placement_recovery`, `hover_dry_run`).

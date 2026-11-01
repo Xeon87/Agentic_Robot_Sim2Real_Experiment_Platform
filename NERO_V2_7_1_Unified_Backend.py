@@ -4304,6 +4304,11 @@ def run_gui(
     llm_outer.pack(fill="both", expand=True, padx=12, pady=12)
     # V3.43 A2 BEGIN
     append_gui_log(f"[V3.44 SCENE] MuJoCo scene = {_v343_scene_name()} (chosen in the NERO console before start)")
+    try:   # V3.60 SIM SKILL TAB: same 「技能参数旋钮」 tab as the console, as its own tab next to NERO SimAgent
+        import NERO_V359_Strategy as _ST360
+        _ST360.add_sim_strategy_tab(tk, ttk, notebook, log=append_gui_log)
+    except Exception as _e360:
+        append_gui_log(f"[WARN] [V3.60 SKILL TAB] skill tab not available: {_e360}")
     # V3.43 A2 END
 
     ttk.Label(

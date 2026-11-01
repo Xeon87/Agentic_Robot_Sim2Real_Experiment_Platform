@@ -1,7 +1,9 @@
 {
   "skill_id": "egg_grasp_v345_baseline",
-  "version": "V3.59",
-  "saved": "2026-11-01 18:07:55",
+  "short_name": "Egg Baseline",
+  "code": "EB",
+  "version": "V3.60",
+  "saved": "2026-11-01 00:00:00",
   "is_baseline": true,
   "skill_card": {
     "name": "抓鸡蛋入托标准基准技能 (V3.45 Baseline)",
@@ -18,10 +20,10 @@
     ],
     "sim_benchmark": {
       "trained_scene": "fill_egg_holder",
-      "noise_level": "camera_perceived_v340",
-      "success_rate": 1.0,
-      "avg_cycle_time_s": 16.5,
-      "notes": "V2.7 ~ V3.45 历次仿真与实机调试定型的黄金基准参数（零偏差还原）"
+      "noise_level": null,
+      "success_rate": null,
+      "avg_cycle_time_s": null,
+      "notes": "V2.7 ~ V3.58 调好的基准参数；成功率 / 耗时尚未测量"
     }
   },
   "knobs": {
@@ -33,7 +35,7 @@
     "neighbor_safe_clearance_mm": 3.0,
     "w_neighbor_intrusion": 0.8,
     "neighbor_penalty_cap": -10.0,
-    "target_order_mode": "confidence_then_nearest",
+    "target_order_mode": "table_trusted_first",
     "egg_open_margin_mm": 16.0,
     "egg_open_band_lo_mm": -4.0,
     "egg_open_band_hi_mm": 6.0,
@@ -63,7 +65,7 @@
     "bystander_warn_mm": 3.0,
     "bystander_abort_mm": 8.0,
     "object_stale_pos_mm": 8.0,
-    "cam_hover_verify_height_mm": 60.0,
+    "cam_hover_verify_height_mm": 100.0,
     "cam_hover_soft_limit_deg": 3.0,
     "cam_hover_max_speed_pct": 10.0,
     "dry_run_transit_z_lift_mm": 40.0,

@@ -1,6 +1,8 @@
 {
   "skill_id": "dense_cluster_anti_poke",
-  "version": "V3.59",
+  "short_name": "Dense Anti-Poke",
+  "code": "DP",
+  "version": "V3.60",
   "saved": "2026-11-01 00:00:00",
   "is_baseline": false,
   "skill_card": {
@@ -17,10 +19,10 @@
     ],
     "sim_benchmark": {
       "trained_scene": "fill_egg_holder",
-      "noise_level": "pos_2mm_yaw_1.5deg",
-      "success_rate": 0.95,
-      "avg_cycle_time_s": 18.8,
-      "notes": "针对贴靠鸡蛋场景收窄预张开裕量并强化邻蛋净空排序的防碰预设"
+      "noise_level": null,
+      "success_rate": null,
+      "avg_cycle_time_s": null,
+      "notes": "人工示例预设，未经仿真测量 / 寻优"
     }
   },
   "knobs": {
@@ -32,7 +34,7 @@
     "neighbor_safe_clearance_mm": 5.0,
     "w_neighbor_intrusion": 1.8,
     "neighbor_penalty_cap": -16.0,
-    "target_order_mode": "confidence_then_nearest",
+    "target_order_mode": "table_trusted_first",
     "egg_open_margin_mm": 12.5,
     "egg_open_band_lo_mm": -4.0,
     "egg_open_band_hi_mm": 6.0,
@@ -62,7 +64,7 @@
     "bystander_warn_mm": 3.0,
     "bystander_abort_mm": 8.0,
     "object_stale_pos_mm": 8.0,
-    "cam_hover_verify_height_mm": 60.0,
+    "cam_hover_verify_height_mm": 100.0,
     "cam_hover_soft_limit_deg": 3.0,
     "cam_hover_max_speed_pct": 10.0,
     "dry_run_transit_z_lift_mm": 40.0,
