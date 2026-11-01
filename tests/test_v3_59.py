@@ -35,8 +35,8 @@ CAM.LOCATE_PATH = str(TMP / "locate_settings.json")
 CAM.CALIB_DIR = str(TMP / "cameracalib")
 
 # ------------------------------------------------------------------ G1 knob specs
-assert [g for g, _ in ST.KNOB_GROUPS] == ["grasp_scoring", "gripper_approach", "ik_posture", "placement_recovery", "hover_dry_run"]
-assert len(ST.KNOB_SPECS) == 45 and len(ST.KNOB_BY_KEY) == 45
+assert [g for g, _ in ST.KNOB_GROUPS][:5] == ["grasp_scoring", "gripper_approach", "ik_posture", "placement_recovery", "hover_dry_run"]
+assert len([s for s in ST.KNOB_SPECS if s["group"] != "cup_stacking"]) == 45 and len(ST.KNOB_BY_KEY) == len(ST.KNOB_SPECS)   # V3.61: + cup group
 for s in ST.KNOB_SPECS:
     for f in ("key", "group", "label", "type", "default", "unit", "desc"):
         assert f in s, (s.get("key"), f)
@@ -51,7 +51,7 @@ for s in ST.KNOB_SPECS:
     else:
         assert s["type"] == "bool" and ST.coerce_knob_value(s["key"], "true") is True and ST.coerce_knob_value(s["key"], "0") is False
 k = ST.sanitize_knobs({"egg_open_margin_mm": 99, "unknown": 1})
-assert k["egg_open_margin_mm"] == 26.0 and "unknown" not in k and len(k) == 45
+assert k["egg_open_margin_mm"] == 26.0 and "unknown" not in k and len(k) == len(ST.KNOB_SPECS)
 print("[G1] 5 groups / 45 knobs: defaults inside bounds; clamping and fallbacks")
 
 # ------------------------------------------------------------------ G2 profile JSON
@@ -122,7 +122,8 @@ print("[G4] dry-run plan (transit lift, chained seeds, return home) and executio
 
 # ------------------------------------------------------------------ G5 catalog
 cat = ST.export_llm_skill_catalog(active_profile=ST.builtin_strategy_presets()[0])
-assert [s["skill_id"] for s in cat["available_skills"][:4]] == [p_.skill_id for p_ in ST.builtin_strategy_presets()]
+_bi = [p_.skill_id for p_ in ST.builtin_strategy_presets()]
+assert [s["skill_id"] for s in cat["available_skills"][:len(_bi)]] == _bi
 assert all(s["when_to_use"] and s["behavior_summary"] for s in cat["available_skills"])
 print(f"[G5] LLM skill catalog: {len(cat['available_skills'])} skills")
 

@@ -37,7 +37,11 @@ SCENES = {
                         "summary": "4 eggs -> 8-slot carton (existing scene)"},
     "store_in_safe": {"label": "store_in_safe - 物体放入保险箱 (RoboDojo)",
                       "summary": "open the safe door, put the valuables box inside, close the door"},
+    # V3.61 STACK CUPS SCENE (RoboDojo-style): two red/white party cups on the same table, stack one into the other
+    "stack_cups": {"label": "stack_cups - 叠杯子 (RoboDojo)",
+                   "summary": "two red party cups upright on the table: put cup_1 into cup_2 (nested stack)"},
 }
+SCENES_REV = "V3.61"       # VERSION above stays "V3.44" (tests pin it); this module gained stack_cups in V3.61
 HERE = Path(__file__).resolve().parent
 
 # ----------------------------------------------------------------------------- geometry (store_in_safe)
@@ -72,11 +76,15 @@ def scene_names():
 # ----------------------------------------------------------------------------- run_sim setup data (A2)
 def tf_body_map():
     """semantic name -> MuJoCo body; TF child frame = 'sim_' + semantic (object_pose('valuables_box') etc.)."""
+    if active_scene() == "stack_cups":                  # V3.61 STACK CUPS SCENE
+        return {n: n for n in CUP_NAMES}
     return {"obj_valuables_box": "obj_valuables_box", "obj_safe_handle": "obj_safe_handle",
             "obj_safe_door": "safe_door"}
 
 
 def hold_object_names():
+    if active_scene() == "stack_cups":                  # V3.61 STACK CUPS SCENE
+        return list(CUP_NAMES) + list(LEGACY_HIDDEN)
     return ["obj_valuables_box", "obj_safe_handle"] + list(LEGACY_HIDDEN)
 
 
@@ -108,6 +116,8 @@ def static_boxes():
 
 def planning_boxes(model=None, data=None):
     """MoveIt boxes for the fixed safe walls: (id, centre, full size) - same format as the egg-holder list."""
+    if active_scene() == "stack_cups":                  # V3.61: the cups are movable objects, no fixed obstacles
+        return []
     return [(n, c, tuple(2.0 * v for v in h)) for n, c, h in static_boxes()]
 
 
@@ -136,6 +146,8 @@ def door_angle(model, data):
 
 
 def planning_rotated_boxes(model, data):
+    if active_scene() == "stack_cups":                  # V3.61: no hinged door in the cup scene
+        return []
     return door_boxes(door_angle(model, data))
 
 
@@ -276,7 +288,10 @@ def scene_world_xml(angle_unit="radian"):
 
 def make_store_in_safe_xml(original_xml_path, visual_quality=None):
     """Same contract as the backend's make_grid_world_xml: read nero_motor.xml, add the scene, write a temp MJCF
-    next to it (relative mesh paths stay valid) and return its path."""
+    next to it (relative mesh paths stay valid) and return its path.
+    V3.61: the backend calls this for every non-default scene (unchanged A2 block) -> stack_cups is dispatched here."""
+    if active_scene() == "stack_cups":
+        return make_stack_cups_xml(original_xml_path, visual_quality=visual_quality)
     import numpy as np
     src = Path(original_xml_path).resolve()
     xml = src.read_text(encoding="utf-8")
@@ -331,3 +346,187 @@ def make_store_in_safe_xml(original_xml_path, visual_quality=None):
     out = src.with_name("_nero_motor_v343_store_in_safe_tmp.xml")
     out.write_text(xml, encoding="utf-8")
     return str(out)
+
+
+# ============================================================================= V3.61 STACK CUPS SCENE
+# Two disposable US party cups (16 oz "red cup": red outside, white inside) standing upright on the same white table;
+# the task (RoboDojo stack_cups style) is to put obj_cup_1 into obj_cup_2.  Sizes are the commonly quoted 16 oz
+# party-cup dimensions (top 95 mm, bottom 60 mm, height 121 mm); not measured here - measure your real cups and edit
+# CUP below.  The collision model is a thin-walled truncated cone: CUP["segments"] tilted wall boxes, a bottom disc
+# and a rolled rim ring.  The real wall is ~0.3 mm; the collision wall is CUP["wall"] (2 mm) so a falling cup cannot
+# tunnel through it at the backend's 1 ms time step.  Measured stack pitch of the model: ~25 mm (base-to-base).
+CUP = {
+    "h": 0.121, "r_top": 0.0475, "r_bot": 0.030, "wall": 0.002, "segments": 24, "rim_r": 0.0016,
+    "mass": 0.010,                    # kg, one empty 16 oz cup ~ 10 g
+    "friction": "0.45 0.01 0.001",    # polystyrene on polystyrene ~0.3-0.5 (assumed)
+    "nested_dz": 0.0253,              # base-to-base height of a fully nested pair in this model (measured)
+}
+CUP_NAMES = ("obj_cup_1", "obj_cup_2")
+# cup_1 is moved into cup_2.  x = -0.35: carrying a cup (TCP ~96 mm above its base with a 25 mm rim pinch) over
+# the other cup needs a top-down TCP at z ~0.24 m - the NERO reaches that only up to |x| ~0.36 (NERO_V361 study).
+CUP_XY = {"obj_cup_1": (-0.35, -0.13), "obj_cup_2": (-0.35, 0.13)}
+
+
+def cup_geometry(cup=None):
+    c = dict(CUP if cup is None else cup)
+    c["taper"] = (c["r_top"] - c["r_bot"]) / c["h"]
+    c["slant_deg"] = math.degrees(math.atan2(c["r_top"] - c["r_bot"], c["h"]))
+    c["pitch_m"] = c["wall"] / c["taper"]                      # wall/taper estimate only; measured: c["nested_dz"]
+    return c
+
+
+def _quat_mul(a, b):
+    w1, x1, y1, z1 = a
+    w2, x2, y2, z2 = b
+    return (w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2, w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2, w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2)
+
+
+def cup_body_xml(name, xy, cup=None, z0=0.0005, free=True, quat=None):
+    """MJCF <body> of one cup; body origin = bottom centre on the table."""
+    c = cup_geometry(cup)
+    n, H, rb, rt, w = int(c["segments"]), c["h"], c["r_bot"], c["r_top"], c["wall"]
+    beta = math.atan2(rt - rb, H)
+    slant = math.hypot(H, rt - rb)
+    half_t = (rt + w) * math.tan(math.pi / n)                  # wide enough to close the gaps at the rim
+    r_mid = 0.5 * (rb + rt)
+    m_wall = 0.75 * c["mass"] / n
+    qy = (math.cos(beta / 2), 0.0, math.sin(beta / 2), 0.0)
+    g = []
+    for k in range(n):
+        a = 2 * math.pi * k / n
+        qz = (math.cos(a / 2), 0.0, 0.0, math.sin(a / 2))
+        q = _quat_mul(qz, qy)
+        cx, cy = r_mid * math.cos(a), r_mid * math.sin(a)
+        g.append(f'<geom name="{name}_wall_{k:02d}" type="box" pos="{_f(cx, cy, H / 2)}" quat="{_f(*q)}" '
+                 f'size="{_f(w / 2, half_t, slant / 2)}" mass="{m_wall:.6f}" material="v361_cup_red_mat" '
+                 f'friction="{c["friction"]}" condim="4" solref="0.004 1" solimp="0.95 0.99 0.0005" margin="0.0005"/>')
+        ri = r_mid - 0.6 * w * math.cos(beta)                  # white inside (visual only)
+        g.append(f'<geom name="{name}_inner_{k:02d}" type="box" pos="{_f(ri * math.cos(a), ri * math.sin(a), H / 2 + 0.6 * w * math.sin(beta))}" '
+                 f'quat="{_f(*q)}" size="{_f(w / 4, half_t * 0.99, slant / 2 - 0.002)}" material="v361_cup_white_mat" '
+                 f'contype="0" conaffinity="0" density="0"/>')
+    g.append(f'<geom name="{name}_bottom" type="cylinder" pos="0 0 {w / 2:.5f}" size="{rb:.5f} {w / 2:.5f}" '
+             f'mass="{0.15 * c["mass"]:.6f}" material="v361_cup_red_mat" friction="{c["friction"]}" condim="4" '
+             f'solref="0.004 1" solimp="0.95 0.99 0.0005"/>')
+    g.append(f'<geom name="{name}_bottom_inner" type="cylinder" pos="0 0 {w + 0.0002:.5f}" size="{rb - w:.5f} 0.0002" '
+             f'material="v361_cup_white_mat" contype="0" conaffinity="0" density="0"/>')
+    rr = rt + 0.5 * w
+    for k in range(n):
+        a0, a1 = 2 * math.pi * k / n, 2 * math.pi * (k + 1) / n
+        g.append(f'<geom name="{name}_rim_{k:02d}" type="capsule" '
+                 f'fromto="{_f(rr * math.cos(a0), rr * math.sin(a0), H, rr * math.cos(a1), rr * math.sin(a1), H)}" '
+                 f'size="{c["rim_r"]:.5f}" mass="{0.10 * c["mass"] / n:.6f}" material="v361_cup_red_mat" '
+                 f'friction="{c["friction"]}" condim="4"/>')
+    q_txt = f' quat="{_f(*quat)}"' if quat is not None else ""
+    joint = "<freejoint/>" if free else ""
+    body = "\n            ".join(g)
+    return (f'<body name="{name}" pos="{_f(xy[0], xy[1], z0)}"{q_txt}>\n            {joint}\n            {body}\n'
+            f'        </body>')
+
+
+CUP_ASSETS = """
+    <!-- NERO V3.61 stack_cups assets (party cup: red outside, white inside) -->
+    <material name="v361_cup_red_mat" rgba="0.80 0.07 0.09 1" reflectance="0.08" specular="0.55" shininess="0.6"/>
+    <material name="v361_cup_white_mat" rgba="0.96 0.96 0.95 1" reflectance="0.04" specular="0.30" shininess="0.4"/>
+"""
+
+
+def stack_cups_world_xml(cup_xy=None):
+    xy = dict(CUP_XY if cup_xy is None else cup_xy)
+    cups = "\n    ".join(cup_body_xml(n, xy[n]) for n in CUP_NAMES)
+    legacy = "\n".join(
+        f'    <body name="{n}" pos="{-8 - 0.1 * i:.1f} -8 -8"><freejoint/><geom name="{n}_geom" type="sphere" size="0.001" '
+        f'mass="0.001" rgba="0 0 0 0" contype="0" conaffinity="0"/></body>' for i, n in enumerate(LEGACY_HIDDEN))
+    return f"""
+    <!-- ============================================================
+         NERO V3.61 stack_cups SCENE (RoboDojo task name) - table top z = 0, robot mount unchanged
+         ============================================================ -->
+    <geom name="v5_grid_floor" type="plane" pos="0 0 -0.28" size="6 6 0.1"
+          material="v343_floor_mat" friction="1.2 0.01 0.001" contype="1" conaffinity="1"/>
+    <geom name="play_table" type="box" pos="-0.385 0 -0.03" size="0.335 0.38 0.03" material="v343_table_mat"
+          friction="1.2 0.01 0.001" solref="0.008 1" solimp="0.96 0.995 0.0005" margin="0.001"
+          contype="1" conaffinity="1"/>
+    <geom name="nero_support_top" type="box" pos="-0.025 0 -0.008" size="0.025 0.085 0.008"
+          rgba="0.15 0.16 0.18 1" contype="0" conaffinity="0"/>
+    <geom name="nero_support_vertical" type="box" pos="-0.055 0 -0.075" size="0.008 0.085 0.067"
+          rgba="0.15 0.16 0.18 1" contype="0" conaffinity="0"/>
+    <geom name="nero_support_lower_jaw" type="box" pos="-0.080 0 -0.134" size="0.030 0.085 0.008"
+          rgba="0.15 0.16 0.18 1" contype="0" conaffinity="0"/>
+    <!-- two party cups, upright -->
+    {cups}
+    <!-- legacy hidden bodies (unchanged GUI/runtime compatibility) -->
+{legacy}
+    <light name="eggscene_key" pos="0.25 -0.65 2.20" dir="-0.30 0.22 -1" directional="true" castshadow="true"
+           diffuse="0.92 0.84 0.72" specular="0.22 0.20 0.18"/>
+    <light name="eggscene_fill" pos="-1.20 0.80 1.50" dir="0.55 -0.25 -1" directional="true" castshadow="false"
+           diffuse="0.34 0.40 0.48" specular="0.05 0.06 0.08"/>
+"""
+
+
+def make_stack_cups_xml(original_xml_path, visual_quality=None):
+    """V3.61: same contract as make_store_in_safe_xml for the stack_cups scene."""
+    import re
+    import numpy as np
+    src = Path(original_xml_path).resolve()
+    xml = src.read_text(encoding="utf-8")
+    tex = src.parent / "_nero_v343_scene_textures"
+    tex.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(34301)
+    nz = rng.normal(0.0, 1.0, (256, 256))
+    nz = (nz + np.roll(nz, 3, 0) + np.roll(nz, 4, 1)) / 3.0
+    _png(tex / "floor_grey.png", np.clip(np.stack([102 + 6 * nz, 110 + 6 * nz, 127 + 6 * nz], -1), 0, 255))
+    _png(tex / "table_white.png", np.clip(np.stack([236 + 1.5 * nz, 236 + 1.5 * nz, 234 + 1.5 * nz], -1), 0, 255))
+    assets = f"""
+    <texture name="v343_sky" type="skybox" builtin="gradient" rgb1="0.54 0.64 0.76" rgb2="0.92 0.90 0.84"
+             width="512" height="3072"/>
+    <texture name="v343_floor_tex" type="2d" file="{(tex / 'floor_grey.png').as_posix()}"/>
+    <texture name="v343_table_tex" type="2d" file="{(tex / 'table_white.png').as_posix()}"/>
+    <material name="v343_floor_mat" texture="v343_floor_tex" texrepeat="7 7" reflectance="0.02" specular="0.16"
+              shininess="0.08"/>
+    <material name="v343_table_mat" texture="v343_table_tex" texrepeat="2.2 1.7" reflectance="0.05"
+              specular="0.25" shininess="0.2"/>
+""" + CUP_ASSETS
+    if re.search(r"<asset\b[^>]*/>", xml):
+        xml = re.sub(r"<asset\b[^>]*/>", "<asset>\n" + assets + "\n</asset>", xml, count=1)
+    elif "<asset" in xml:
+        xml = re.sub(r"(<asset\b[^>]*>)", lambda m: m.group(1) + "\n" + assets, xml, count=1)
+    else:
+        xml = xml.replace("<worldbody>", "<asset>\n" + assets + "\n</asset>\n\n<worldbody>", 1)
+    g = cup_geometry()
+    print(f"[V3.61 SCENE] stack_cups: 2 cups h={g['h'] * 1000:.0f} mm top {2 * g['r_top'] * 1000:.0f} mm "
+          f"bottom {2 * g['r_bot'] * 1000:.0f} mm, nested base-to-base {g['nested_dz'] * 1000:.1f} mm (model)", flush=True)
+    xml = xml.replace("<worldbody>", "<worldbody>\n" + stack_cups_world_xml(), 1)
+    if visual_quality is not None:
+        xml = visual_quality(xml)
+    eq = "\n        ".join(
+        f'<connect name="hold_{o}" body1="link7" body2="{o}" anchor="0 0 0" active="false" '
+        f'solref="0.008 1" solimp="0.98 0.995 0.001"/>' for o in hold_object_names())
+    if "</equality>" in xml:
+        xml = xml.replace("</equality>", "        " + eq + "\n    </equality>", 1)
+    else:
+        xml = xml.replace("</mujoco>", "    <equality>\n        " + eq + "\n    </equality>\n</mujoco>", 1)
+    out = src.with_name("_nero_motor_v343_stack_cups_tmp.xml")
+    out.write_text(xml, encoding="utf-8")
+    return str(out)
+
+
+def cup_axis_tilt_deg(quat_wxyz):
+    """angle between a cup's axis (body z) and the world vertical"""
+    w, x, y, z = [float(v) for v in quat_wxyz]
+    zz = 1 - 2 * (x * x + y * y)
+    return math.degrees(math.acos(max(-1.0, min(1.0, zz))))
+
+
+def cup_task_state(cup1_xyz, cup1_quat_wxyz, cup2_xyz, cup2_quat_wxyz, cup=None):
+    """stack_cups: stacked = cup_1 upright with its base inside cup_2 (success); nested_full = slid all the way down.
+    A rigid model cup that is released off-centre jams part-way (stacked, not nested_full)."""
+    g = cup_geometry(cup)
+    dxy = math.hypot(cup1_xyz[0] - cup2_xyz[0], cup1_xyz[1] - cup2_xyz[1])
+    dz = cup1_xyz[2] - cup2_xyz[2]
+    t1, t2 = cup_axis_tilt_deg(cup1_quat_wxyz), cup_axis_tilt_deg(cup2_quat_wxyz)
+    # cup_1 standing on the rim -> dz ~ h; nested -> dz ~ 25 mm in this model (measured, see NERO_V361_Cup_Stack)
+    stacked = dxy <= 0.5 * g["r_bot"] and t1 <= 8.0 and t2 <= 8.0 and 0.0 < dz <= 0.5 * g["h"]
+    full = stacked and dz <= g["nested_dz"] + 0.005
+    return {"xy_offset_mm": round(dxy * 1000, 1), "base_dz_mm": round(float(dz) * 1000, 1), "tilt_cup1_deg": round(t1, 1),
+            "tilt_cup2_deg": round(t2, 1), "stacked": bool(stacked), "nested_full": bool(full),
+            "nested": bool(stacked), "success": bool(stacked)}

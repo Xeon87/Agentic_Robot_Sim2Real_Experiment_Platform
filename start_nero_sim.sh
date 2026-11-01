@@ -153,8 +153,8 @@ status INFO "MuJoCo model (external): $MODEL_FILE sha256=$(sha256sum "$MODEL_FIL
 # V3.44 MUJOCO SCENE: chosen before start (NERO console drop-down -> NERO_SCENE); unset = fill_egg_holder
 SCENE344="${NERO_SCENE:-fill_egg_holder}"
 case "$SCENE344" in
-  fill_egg_holder|store_in_safe) ;;
-  *) fatal "Unknown NERO_SCENE='$SCENE344' (known: fill_egg_holder, store_in_safe)";;
+  fill_egg_holder|store_in_safe|stack_cups) ;;   # V3.61 STACK CUPS SCENE
+  *) fatal "Unknown NERO_SCENE='$SCENE344' (known: fill_egg_holder, store_in_safe, stack_cups)";;
 esac
 export NERO_SCENE="$SCENE344"
 status INFO "V3.44 MuJoCo scene: $SCENE344 (chosen in the NERO console before start; default fill_egg_holder)"

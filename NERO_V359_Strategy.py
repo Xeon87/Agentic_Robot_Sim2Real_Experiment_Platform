@@ -25,7 +25,8 @@ import os
 import re
 import time
 
-VERSION = "V3.60"
+VERSION = "V3.61"
+# V3.61 COLLAPSIBLE SKILL TAB + CODES AFTER SKILL NAMES + STACK CUPS SKILL (CS)
 # V3.60 BASELINE-EXACT DEFAULTS + SKILL CODES + READ-ONLY RELEASE FILES + SIM ENV INJECTION + SIM TAB
 #   * defaults restore V3.58 real behaviour (hover 100 mm, table order + trusted first)
 #   * every skill has short_name (English) + 2-letter code (EB / DP / HD / QH ...)
@@ -49,6 +50,8 @@ KNOB_GROUPS = [
     ("ik_posture", "③ 逆运动学姿态筛选与手腕翻转权重 (V2.7.2 + V3.41)"),
     ("placement_recovery", "④ 蛋托对齐入槽与邻蛋防扰动门限 (V2.9 + V3.40)"),
     ("hover_dry_run", "⑤ 实机悬停复核与无夹爪多点预演 (Dry-Run)"),
+    # V3.61 STACK CUPS: rim-pinch cup stacking (values from NERO_V361_Cup_Stack offline study)
+    ("cup_stacking", "⑥ 叠杯子：捏杯沿抓取 · 运送 · 对中松手 (V3.61 离线试验)"),
 ]
 
 SLOT_FILL_ORDERS = ("numeric_1_to_8", "nearest_to_egg", "far_to_near")
@@ -553,6 +556,53 @@ KNOB_SPECS = [
         "unit": "开关",
         "desc": "多点悬停预演全部走完后，自动退回预演开始前的初始关节姿态",
     },
+    # --- Group 6 (V3.61): stack_cups rim-pinch skill; defaults = NERO_V361_Cup_Stack study
+    #     (config/cup_stack_study_v361.json: MuJoCo release sweep + strict 6-DoF URDF IK; not measured on hardware)
+    {
+        "key": "cup_rim_pinch_depth_mm", "group": "cup_stacking", "label": "捏杯沿深度", "type": "float",
+        "default": 25.0, "min": 10.0, "max": 45.0, "unit": "mm",
+        "desc": "指垫从杯口往下捏住杯壁的深度（一指在杯内、一指在杯外）；越深 TCP 越低、可达裕量越大（试验：25 mm 时最小限位裕量 12.6°，35 mm 时 16°），但受手指长度限制",
+    },
+    {
+        "key": "cup_grasp_rim_angle_deg", "group": "cup_stacking", "label": "抓取杯沿方位", "type": "float",
+        "default": 40.0, "min": -180.0, "max": 180.0, "unit": "deg",
+        "desc": "在被抓杯子上捏哪一点：相对「杯心→机械臂基座」方向逆时针的角度（试验最优 +40°，24 个方位中 21 个可达）",
+    },
+    {
+        "key": "cup_place_rim_angle_deg", "group": "cup_stacking", "label": "放置杯沿方位", "type": "float",
+        "default": -55.0, "min": -180.0, "max": 180.0, "unit": "deg",
+        "desc": "放到目标杯上方时被抓点所在方位（杯子轴对称，运送途中可绕杯轴转），相对目标杯「杯心→基座」方向（试验最优 −55°）",
+    },
+    {
+        "key": "cup_pregrasp_height_mm", "group": "cup_stacking", "label": "抓杯前悬停高度", "type": "float",
+        "default": 60.0, "min": 30.0, "max": 120.0, "unit": "mm",
+        "desc": "TCP 在捏杯点正上方停稳的高度，再竖直下探捏住杯沿",
+    },
+    {
+        "key": "cup_transport_clearance_mm", "group": "cup_stacking", "label": "运送越杯余量", "type": "float",
+        "default": 20.0, "min": 10.0, "max": 60.0, "unit": "mm",
+        "desc": "运送时被抓杯的杯底高出另一只杯口的距离；NERO 在 |x|≈0.35 m 处竖直向下最高约 0.245 m，余量越大越难够到",
+    },
+    {
+        "key": "cup_release_gap_mm", "group": "cup_stacking", "label": "松手高度（相对套好位置）", "type": "float",
+        "default": 85.0, "min": 0.0, "max": 100.0, "unit": "mm",
+        "desc": "杯子下降到「完全套好」位置上方多少时松手（85 mm = 杯底刚进杯口约 11 mm）；试验：85 mm 时偏差 ≤15 mm、倾斜 ≤6° 全部套到底，低位松手易卡在半途",
+    },
+    {
+        "key": "cup_release_xy_tol_mm", "group": "cup_stacking", "label": "松手前对中容差", "type": "float",
+        "default": 7.5, "min": 2.0, "max": 15.0, "unit": "mm",
+        "desc": "松手前两杯轴心水平偏差的允许上限（试验找到 15 mm，取 0.5 安全系数）；超过则先修正再松手",
+    },
+    {
+        "key": "cup_release_tilt_tol_deg", "group": "cup_stacking", "label": "松手前倾斜容差", "type": "float",
+        "default": 3.0, "min": 1.0, "max": 6.0, "unit": "deg",
+        "desc": "被抓杯轴线相对竖直的允许倾斜（试验在 6° 内全部成功，取一半）",
+    },
+    {
+        "key": "cup_nested_height_mm", "group": "cup_stacking", "label": "套好后杯底高差", "type": "float",
+        "default": 25.3, "min": 10.0, "max": 40.0, "unit": "mm",
+        "desc": "两杯完全套好时上杯杯底比下杯杯底高多少（仿真模型实测 25.3 mm；真杯子请实测后填写）",
+    },
 ]
 
 # V3.60 WIRING: where a knob really acts in this version.
@@ -569,9 +619,11 @@ SIM_ENV_KNOBS = {   # knob -> (environment variable, backend default string, sca
 }
 REAL_KNOBS = ("target_order_mode", "cam_hover_verify_height_mm", "cam_hover_soft_limit_deg", "cam_hover_max_speed_pct",
               "dry_run_transit_z_lift_mm", "dry_run_dwell_s", "dry_run_wrist_refine", "dry_run_return_home")
-WIRING_LABELS = {"sim_env": "仿真✓", "real": "实机✓", "none": "未接入"}
+WIRING_LABELS = {"sim_env": "仿真✓", "real": "实机✓", "none": "未接入", "study": "离线试验✓"}
 for _s360 in KNOB_SPECS:
     _s360["wired"] = "sim_env" if _s360["key"] in SIM_ENV_KNOBS else ("real" if _s360["key"] in REAL_KNOBS else "none")
+    if _s360["group"] == "cup_stacking":          # V3.61: used by NERO_V361_Cup_Stack (offline study / planner)
+        _s360["wired"] = "study"
 
 KNOB_BY_KEY = {s["key"]: s for s in KNOB_SPECS}
 BASELINE_KNOBS = {s["key"]: s["default"] for s in KNOB_SPECS}
@@ -1114,7 +1166,28 @@ def builtin_strategy_presets():
         short_name="Quick Hover",
         code="QH",
     )
-    return [baseline, dense, dry, qh]
+    # V3.61 STACK CUPS: cup skill (rim pinch) - numbers from the offline study, egg knobs unchanged (not used)
+    cs_card = {
+        "name": "叠杯子·捏杯沿技能 (Cup Stack, rim pinch)",
+        "when_to_use": "stack_cups 场景：两只直立的一次性派对杯（外红内白），把一只放进另一只里面叠起来。",
+        "when_not_to_use": "杯子倒放、已被压扁或杯口朝下；杯子距机械臂太远（|x| > 0.36 m 时竖直向下够不到运送高度）。",
+        "behavior_summary": ("竖直向下捏住杯沿（一指在内、一指在外，深 25 mm）→ 抬到杯底高出另一杯口 20 mm → 运到目标杯上方"
+                             "（途中绕杯轴转到放置方位）→ 对中（≤7.5 mm、≤3°）→ 下降到套好位置上方 85 mm（杯底刚进杯口）松手，"
+                             "让杯子自己滑到底。参数来自 MuJoCo 离线松手试验与 URDF 严格 IK 可达性试验。"),
+        "scene_tags": ["stack_cups", "cup", "rim_pinch", "nesting"],
+        "sim_benchmark": {"trained_scene": "stack_cups", "noise_level": None, "success_rate": None,
+                          "avg_cycle_time_s": None,
+                          "notes": "离线物理试验（只有杯子、刚体模型）+ IK 试验；机械臂完整闭环尚未在仿真里跑过，成功率未测"},
+    }
+    cs = StrategyProfile(
+        skill_id="cup_stack_rim_pinch",
+        skill_card=cs_card,
+        knobs=dict(BASELINE_KNOBS),
+        saved="2026-11-01 00:00:00",
+        short_name="Cup Stack",
+        code="CS",
+    )
+    return [baseline, dense, dry, qh, cs]
 
 
 def _inside(path, folder):
@@ -1159,6 +1232,12 @@ def ensure_builtin_strategies(strategy_dir=None):
 
 
 BUILTIN_SKILL_IDS = tuple(p.skill_id for p in builtin_strategy_presets())
+
+
+def skill_display_name(profile):
+    """V3.61: the name shown in the GUI = skill card name + its 2-letter code, e.g. '叠杯子·捏杯沿技能 (...) [CS]'."""
+    name = (profile.skill_card or {}).get("name") or profile.short_name or profile.skill_id
+    return f"{name} [{profile.code or '??'}]"
 
 
 def list_strategy_files(strategy_dir=None, user_dir=None):
@@ -1651,6 +1730,7 @@ class SkillStrategyTabUI:
         self.log = log or (lambda msg: None)
         self.ask = ask or (lambda _t, _q: True)
 
+        self._sections = {}                  # V3.61 COLLAPSIBLE: base state before any panel is built
         self.profile = get_active_strategy()
         self.knob_vars = {}
         self._last_dry_plan = None
@@ -1714,15 +1794,23 @@ class SkillStrategyTabUI:
         JC.fixed_label(tk, top_lf, 2, textvariable=self.v_status, font=("TkFixedFont", 9), fg="#1b5e20",
                        wraplength=1200, justify="left", anchor="nw", pack={"fill": "x", "pady": (4, 0)})
         note360 = ("标签：[仿真✓] = 下次「启动仿真」时经环境变量注入后端（仅与基准不同时注入）；[实机✓] = Camera 页悬停复核 / "
-                   "多点预演使用；[未接入] = 只记录，本版本还没有代码读取。内置技能只读，用户技能保存到 "
+                   "多点预演使用；[未接入] = 只记录，本版本还没有代码读取；[离线试验✓] = 数值来自离线仿真试验，运行代码尚未读取（V3.61）。内置技能只读，用户技能保存到 "
                    f"{USER_STRATEGY_DIR}；当前选择保存在 logs/。")
         if self.mode == "sim":
             note360 = ("仿真窗口：这里「应用」的参数在下次启动仿真时生效（本次运行已按启动时的技能注入）。 " + note360)
         ttk.Label(top_lf, text=note360, foreground="#607d8b", wraplength=1200, justify="left").pack(fill="x", pady=(2, 0))
 
+        # V3.61 COLLAPSIBLE: one click folds / unfolds every section below (own row, never pushed off-screen)
+        r_fold = ttk.Frame(main)
+        r_fold.pack(fill="x", padx=4, pady=(4, 0))
+        self.b_collapse_all = ttk.Button(r_fold, text="⊟ 全部折叠", command=self.collapse_all)
+        self.b_collapse_all.pack(side="left", padx=2)
+        self.b_expand_all = ttk.Button(r_fold, text="⊞ 全部展开", command=self.expand_all)
+        self.b_expand_all.pack(side="left", padx=2)
+        ttk.Label(r_fold, text="点击下面各区域标题前的 ▾ / ▸ 单独折叠或展开", foreground="#607d8b").pack(side="left", padx=8)
+
         # ---- 2. Skill Card (自然语言技能名片) ----
-        card_lf = ttk.LabelFrame(main, text="技能名片（Skill Card · 写入 .json 供 LLM/VLM 理解应用场景与调参依据）", padding=6)
-        card_lf.pack(fill="x", pady=(0, 6))
+        card_lf = self._collapsible(main, "skill_card", "技能名片（Skill Card · 写入 .json 供 LLM/VLM 理解应用场景与调参依据）")
 
         rc1 = ttk.Frame(card_lf)
         rc1.pack(fill="x", pady=2)
@@ -1767,13 +1855,11 @@ class SkillStrategyTabUI:
         ttk.Button(rc4, text="⚡ 按当前旋钮自动生成摘要", command=self.on_auto_summary).pack(side="right", padx=(4, 0))
 
         # ---- 3. Gripper-Free Multi-Point Hover Dry-Run Panel ----
-        dry_lf = ttk.LabelFrame(
-            main,
-            text="无夹爪多点悬停预演测试台（Hover Dry-Run · 从物体 A 上方悬停 → 安全抬升 → 下一目标点 B 上方悬停 → 回原位）",
-            padding=6,
-        )
-        if self.mode != "sim":            # V3.60 SIM TAB: the dry-run drives the real arm -> console only
-            dry_lf.pack(fill="x", pady=(0, 6))
+        # V3.60 SIM TAB: the dry-run drives the real arm -> console only (not shown in the simulation window)
+        dry_lf = self._collapsible(
+            main, "dry_run",
+            "无夹爪多点悬停预演测试台（Hover Dry-Run · 从物体 A 上方悬停 → 安全抬升 → 下一目标点 B 上方悬停 → 回原位）",
+            show=(self.mode != "sim"))
 
         rd1 = ttk.Frame(dry_lf)
         rd1.pack(fill="x", pady=2)
@@ -1815,8 +1901,7 @@ class SkillStrategyTabUI:
         # ---- 4. Five Knob Group Panels (2-column grid per group for compact scanning) ----
         self.group_frames = {}
         for gid, glabel in KNOB_GROUPS:
-            gf = ttk.LabelFrame(main, text=glabel, padding=6)
-            gf.pack(fill="x", pady=4)
+            gf = self._collapsible(main, gid, glabel)
             self.group_frames[gid] = gf
             specs = [s for s in KNOB_SPECS if s["group"] == gid]
             for idx, spec in enumerate(specs):
@@ -1854,13 +1939,53 @@ class SkillStrategyTabUI:
 
         self._refresh_preset_dropdown()
 
+    # ------------------------------------------------------------------ V3.61 COLLAPSIBLE SECTIONS
+    def _collapsible(self, parent, key, title, show=True):
+        """a section with a ▾/▸ header button; returns the body frame (callers fill it like a LabelFrame)."""
+        ttk = self.ttk
+        if not hasattr(self, "_sections"):
+            self._sections = {}
+        box = ttk.Frame(parent)
+        if show:
+            box.pack(fill="x", pady=(0, 4))
+        btn = ttk.Button(box, text=f"▾ {title}", command=lambda k=key: self.toggle_section(k))
+        btn.pack(anchor="w", fill="x")
+        body = ttk.LabelFrame(box, padding=6)
+        body.pack(fill="x")
+        self._sections[key] = {"box": box, "btn": btn, "body": body, "title": title, "open": True, "shown": bool(show)}
+        return body
+
+    def toggle_section(self, key, open_=None):
+        sec = self._sections[key]
+        want = (not sec["open"]) if open_ is None else bool(open_)
+        if want == sec["open"]:
+            return want
+        if want:
+            sec["body"].pack(fill="x")
+        else:
+            sec["body"].pack_forget()
+        sec["open"] = want
+        sec["btn"].configure(text=("▾ " if want else "▸ ") + sec["title"])
+        return want
+
+    def collapse_all(self):
+        for k in self._sections:
+            self.toggle_section(k, False)
+
+    def expand_all(self):
+        for k in self._sections:
+            self.toggle_section(k, True)
+
+    def section_states(self):
+        return {k: v["open"] for k, v in self._sections.items() if v["shown"]}
+
     def _refresh_preset_dropdown(self):
         items = list_strategy_files(STRATEGY_DIR)
         self._preset_map = {}
         labels = []
         cur_label = None
         for sid, name, fp, prof in items:
-            lab = f"{prof.code or '??'} · {sid} — {name}" + ("（内置）" if sid in BUILTIN_SKILL_IDS else "（用户）")
+            lab = f"{skill_display_name(prof)} · {sid}" + ("（内置）" if sid in BUILTIN_SKILL_IDS else "（用户）")
             self._preset_map[lab] = (sid, fp, prof)
             labels.append(lab)
             if sid == self.profile.skill_id:
@@ -1963,13 +2088,15 @@ class SkillStrategyTabUI:
         src_fp = self.profile.path or os.path.join(STRATEGY_DIR, f"{self.profile.skill_id}.json")
         src_fp = self.profile.path or "内置（内存）"
         if eq and not diffs:
+            same = ("与基准 EB 完全相同" if self.profile.skill_id == BASELINE_SKILL_ID
+                    else "旋钮数值与 EB 相同（技能按场景区分）")
             self.v_status.set(
-                f"当前生效：{self.profile.label()} · {self.profile.skill_id}（{self.profile.skill_card.get('name', '')}） | "
-                f"与基准 EB 完全相同（{len(KNOB_SPECS)}/{len(KNOB_SPECS)} 项） | 来源：{src_fp}"
+                f"当前生效：{skill_display_name(self.profile)} · {self.profile.skill_id} | "
+                f"{same}（{len(KNOB_SPECS)}/{len(KNOB_SPECS)} 项） | 来源：{src_fp}"
             )
         else:
             self.v_status.set(
-                f"当前生效：{self.profile.label()} · {self.profile.skill_id} | {describe_diff_vs_baseline(knobs)} | 来源：{src_fp}"
+                f"当前生效：{skill_display_name(self.profile)} · {self.profile.skill_id} | {describe_diff_vs_baseline(knobs)} | 来源：{src_fp}"
             )
 
     def on_select_preset(self):

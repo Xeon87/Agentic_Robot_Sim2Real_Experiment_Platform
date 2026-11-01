@@ -34,8 +34,8 @@ import NERO_V347_Yolo_Perception as YP        # noqa: E402
 import NERO_V349_Real_Wrist_Camera as W49     # noqa: E402
 
 # ------------------------------------------------------------------ V1: Version & markers
-assert W49.VERSION in ("V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60") and YP.VERSION in ("V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60") and CON.VERSION in ("V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60") and RR.VERSION in ("V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60")
-assert (ROOT / "VERSION").read_text().strip() in ("V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60")
+assert W49.VERSION in ("V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60", "V3.61") and YP.VERSION in ("V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60", "V3.61") and CON.VERSION in ("V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60", "V3.61") and RR.VERSION in ("V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60", "V3.61")
+assert (ROOT / "VERSION").read_text().strip() in ("V3.52", "V3.53", "V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60", "V3.61")
 h308 = hashlib.sha256((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).hexdigest()
 assert h308.startswith("020cc6680f181872"), f"NERO_V308 modified: {h308}"
 print("[V1] V3.52 versions & markers verified; NERO_V308 untouched")

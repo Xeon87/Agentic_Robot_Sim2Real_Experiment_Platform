@@ -79,12 +79,12 @@ BTREE = ast.parse(BSRC)
 
 # ------------------------------------------------------------------ F1 versions / frozen files
 for m in (CON, RR, YP, W49, ST):
-    assert m.VERSION == "V3.60", (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "V3.60"
+    assert m.VERSION in ("V3.60", "V3.61"), (m.__name__, m.VERSION)          # V3.61: version bump
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.60", "V3.61")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 assert H((ROOT / "NERO_V326_Wrist_Camera.py").read_bytes()) == \
     "6b5c5d683073e4252b82c1c703ad664173960a179947f9e72775bb9683697d0a", "sim wrist camera changed"
-w49 = (ROOT / "NERO_V349_Real_Wrist_Camera.py").read_text(encoding="utf-8").replace('VERSION = "V3.60"', 'VERSION = "V3.58"', 1)
+w49 = re.sub(r'VERSION = "V3\.\d+"', 'VERSION = "V3.58"', (ROOT / "NERO_V349_Real_Wrist_Camera.py").read_text(encoding="utf-8"), count=1)
 assert H(w49.encode("utf-8")) == "d5955ce5c9c8acf8d654faa163da49e1b54ad21775a5ec060ac353a13c76a622", "USB wrist module changed"
 A2 = re.compile(r"\n[ \t]*# V3\.43 A2 BEGIN\n.*?\n[ \t]*# V3\.43 A2 END(?=\n)", re.S)
 assert BSRC.count("# V3.43 A2 BEGIN") == BSRC.count("# V3.43 A2 END") == 11
@@ -390,7 +390,7 @@ tab.knob_vars["egg_open_margin_mm"].set("13")
 saved = tab.on_save()
 assert saved == str(TMP / "user_strategies" / "my_dense.json") and Path(saved).is_file()
 assert ST.read_active_strategy_file().code == "MD"
-assert [p.code for _s, _n, _f, p in ST.list_strategy_files()] == ["EB", "DP", "HD", "QH", "MD"]
+assert [p.code for _s, _n, _f, p in ST.list_strategy_files()] == ["EB", "DP", "HD", "QH"] + (["CS"] if ST.VERSION >= "V3.61" else []) + ["MD"]
 try:
     ST.save_strategy_file(tab.profile, path=str(ROOT / "config" / "strategies" / "x.json"))
     raise AssertionError("write into the release folder accepted")
@@ -398,7 +398,7 @@ except ValueError:
     pass
 tab.on_apply()
 cat = tab.on_copy_llm_catalog()
-assert cat["active_skill_code"] == "MD" and [s_["code"] for s_ in cat["available_skills"]] == ["EB", "DP", "HD", "QH", "MD"]
+assert cat["active_skill_code"] == "MD" and [s_["code"] for s_ in cat["available_skills"]] == ["EB", "DP", "HD", "QH"] + (["CS"] if ST.VERSION >= "V3.61" else []) + ["MD"]
 assert all(s_["sim_benchmark"].get("success_rate") is None for s_ in cat["available_skills"])
 # the other window applies a skill -> reload when the tab is opened (no hover write)
 cam.v_hover_mm.set("90")
@@ -439,14 +439,15 @@ llm_add = next(n.lineno for n in ast.walk(rg) if isinstance(n, ast.Call) and get
                and any(getattr(k_.value, "value", None) == "NERO SimAgent" for k_ in n.keywords))
 assert llm_add < call_ln                                   # the skill tab comes right after NERO SimAgent
 STSRC = (ROOT / "NERO_V359_Strategy.py").read_text(encoding="utf-8")
-assert 'if self.mode != "sim":            # V3.60 SIM TAB: the dry-run drives the real arm -> console only\n            dry_lf.pack(' in STSRC
+assert ('if self.mode != "sim":            # V3.60 SIM TAB: the dry-run drives the real arm -> console only\n            dry_lf.pack(' in STSRC
+        or 'show=(self.mode != "sim"))' in STSRC)          # V3.61: the dry-run is a collapsible section, not shown in sim
 assert release_snapshot() == SNAP1
 print("[F7] sim GUI: own 「技能参数旋钮」 tab (sim mode, no dry-run panel), called from the backend A2 block")
 
 # ------------------------------------------------------------------ F5 skills
 codes = [p.code for p in ST.builtin_strategy_presets()]
-assert codes == ["EB", "DP", "HD", "QH"] and len(set(codes)) == 4 and all(ST.SKILL_CODE_RE.match(c) for c in codes)
-assert [p.short_name for p in ST.builtin_strategy_presets()] == ["Egg Baseline", "Dense Anti-Poke", "Hover Dry-Run", "Quick Hover"]
+assert codes[:4] == ["EB", "DP", "HD", "QH"] and len(set(codes)) == len(codes) and all(ST.SKILL_CODE_RE.match(c) for c in codes)
+assert [p.short_name for p in ST.builtin_strategy_presets()][:4] == ["Egg Baseline", "Dense Anti-Poke", "Hover Dry-Run", "Quick Hover"]
 for p in ST.builtin_strategy_presets():
     fp = ROOT / "config" / "strategies" / f"{p.skill_id}.json"
     d = json.loads(fp.read_text(encoding="utf-8"))
@@ -462,7 +463,8 @@ assert ST.is_baseline_equivalent(eb.knobs) and not ST.is_baseline_equivalent(hd.
 assert qh.knobs["cam_hover_verify_height_mm"] == 60.0 and qh.knobs["target_order_mode"] == "confidence_then_nearest"
 assert {k for k, *_ in ST.diff_vs_baseline(qh.knobs)} == {"cam_hover_verify_height_mm", "target_order_mode"}
 assert ST.KNOB_BY_KEY["poke_retry_bonus_mm"]["wired"] == ST.KNOB_BY_KEY["safety_retry_bonus_mm"]["wired"] == "none"
-assert sum(1 for s_ in ST.KNOB_SPECS if s_["wired"] == "sim_env") == 6 and len(ST.KNOB_SPECS) == 45
+assert sum(1 for s_ in ST.KNOB_SPECS if s_["wired"] == "sim_env") == 6
+assert len([s_ for s_ in ST.KNOB_SPECS if s_["group"] != "cup_stacking"]) == 45      # V3.61 adds the cup group
 assert ST.validate_new_skill(ST.StrategyProfile(skill_id="bad id", short_name="X", code="XX"), existing=[]) is not None
 assert ST.validate_new_skill(ST.StrategyProfile(skill_id="ok_id", short_name="X", code="XX"), existing=[]) is None
 assert ST.StrategyProfile(skill_id="x", code="abc").code == "" and ST.StrategyProfile(skill_id="x", code="ab").code == "AB"

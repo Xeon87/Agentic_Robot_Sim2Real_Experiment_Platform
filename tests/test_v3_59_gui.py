@@ -57,7 +57,7 @@ print("[K1] Camera tab dry-run row present")
 
 tab = ST.SkillStrategyTabUI(tk, ttk, f2, cam_tab=cam, log=lambda *a: None)
 root.update()
-assert len(tab.knob_vars) == 45 and len(tab.dry_modes) == 4
+assert len(tab.knob_vars) == len(ST.KNOB_SPECS) and len(tab.dry_modes) == 4      # V3.61: 45 + 9 cup knobs
 tab.knob_vars["egg_open_margin_mm"].set("99")
 tab.knob_vars["slot_fill_order"].set("far_to_near")
 p = tab.collect_profile_from_ui()

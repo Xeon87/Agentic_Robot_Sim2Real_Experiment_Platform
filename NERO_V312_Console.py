@@ -24,9 +24,10 @@ import sys
 import threading
 import time
 
-VERSION = "V3.60"
+VERSION = "V3.61"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
+# V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
 # V3.51 WORKFLOW STATUS LAMP BAR ABOVE LOG
 # V3.52 TEACH MODE BUTTONS LEFT OF COPY LOG
 # V3.53 TEACH EXIT & PARK FIX + ALIGNED TEACH BUTTONS + DEFAULT 1280x720 DEPTH
@@ -41,7 +42,8 @@ SIM_SCRIPT = os.environ.get("NERO_V312_SIM_SCRIPT", os.path.join(HERE, "start_ne
 # V3.44 SCENE SELECT: the MuJoCo scene is chosen here before the simulation starts and passed to
 # start_nero_sim.sh as NERO_SCENE.  Every console start defaults to the egg scene.
 SIM_SCENES = [("fill_egg_holder", "fill_egg_holder - 鸡蛋放入蛋托 (默认)"),
-              ("store_in_safe", "store_in_safe - 物体放入保险箱 (RoboDojo)")]
+              ("store_in_safe", "store_in_safe - 物体放入保险箱 (RoboDojo)"),
+              ("stack_cups", "stack_cups - 叠杯子 (RoboDojo)")]          # V3.61 STACK CUPS SCENE
 DEFAULT_SIM_SCENE = "fill_egg_holder"
 
 

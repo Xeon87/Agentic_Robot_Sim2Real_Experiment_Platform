@@ -133,8 +133,8 @@ def all_labels(w):
 
 labels = all_labels(strat_frame)
 tags = [t for t in labels if "(默认:" in t]
-assert len(tags) == 45 and sum("[仿真✓]" in t for t in tags) == 6 and sum("[实机✓]" in t for t in tags) == 8 \
-    and sum("[未接入]" in t for t in tags) == 31, tags[:5]
+assert len(tags) == len(ST.KNOB_SPECS) and sum("[仿真✓]" in t for t in tags) == 6 and sum("[实机✓]" in t for t in tags) == 8 \
+    and sum("[未接入]" in t for t in tags) == 31, tags[:5]                      # V3.61: + 9 cup knobs [离线试验✓]
 print("[H1] real Tk: start-up keeps hover 85 mm, dry-run panel packed, 6 [仿真✓] + 8 [实机✓] tags")
 
 lab_qh = next(lab for lab, (sid, _f, _p) in tab._preset_map.items() if sid == "quick_hover_verify")
@@ -175,7 +175,8 @@ n_tabs = len(sim_nb.tabs())
 ui = ST.add_sim_strategy_tab(tk, ttk, sim_nb, log=logs.append)
 root.update()
 assert len(sim_nb.tabs()) == n_tabs + 1 and sim_nb.tab(sim_nb.tabs()[-1], "text") == "技能参数旋钮"
-assert ui.mode == "sim" and ui.b_dry_check.master.master.winfo_manager() == ""
+assert ui.mode == "sim" and (ui.b_dry_check.master.master.winfo_manager() == ""
+                             or ui._sections["dry_run"]["box"].winfo_manager() == "")   # V3.61 collapsible section
 print("[H4] sim GUI tab added; dry-run panel hidden in sim mode")
 
 cam.shutdown()
