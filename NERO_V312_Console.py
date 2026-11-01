@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V3.58"
+VERSION = "V3.59"
 # V3.51 WORKFLOW STATUS LAMP BAR ABOVE LOG
 # V3.52 TEACH MODE BUTTONS LEFT OF COPY LOG
 # V3.53 TEACH EXIT & PARK FIX + ALIGNED TEACH BUTTONS + DEFAULT 1280x720 DEPTH
@@ -33,6 +33,7 @@ VERSION = "V3.58"
 # V3.56 FAST WRIST EYE-IN-HAND CALIB + LOOK-AT DOME PLANNER + FULL-RES ROI ARUCO + SCALE/LEVER-ARM SOLVER
 # V3.57 AUTO TABLETOP CHARUCO INTRINSICS + CHARUCO EIH + 2D FOCAL/SCALE SELF-CALIB
 # V3.58 KINEMATIC-ANCHORED WIDE-ANGLE INTRINSICS + FULL-QUADRANT TILT + ROBUST CHARUCO EIH
+# V3.59 STRATEGY PROFILE + CONTROL KNOBS + SIM/REAL SHARED DECISION LAYER (tab 「策略旋钮」)
 HERE = os.path.dirname(os.path.realpath(__file__))
 SIM_SCRIPT = os.environ.get("NERO_V312_SIM_SCRIPT", os.path.join(HERE, "start_nero_sim.sh"))
 
@@ -157,6 +158,7 @@ class SimRunner:
         self.log_path = log_path
         self._stop_requested = False
         self.exit_code = None
+        self.strategy_env = {}               # V3.59 STRATEGY PROFILE: set by the console before start()
 
     def running(self):
         return self.proc is not None and self.proc.poll() is None
@@ -168,6 +170,7 @@ class SimRunner:
         env["NERO_NO_FAIL_PAUSE"] = "1"      # never block on "Press Enter" when started from the console
         env["PYTHONUNBUFFERED"] = "1"
         env.update(extra_env or {})
+        env.update(getattr(self, "strategy_env", None) or {})     # V3.59: knob -> backend env (opt-in)
         self._stop_requested = False
         self.exit_code = None
         self.proc = subprocess.Popen(
@@ -654,6 +657,28 @@ def run_console(initial_tab="sim"):
     cam_tab.attach_workflow_bar(real_wf_bar)
     cam_tab.attach_workflow_bar(cam_bar)
 
+    # ---- V3.59 STRATEGY PROFILE TAB: shared control knobs (sim + real read the same config/strategies/*.json)
+    import NERO_Strategy_Profile as SP
+    strat_outer = ttk.Frame(nb, padding=8)
+    nb.add(strat_outer, text="策略旋钮")
+    strat_main = ttk.Frame(strat_outer)
+    strat_main.pack(fill="both", expand=True)
+    strat_bar = ttk.Frame(strat_outer)
+    strat_bar.pack(fill="x")
+    strat_log = make_log(strat_outer)
+    strat_log.configure(height=7)
+    ttk.Button(strat_bar, text="Copy Log", command=lambda: copy_text(strat_log)).pack(side="right")
+    strat_holder = {}
+
+    def on_strategy_change(profile):                # Tk thread (panel callbacks)
+        p_ = strat_holder.get("panel")
+        cam_tab.set_strategy(profile if (p_ is not None and p_.real_follow()) else None)
+
+    strat_panel = SP.StrategyPanelUI(tk, ttk, strat_main, log=lambda line: log_append(strat_log, line),
+                                     on_change=on_strategy_change, scene_fn=cam_tab.strategy_scene,
+                                     ask=lambda t_, q_: messagebox.askyesno(t_, q_))
+    strat_holder["panel"] = strat_panel
+
     def start_job(name, fn, force=False):
         if not force and real_job["t"] is not None and real_job["t"].is_alive():
             log_append(real_log, f"[WARN] busy: {real_job['name']} still running")
@@ -781,6 +806,14 @@ def run_console(initial_tab="sim"):
         sim_log.configure(state="disabled")
         scene = sim_scene_by_label.get(sim_scene_var.get(), DEFAULT_SIM_SCENE)
         log_append(sim_log, f"[V3.12 CONSOLE] starting {SIM_SCRIPT} | V3.44 scene={scene}")
+        runner.strategy_env = {}
+        try:                                        # V3.59 STRATEGY PROFILE: {} unless 「仿真启动时注入」 is ticked
+            runner.strategy_env = strat_panel.sim_env()
+            if runner.strategy_env:
+                log_append(sim_log, f"[OK] [V3.59 策略] 注入策略包 {strat_panel.profile.name}: " + " ".join(
+                    f"{k}={v}" for k, v in runner.strategy_env.items() if k != "NERO_V359_STRATEGY_PROFILE"))
+        except Exception as exc:
+            log_append(sim_log, f"[WARN] [V3.59 策略] 注入失败，按默认参数启动：{exc}")
         try:
             pid = runner.start(extra_env=scene_env(scene))
         except Exception as exc:

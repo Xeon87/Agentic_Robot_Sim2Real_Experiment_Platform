@@ -1,0 +1,84 @@
+{
+  "schema": "nero.strategy_profile/1",
+  "version": "V3.59",
+  "name": "default",
+  "scene": "fill_egg_holder",
+  "notes": "V3.59 默认旋钮（与 AGENTS.md 8.1 一致）。人工给定，尚未经 V3.60 带噪仿真寻优。",
+  "saved_at": "2026-11-01 00:00:00",
+  "knobs": {
+    "w_dist": 0.45,
+    "w_clearance": 0.35,
+    "w_yaw_align": 0.2,
+    "slot_fill_order": "numeric",
+    "w_base_joint_penalty": 1.0,
+    "w_elbow_lift": 0.5,
+    "w_limit_margin": 0.6,
+    "hover_height_mm": 60.0,
+    "wrist_refine_enable": true,
+    "wrist_refine_tol_mm": 1.5,
+    "grip_open_margin_mm": 14.0,
+    "grip_close_squeeze_mm": 2.5,
+    "cruise_speed_ratio": 0.5,
+    "descent_speed_ratio": 0.286,
+    "min_held_width_mm": 32.0,
+    "max_retry_per_target": 1
+  },
+  "bounds": {
+    "w_dist": [
+      0.0,
+      1.0
+    ],
+    "w_clearance": [
+      0.0,
+      1.0
+    ],
+    "w_yaw_align": [
+      0.0,
+      1.0
+    ],
+    "w_base_joint_penalty": [
+      0.1,
+      2.0
+    ],
+    "w_elbow_lift": [
+      0.0,
+      1.0
+    ],
+    "w_limit_margin": [
+      0.1,
+      1.5
+    ],
+    "hover_height_mm": [
+      40.0,
+      90.0
+    ],
+    "wrist_refine_tol_mm": [
+      0.8,
+      3.0
+    ],
+    "grip_open_margin_mm": [
+      8.0,
+      22.0
+    ],
+    "grip_close_squeeze_mm": [
+      1.5,
+      4.5
+    ],
+    "cruise_speed_ratio": [
+      0.2,
+      1.0
+    ],
+    "descent_speed_ratio": [
+      0.1,
+      0.6
+    ],
+    "min_held_width_mm": [
+      28.0,
+      36.0
+    ],
+    "max_retry_per_target": [
+      0,
+      2
+    ]
+  }
+}

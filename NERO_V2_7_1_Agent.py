@@ -107,6 +107,42 @@ def _v306_with_budget(out, used, limit):
     return out
 
 
+# ============================================================
+# V3.59 STRATEGY PROFILE ADVICE
+# ------------------------------------------------------------
+# Off unless the console started the sim with 「仿真启动时注入此策略」 (NERO_V359_STRATEGY_PROFILE = path of
+# logs/v359_active_strategy.json).  The shared decision layer (NERO_Strategy_Profile, the same code the real
+# Camera tab uses) ranks the eggs and orders the slots; observe_scene gets scene.v359_strategy (and, for a
+# non-numeric fill order, egg_holder_fill_order follows the profile); verify_object_in_slot gets v306_next
+# reordered.  The file is re-read by mtime, so knob changes in the console apply to the next tool call.
+# ============================================================
+_V359_STATE = {"advice": None}
+
+
+def _v359_strategy_advise(name, result):
+    path = os.environ.get("NERO_V359_STRATEGY_PROFILE")
+    if not path or not isinstance(result, dict):
+        return result
+    try:
+        import NERO_Strategy_Profile as _SP
+        prof = _SP.load_cached(path)
+        if prof is None:
+            return result
+        if name == "observe_scene" and isinstance(result.get("scene"), dict):
+            adv = _SP.sim_scene_advice(result["scene"], prof)
+            _V359_STATE["advice"] = adv
+            out = dict(result)
+            out["scene"] = _SP.apply_to_scene(result["scene"], adv)
+            return out
+        if name == "verify_object_in_slot" and isinstance(result.get("v306_next"), dict):
+            out = dict(result)
+            out["v306_next"] = _SP.apply_to_next(result["v306_next"], _V359_STATE["advice"], prof)
+            return out
+    except Exception:
+        return result
+    return result
+
+
 PROJECT_VERSION = "2.9.0"
 PUBLIC_RELEASE_TAG = "v0.1.0"
 
@@ -282,6 +318,14 @@ Operating policy:
 18. A fresh confirmed RUN TASK with no held object begins from logical IDLE.
 19. Keep final completion messages concise and factual.
 """
+
+# V3.59 STRATEGY PROFILE ADVICE: the extra rule is appended only when the profile hook is active (default prompt unchanged)
+if os.environ.get("NERO_V359_STRATEGY_PROFILE"):
+    try:
+        import NERO_Strategy_Profile as _SP359
+        SYSTEM_INSTRUCTIONS = SYSTEM_INSTRUCTIONS + _SP359.AGENT_RULE
+    except Exception:
+        pass
 
 _EGGS = ["egg_1", "egg_2", "egg_3", "egg_4"]
 _SLOTS = [f"slot_{i}" for i in range(1, 9)]
@@ -1435,7 +1479,7 @@ class NeroLLMAgent:
                         {
                             "type": "function_call_output",
                             "call_id": call_id,
-                            "output": json.dumps(_v306_with_budget(_v304_compact_for_model(name, result), tool_count, max_tool_steps), ensure_ascii=False),
+                            "output": json.dumps(_v306_with_budget(_v304_compact_for_model(name, _v359_strategy_advise(name, result)), tool_count, max_tool_steps), ensure_ascii=False),
                         }
                     )
 

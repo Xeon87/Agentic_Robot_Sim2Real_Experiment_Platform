@@ -1,3 +1,13 @@
+## V3.59 (2026-11-01) — 策略旋钮（Strategy Profile）+ 虚实共用决策层（Sim2Real 四阶段计划 · 阶段 1）
+- **新模块 `NERO_Strategy_Profile.py`**：4 组 16 个控制旋钮（AGENTS.md 8.1 列出的 14 项；文档称 “12 个旋钮”，按列出条目全部实现），每个带默认值、寻优上下界、单位与中文说明；`StrategyProfile` 校验/截断、JSON 存取（`config/strategies/*.json`）、`optimizer_space()`（给 V3.60 寻优器用）。
+- **共享决策层（仿真与实机调用同一份代码）**：`rank_targets`（距离 / 邻物净空 / 长轴顺手度加权评分）、`order_slots`（`numeric` 默认 = V3.04 原行为、`far_to_near`、`left_to_right`、`min_joint_move`）、`ik_preference_cost` / `pick_ik_solution`（J1–J3 移动惩罚、限位裕量、手肘抬高）、夹爪张开/闭合宽度、`held_check`、`hover_z`。
+- **控制台新增「策略旋钮」页**：滑块 + 数值框实时调整、「预览当前桌面目标评分排序」（有实机识别结果时用实机目标，否则用示例场景）、「保存策略预设」「读取预设」「恢复默认」；两个联动开关默认**关闭**（关闭时仿真与实机行为与 V3.58 完全一致）：
+  - 「仿真启动时注入此策略」：通过后端**已有**的环境变量注入（`NERO_V304_EGG_APERTURE_MARGIN_MM`、`NERO_V304_FINAL_APPROACH_SLOW`、`NERO_V303_HOVER_ABOVE_ENTRY_M`、`NERO_V341_LIMIT_MARGIN_DEG`），后端 `NERO_V2_7_1_Unified_Backend.py` 一字未改（`test_v3_44` C1/C2/C3 不变量保持）；Agent 新增 `V3.59 STRATEGY PROFILE ADVICE` 钩子，按策略给出抓取顺序与装填顺序，并按文件 mtime 实时重读（运行中改旋钮，下一次工具调用即生效）。
+  - 「实机 Camera 页跟随策略」：悬停高度、未选中行时的悬停目标（排序第 1）、`plan_hover_target` IK 多解按姿态偏好选择（新参数 `prefer_fn`，默认 None = 原行为）、悬停复核速度 × `cruise_speed_ratio`。
+- 附带 3 个预设：`default`（文档默认值）、`dense_safe`、`speed_first`（后两个是人工示例，**未经寻优**，V3.60 自动寻优后替换）。
+- 测试：新增 `tests/test_v3_59.py`（Z1–Z6）与 `tests/test_v3_59_gui.py`；老测试版本白名单扩展到 V3.59；`tests/test_v3_58.py` 的版本断言改为接受 V3.58/V3.59（有意变更：仅版本号）。
+- 未改动：`NERO_V308`、仿真后端、仿真腕部相机 `NERO_V326`、实机腕部 USB 相机模块 `NERO_V349`（仅 `VERSION` 字符串）。
+
 ## V3.58 (2026-10-31) — Kinematic-Anchored Wide-Angle Intrinsic Solver + Per-View RANSAC Corner Pruning + Full-Quadrant Tilt Planner
 - **Robot-Kinematic Metric Focal-Length Anchoring (`calibrate_intrinsics` in `NERO_V349_Real_Wrist_Camera.py`)**: Fixes the planar homography focal-length singularity (`fx = 2147 / 3134 / 5164 px`, `z = 1147 mm`, `RMS = 1.058..2.166 px`) when calibrating a 130° wide-angle wrist camera on low-tilt tabletop ChArUco views. Couples the 1D wide-angle focal-length profile search (`[0.31*w, 0.78*w]`) directly with the robot arm's 3D metric FK (`T_base_flange`) via `solve_eye_in_hand`, locking `fx, fy` to the exact physical focal length (`~700 px`) and true tabletop distance (`~220..280 mm`).
 - **Subpixel ArUco/ChArUco Refinement & Per-View RANSAC Homography Corner Pruning (`detect_board_corners`, `calibrate_intrinsics`, `detect_charuco_pose`, `eih_samples_from_intr_samples`)**: Enables `CORNER_REFINE_SUBPIX` + `tryRefineMarkers` + post-detection `cornerSubPix` + Homography/IRLS barrel-surface corner screening and clean-subset undistorted RANSAC Homography corner pruning, automatically stripping individual corners pulled by black gripper shadows or plastic-sleeve specular glare (`2.3–2.4 px` -> `< 0.5 px`).

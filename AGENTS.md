@@ -1,0 +1,241 @@
+# NERO 项目开发与交接文档（V3.59 · Sim2Real 与自动寻优路线版）
+
+> 放在仓库根目录，命名为 `AGENTS.md`（Codex / 后续开发 Agent 会自动读取）。
+> 更新时间：2026-11-01。当前已交付最新版本：**V3.59**（仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`）。
+> 接手者请在做任何修改前通读本文件。本文件里“用户”指项目所有者 Jimmy。
+
+## 0. 一句话现状
+
+NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 做“鸡蛋放进蛋托”及通用操作任务，已全面进入 **Sim2Real 闭环阶段**。
+- **已完成（V3.13–V3.58）**：CAN 驱动（固件 V1.2.1 `NeroFW.V121` 兼容）、ROS2 / MoveIt2、关节控制、示教平滑进出、待断电位置（Park Pose D）、3D 安全围栏（Fence + `z_table` + 路径碰撞检查）、固定主相机 D435i（Eye-to-Hand 6× 快速标定 + YOLOE-26 轮廓与局部桌面平面 3D 定位）、4 姿态碰点 TCP 标定、以及独立实机腕部广角相机模块 `NERO_V349_Real_Wrist_Camera.py`（双画面同屏、静止/清晰度门禁、TCP 准星投影、零先验 6 孔蛋托识别 `locate_egg_holder`、粗到精定位 `wrist_refine_target`、运动学锚定广角内参 + ChArUco 手眼一键联合标定）。
+- **V3.59（阶段 1，已交付）**：新模块 `NERO_Strategy_Profile.py`（16 个控制旋钮 + JSON 预设 + 虚实共用决策层）与控制台「策略旋钮」页；仿真经后端已有环境变量 + Agent 钩子注入，后端一字未改。
+- **接下来的核心路线（V3.60 → V3.62，原 V3.59 → V3.62 四阶段计划）**：遵循**“一套大脑、两套身体（仿真与实机除眼睛和手脚外 100% 通用）”**原则，将算法拆分为**“铁打的底层骨架 + 可拨动的控制旋钮（Control Knobs / Strategy Profile）”**，通过**带噪仿真自动寻优试验（DOE / 贝叶斯优化）**自动搜索各场景鲁棒最优参数包，并按 `纯视觉干跑 → 5 cm 悬停预演 → 实机柔顺抓放` 稳步完成真机迁移。
+
+## 1. 用户的沟通规则（必须遵守，原话优先）
+
+1. **用中文、简洁地回答。** 结论先说，再给依据；不要长篇复述。
+2. **“先分析，不要改” / “先别改” / “给我分析一下” → 只分析，绝不改代码。**
+   用户的原话反馈：“我没让你改，你应该先分析一下，这次的 token 浪费了。”
+   用户只是报告现象、没有明确说“改”时，也默认**先分析、给方案、等确认**。
+3. **原话规则：“未来针对 USB-Camera 的策略改动，如果有影响到其他模式的话，要提前和我确认。”**
+   （USB 相机 = 用户的 innomaker 1080P USB2.0 UVC 腕部相机，已封装在独立模块 `NERO_V349_Real_Wrist_Camera.py` 中，绝不污染仿真 `NERO_V326_Wrist_Camera.py`。）
+4. **每次代码更新：所有文件放在一个平铺的文件夹里交付**（不引用外部/嵌套的其他版本文件），保证用户运行的就是他以为的那个版本，同时提供一个同名 `.zip`。
+5. 用户是机械博士、做硬件/传感器出身，懂原理但不想被代码细节淹没；解释时讲“为什么”和“怎么验证”。
+6. 方案有取舍时说清楚代价和风险；不确定的事情说不确定，并给出用户能做的验证步骤（命令、点哪里、看什么）。
+7. 不要夸大测试结果：只在模拟 / 假数据上验证过的东西，要明确说“还没在真实硬件上验证”。
+
+## 2. 开发纪律（必须严格执行）
+
+### 2.1 改之前
+- 先读相关代码再下结论，不凭记忆猜。改动前确认：谁调用它、哪些测试覆盖它、会不会影响其他模式（仿真 / 实机 / 腕部相机 / 固定主相机）。
+- 最小改动原则：只改需求涉及的部分；**新功能优先放新模块或新函数**，不去重写稳定代码。
+- 用户给的物理量（尺寸、型号、距离）直接用；不确定的硬件参数先查资料或请用户跑命令确认。
+
+### 2.2 改的时候
+- 每个改动块加**版本标记注释**，例如 `# V3.58 KINEMATIC-ANCHORED WIDE-ANGLE INTRINSICS ...`，`tests/check_release.sh` 会 grep 这些标记。
+- 默认行为保持向后兼容；新行为做成可选项（下拉框 / 开关 / 策略配置项 / 环境变量）。
+- 绝不修改第 4 节列出的“不变量”。
+- 后台线程不直接碰 Tk：结果用 `self._ui(fn)` 放回 Tk 线程执行；Tk 变量只通过 `StringVar/BooleanVar.get/set` 读写（测试替身依赖这一点）。
+- 在 `CameraTabUI.__init__` 中必须最先初始化 `self._btn_state = {}` 等基础状态字典，再调用各子面板构建函数（避免 `_build_intrinsics` 早于 `_build_calib` 调用 `_update_intr_ui` 时引发属性缺失闪退）。
+- 所有给用户看的日志带版本标签：`[OK]/[INFO]/[WARN]/[FAIL] [V3.xx 模块] 中文说明`，失败信息要写“原因 + 下一步怎么做”。
+- 不要创建 `tkinter.font.Font` 对象（V3.16.2 发现在 Ubuntu 22.04 / Tk 8.6 / Xft 上会导致段错误）；量文字用 `widget.tk.call("font", "metrics"/"measure", ...)`。
+- `import cv2` 一律走 `NERO_V325_Camera._import_cv2()`（V3.46 Qt 变量保护，见 4.4）。
+- 控制台启动的任何子进程都要用 `clean_child_env()` 的环境（见 4.4）。
+
+### 2.3 测试
+- **每个版本写一个新测试文件** `tests/test_v3_XX.py`（有界面改动再加 `tests/test_v3_XX_gui.py`），文件开头的 docstring 逐条列出测试项，每项通过时打印状态，最后打印 `ALL V3.XX TESTS PASSED`。
+- 新测试加进 `tests/check_release.sh`：非 GUI 测试加到大 for 循环；GUI 测试加到末尾 `| tail -1` 列表；并加一行 grep 新版本的标记。
+- 版本号变了，要把老测试里的版本白名单扩展（如 `"V3.57"` 扩展为 `"V3.57", "V3.58"`）。
+- 行为有意改变时，**更新老测试并在 CHANGELOG 里说明**，不要删测试来让它通过。
+- 测试**绝不能读写用户的真实目录**（`~/Downloads/cameracalib`、`~/Downloads/objectmodels`）：GUI 测试开头要改 `CAM.CALIB_PATH / CAM.LOCATE_PATH / CAM.CALIB_DIR` 到临时目录。
+- `check_release.sh` 必须 `rc=0` 才能交付。
+
+### 2.4 交付流程（逐条照做）
+1. 在一个**新的平铺文件夹** `NERO_V3_XX` 里工作，从上一个版本复制过来。
+2. 更新：`VERSION` 文件、`NERO_V313_Real_Robot.py` / `NERO_V312_Console.py` / `NERO_V347_Yolo_Perception.py` / `NERO_V349_Real_Wrist_Camera.py` 里的 `VERSION = "..."`；`README.md` 与 `CHANGELOG.md` 顶部加本版说明。
+3. `chmod +x *.sh tests/*.sh`。
+4. 删除 `__pycache__/` 和 `logs/`。
+5. 重新生成校验和：`sha256sum $(find . -maxdepth 2 -type f ! -name "SHA256SUMS.txt" ! -path "./__pycache__/*" ! -path "./tests/__pycache__/*" ! -path "./logs/*" | sed 's|^\./||' | sort) > SHA256SUMS.txt`。
+6. 跑 `bash tests/check_release.sh`，必须 `rc=0`（跑完若产生 `__pycache__`，再次清理并刷新 `SHA256SUMS.txt`）。
+7. 从工作目录打包 `NERO_V3_XX.zip`，保留 `.sh` 可执行权限。
+
+## 3. 用户的硬件和环境（已确认的事实）
+
+- **电脑**：Ubuntu 22.04，笔记本 RTX 4060 Laptop 8 GB。控制台用 `/usr/bin/python3`（3.10.12），包在 `~/.local/lib/python3.10/site-packages`：torch 2.14.1+cu130（CUDA 可用）、numpy 1.26.4、cv2 4.11.0（pip 版 opencv-python）、ultralytics 8.4.174、clip、pyrealsense2。
+- **机械臂**：NERO 7DOF，**固件已升级至 V1.2.1（`NeroFW.V121`）**，USB-CAN（`can0`），AgileX `agx_arm_ros` / `pyAgxArm`；ROS2 Humble + MoveIt + cuRobo（GPU planner 独立进程）。
+  - V1.2.1 固件退出示教模式时，必须在 `enable()` 前后调用 `set_follower_mode()` 并发送当前关节角保持指令（V3.54 已修复）。
+- **固定主相机（Eye-to-Hand）**：Intel RealSense D435i，序列号 `261222075224`，距桌面约 0.71–0.80 m，光轴与桌面法线约 38°–43°。
+  - 默认深度流自 V3.53 起设为 **`1280×720 · High Accuracy`**（手眼标定与视觉定位一致）。
+  - 主相机法兰 ArUco 标记：`DICT_4X4_50 id 0`，打印实测 `38.5 × 37.5 mm`（主相机手眼标定默认边长 `40 mm` 或按实测填 `38 mm`）。
+- **实机腕部相机（Eye-in-Hand）**：InnoMaker `U20CAM-1080P`（USB2.0 UVC，`1920×1080 @ 30fps` MJPG，32×32 mm 板，标准 `M12×0.5` 螺纹镜头座）。
+  - 原装镜头为 `1.8 mm`（对角 130° / 水平 103° 超广角），在 `1920×1080` 下真实物理焦距 `fx ≈ 680–740 px`；因 130° 边缘桶形畸变大且画面下方易拍进黑色夹爪指尖，用户后续可换拧 `3.6 mm`（水平 ~82°）或 `2.8 mm` M12 无畸变镜头。
+  - 腕部标定物：桌面平铺 A4 打印 `7×5 ChArUco 标定板`（方格 `32 mm`，内部 ArUco 码外沿实测约 `23.8–24.0 mm`，`DICT_4X4_50`）。注意需抽出透明塑料文件袋、四边用胶带拉平贴紧桌面以消除反光和纸面鼓包。
+- **YOLO 模型**：`~/Downloads/objectmodels/` 里有 `yoloe-26s-seg.pt`、`yoloe-26s-seg-pf.pt`、`mobileclip2_b.ts`。
+- **鸡蛋与桌面**：白色鸡蛋，实测长约 `55 mm`、宽约 `42 mm`。
+
+## 4. 不变量（绝不能改；测试会强制检查）
+
+1. **`NERO_V308_Camera_Perception.py` 一字不改**，sha256 前缀 = `020cc6680f181872`（所有版本测试均校验）。
+2. **后端 `run_sim` 的逐步物理循环“B 段”**（从 `with mujoco.viewer.launch_passive(model, data) as viewer:` 到 `run_sim` 结束）与 V3.42 字节级一致，sha256 = `2b1f124e838087f65a4e93e65ed1ceba169ea3c725bbea99ff87998ad8cd7252`（`test_v3_44` C1）。
+3. **后端去掉 11 个 `# V3.43 A2 BEGIN/END` 块后与 V3.42 字节级一致**（`test_v3_44` C2）；默认鸡蛋场景生成的 XML sha256 = `31c52c06965826a06612c970d1b522a05396d9da9b5c9d0919c8824c832a3ef2`（C3）。如果新阶段需要让仿真读取外部策略包（`StrategyProfile`），必须通过环境变量/配置文件钩子在 A2 块或独立桥接模块中非侵入式注入，或者同步维护 C2 块标记，绝不破坏 `test_v3_44` 校验。
+4. **Qt 环境保护（V3.46）**：控制台进程里 `import cv2` 只能走 `NERO_V325_Camera._import_cv2()`；所有子进程用 `clean_child_env()`。
+5. **实机腕部相机独立性**：实机腕部相机逻辑全部位于 `NERO_V349_Real_Wrist_Camera.py` 与 `NERO_V325_Camera.py`，绝不改动仿真腕部相机 `NERO_V326_Wrist_Camera.py`。
+
+## 5. 代码地图（截至 V3.59）
+
+| 文件 | 作用 |
+| :--- | :--- |
+| `start_nero.sh` | 入口：打开控制台（`--sim` 直接跑仿真，`--real` 打开实机页）；检查本文件夹里所有模块存在 |
+| `start_nero_sim.sh` | 仿真链路启动（MuJoCo 后端 + cuRobo + ROS2/MoveIt + Agent），校验 `NERO_SCENE` |
+| `NERO_V312_Console.py` | Tk 控制台：仿真 Tab、实机 NERO 调试 Tab、Camera 调试 Tab；底部 9 步全流程状态灯栏（`WorkflowLampBar`）与示教模式快捷按钮 |
+| `NERO_V313_Real_Robot.py` | 实机六步启动（CAN → 使能 → 驱动 → ROS2 → MoveIt）、V1.2.1 固件兼容（`_resolve_nero_fw`）、`set_follower_mode` 示教退回修复、`move_and_settle` |
+| `NERO_V314_Joint_Control.py` | 关节面板、示教模式、待断电位置 `go_park`（Park Pose D，自动退示教 + 临时移除后墙碰撞 + 忽略 XY 围栏） |
+| `NERO_V315_Consistency_Safety.py` | URDF/FK/IK（`CS.fk`、`CS.ik_tool`）、一致性和 3D 安全围栏路径检查 |
+| `NERO_V316_Safety_Editor.py` | 安全区（fence 多边形 + `z_table`）可视化编辑器 |
+| `NERO_V325_Camera.py` | **Camera 调试 Tab**：主从相机双 `560×315` 16:9 实时监视画布、主相机手眼标定（V3.55 雅可比快速采样 + PnP/深度统一 + LOO 剔除）、4 姿态碰点 TCP 标定、腕部内参标定子页、腕部 Eye-in-Hand 标定子页、视觉定位与悬停预演子页 |
+| `NERO_V347_Yolo_Perception.py` | **实机主相机感知模块**：YOLOE-26 视觉/文字提示 + 无提示 PF 多类别检测、ROI 快速局部桌面拟合、`SilhouetteFit`、3D 椭球轮廓定位 |
+| `NERO_V349_Real_Wrist_Camera.py` | **实机腕部相机模块（V3.49–V3.58）**：UVC 相机枚举与曝光/白平衡/对焦锁定、ChArUco/棋盘格检测与运动学锚定内参标定（`calibrate_intrinsics`）、24 角点 ChArUco 6-DoF 检测（`detect_charuco_pose`）、自适应四象限大倾角内参采样规划（`plan_intr_auto_targets`）、带杆臂约束与 2D 尺度自标定的 Eye-in-Hand 求解器（`calibrate_eye_in_hand`）、粗到精闭环（`wrist_refine_target`）、零先验蛋托识别（`locate_egg_holder`） |
+| `NERO_Strategy_Profile.py` | **V3.59 策略中心**：`KNOBS`（4 组 16 参数，默认值/上下界/单位）、`StrategyProfile`（校验、JSON 存取 `config/strategies/*.json`、`optimizer_space()`）、共享决策层（`rank_targets`、`order_slots`、`ik_preference_cost`/`pick_ik_solution`、夹爪宽度、`held_check`、`hover_z`）、仿真桥（`to_sim_env` 映射到后端已有环境变量；`sim_scene_advice`/`apply_to_next` 供 Agent 钩子 `V3.59 STRATEGY PROFILE ADVICE` 使用，只在 `NERO_V359_STRATEGY_PROFILE` 设置时生效）、控制台面板 `StrategyPanelUI` |
+| `config/strategies/` | 策略预设：`default`（文档默认）、`dense_safe`、`speed_first`（人工示例，未经寻优） |
+| `NERO_V308_Camera_Perception.py` | V3.08–V3.11 几何鸡蛋感知（仿真和“几何法”在用）——**字节级冻结** |
+| `NERO_V326_Wrist_Camera.py` / `NERO_V331_Fixed_Camera.py` | 仿真里的腕部相机 / 固定相机模式 |
+| `NERO_V343_Scenes.py` | 仿真场景数据（`fill_egg_holder` / `store_in_safe`） |
+| `NERO_V2_7_1_Unified_Backend.py` | MuJoCo 仿真后端（含抓取/抬升/转腕/分层入槽/回撤状态机、规划调用、`run_sim`） |
+| `NERO_V2_7_1_Agent.py` | GPT / VLM Agent（技能契约调用与异常恢复决策） |
+| `NERO_V71_Hybrid_GPU_Planner_Core.py` | cuRobo + MoveIt2 混合运动规划核心 |
+| `tests/` | `test_v3_02` 至 `test_v3_59` 全套离线/GUI 单测 + `check_release.sh` |
+
+## 6. 实机双相机标定与感知关键设计（V3.47.2 – V3.58 演进总结）
+
+### 6.1 主相机手眼标定提速与精度优化（V3.55）
+- **雅可比快速逆解规划**：`plan_auto_targets` 用阻尼最小二乘雅可比伪逆替代慢速数值 IK，自动采集规划耗时从 ~3.5 s 降至 `< 0.5 s`，同时强制校验轨迹路径不越安全围栏。
+- **混合深度/PnP 尺度统一**：D435i 在不同倾角下可能部分姿态用 IR 深度、部分姿态退回 RGB PnP（当打印码填 40 mm 而实测 38.5 mm 时会产生 ~30 mm 阶跃）。`calibrate()` 自动将全批次统一为同一观测源并用中位数深度比值对齐尺度，结合留一法（LOO）自动剔除坏点。
+
+### 6.2 腕部相机内参 + Eye-in-Hand 联合标定（V3.56 – V3.58）
+1. **130° 广角桌面标定的三大物理痛点与 V3.58 根治方案**：
+   - **痛点 A（近似正视平面奇异性导致 `fx` 飙升至 `2147~5164 px`）**：标定板平放桌面且倾角较小时，张氏平面标定中焦距 $f$ 与距离 $t_z$ 共线（$f/t_z \approx \text{const}$）。**V3.58 方案**：在 `calibrate_intrinsics` 中引入**机械臂正运动学（`T_base_flange`）3D 位移锚定**，在广角物理焦距区间 `[0.31*w, 0.78*w]`（`600~1500 px`）内联合最小化 2D 重投影 RMS 与 3D 手眼位移残差，直接锁死真实广角焦距（`~705 px`，桌面距离 `~250 mm`）。
+   - **痛点 B（画面下沿黑色夹爪阴影与塑封膜反光拉偏角点）**：**V3.58 方案**：开启 `CORNER_REFINE_SUBPIX` + `tryRefineMarkers`，并通过**干净子集去畸变 + 平面 RANSAC 单应性检验（`_clean_outlier_corners`）**自动剥离每张图里偏离 `> 1.15 px` 的 1–3 个孤立反光/夹爪遮挡坏角点（保留其余干净角点），而对 `>= 4` 个坏角点的运动模糊帧则整张剔除。
+   - **痛点 C（起点偏左导致采样集中在左侧 + 纸面微翘）**：**V3.58 方案**：`plan_intr_auto_targets` 读取起点标定板实际位置 `s0_board["center_frac"]` 作为最远点采样种子，将四向及对角倾视基线提升至 `18°–28°`；`calibrate_eye_in_hand` 将 2D 深度比例因子 `alpha_z` 拓宽至 `[0.12, 1.85]`（以 `axy=1.0` 起算），并在自动采集达标后**一键同步保存 `wrist_intrinsics.json` 与 `wrist_handeye_calib.json`**。
+
+## 7. 版本简史（V3.43 – V3.59）
+
+| 版本 | 核心改动内容 |
+| :--- | :--- |
+| V3.43 – V3.46 | 场景启动前选择（`NERO_SCENE`）；主相机手眼标定四步状态灯；OpenCV Qt 插件导致 RViz 崩溃修复（`clean_child_env`、`_import_cv2`） |
+| V3.47 / V3.47.1 | YOLOE-26 视觉/文字提示定位 + 椭球轮廓与局部桌面平面 3D 拟合（解决 D435i 白鸡蛋深度压扁问题）；标定与定位配置持久化及动态校验 |
+| V3.47.2 | Treeview 表格自适应行高与列宽、画面标签防重叠避让、ROI 局部平面拟合 4× 提速（~0.25 s）、YOLO GPU/CPU 设备日志 |
+| V3.48 | 4 姿态碰点法 TCP 标定（`calibrate_tcp`）、目标正上方悬停预演（`hover_above_target`）、PF 开放词汇多物体定位、清除标定按钮 |
+| V3.49 | 新增独立实机腕部相机模块 `NERO_V349_Real_Wrist_Camera.py`：UVC 参数锁定、内参标定、Eye-in-Hand 手眼标定、零先验 6 孔蛋托识别 `locate_egg_holder`、自动采集路径安全区检查 |
+| V3.50 | 主从相机双 `560×315` 实时画布、腕部静止/清晰度/过曝质量门禁、TCP 准星与 `r=21mm` 包络圆投影、粗到精定位 `wrist_refine_target` |
+| V3.51 | 腕部独立 ArUco 设置（默认 24 mm）、可见性感知自动 Eye-in-Hand 采集、控制台底部 9 步全流程状态灯栏（①~⑨） |
+| V3.52 | 8 参数 `CALIB_RATIONAL_MODEL` PnP 完整畸变透传、抗 IPPE 翻转的点对偶 Eye-in-Hand 求解器、非阻塞后台采集、示教按钮右对齐 |
+| V3.53 | D435i 默认深度流升级为 `1280×720 High Accuracy`、V1.11 示教退出修复、待断电位置（Park Pose D）自动退示教与 XY 围栏豁免 |
+| V3.54 | 适配 NERO **V1.2.1 固件（`NeroFW.V121`）**：退出示教前后强制 `set_follower_mode()` + 关节保持，修复退示教掉使能问题 |
+| V3.55 | 主相机手眼标定 6× 提速（雅可比快速逆解 + 6 帧早停 + 混合 PnP/深度自动对齐 + LOO 坏点剔除） |
+| V3.56 | 腕部 Eye-in-Hand 标定优化：纯平移初值探测 + 穹顶采样规划 + 全分辨率 ROI 亚像素 ArUco + 160 mm 杆臂约束与单轴尺度自标定 |
+| V3.57 | 桌面 ChArUco 标定板全自动内参采集（`▶ 自动采集`）+ 24 角点 ChArUco 腕部手眼标定 + 8 参数防过拟合门禁 + 2D 各向异性尺度自标定 |
+| V3.58 | **机械臂运动学（FK）锚定广角内参求解器**（根治平面小倾角下 `fx=2147~5164 px` 退化）+ **RANSAC 单应性孤立坏角点剥离**（消除夹爪阴影/反光拉偏）+ **多帧亚像素稳像平均** + **内参/手眼一键双保存** |
+| **V3.59** | **策略旋钮与虚实统一策略中心（阶段 1）**：`NERO_Strategy_Profile.py` + 控制台「策略旋钮」页；仿真注入 / 实机跟随两个开关默认关闭（关闭时与 V3.58 行为一致）；后端、`NERO_V326`、`NERO_V349`（除 VERSION）未改 |
+
+## 8. 后续四阶段开发计划（V3.59 → V3.62：Sim2Real 统一架构与带噪仿真自动寻优）
+
+### 8.0 核心设计哲学（已与用户对齐确认）
+1. **一套大脑，两套身体（仿真与实机 100% 逻辑通用）**：
+   - 除底层的“眼睛（MuJoCo 渲染相机 vs 实机 D435i + 腕部相机）”和“手脚（MuJoCo 物理步进 vs 实机 MoveIt + 夹爪）”外，中间层的**目标选优、姿态规划、分阶段下探轨迹、异常恢复状态机**在仿真与实机之间 **100% 共用同一份代码**。
+2. **铁打的骨架 + 可拨动的控制旋钮（Control Knobs / Strategy Profile）**：
+   - **固定骨架（写死在底层）**：空间坐标变换、正逆运动学（FK/IK）、3D 安全围栏与桌面高度 `z_table` 防撞底线、基本动作工序（全局扫描 → 悬停 → 腕部精修 → 慢速下探 → 柔顺闭合 → 抬升 → 转腕 → 入槽）。
+   - **控制旋钮（抽离为结构化 JSON 策略包）**：将所有与场景/物体相关的排序权重、姿态偏好权重、悬停高度、夹爪张合裕量、分段速度比抽离为 12 个标准旋钮，保存在 `config/strategies/*.json` 中，仿真和实机直接共读同一份策略文件。
+3. **拒绝低效人工调参：用「带噪仿真最优化试验」自动寻找最优旋钮组合**：
+   - 用户不希望靠人工拍脑袋去试参数，而是通过**在仿真中注入真实传感器噪声与尺寸扰动（Domain Randomization，防止仿真过拟合）**，利用 **拉丁超立方正交试验（LHS/DOE）+ 贝叶斯优化 / 进化策略** 在仿真里自动跑 30–50 轮试验，自动算出针对特定场景的**鲁棒最优参数包（Robust Optimal Profile）**，一键存盘供实机直接调用。
+4. **与具身智能（Embodied AI）的融合**：
+   - 这套控制旋钮既支持通过仿真试验自动寻优，也作为 VLM / Agent 大脑操控物理世界的参数化接口（Parameterized Skill API）——面对新物体或新场景时，Agent 可根据物体语义（易碎/坚硬、密集/稀疏）自动匹配策略包，并在抓空/滑落时通过自反思（Self-Reflection）微调旋钮参数。
+
+### 8.1 阶段 1（V3.59，已交付）：抽离「控制旋钮」与虚实统一策略中心
+
+> **V3.59 实现说明（给 V3.60 接手者）**：
+> - 文档写“12 个旋钮”，按下面列出的条目实际为 14 项 / 16 个参数，已全部实现；`slot_fill_order` 额外加了 `numeric`（默认，= V3.04 按槽号），保证默认行为不变；`descent_speed_ratio` 默认 `0.286`（仿真映射 `1/0.286 ≈ ×3.5`，与 V3.04 一致）。
+> - 仿真注入只走后端**已有**环境变量：`grip_open_margin_mm→NERO_V304_EGG_APERTURE_MARGIN_MM`、`descent_speed_ratio→NERO_V304_FINAL_APPROACH_SLOW`、`hover_height_mm→NERO_V303_HOVER_ABOVE_ENTRY_M`、`w_limit_margin→NERO_V341_LIMIT_MARGIN_DEG(8°×w/0.6)`；目标/槽位顺序经 Agent 钩子。`cruise_speed_ratio`、`w_base_joint_penalty`、`w_elbow_lift`、`wrist_refine_*`、`grip_close_squeeze_mm`、`min_held_width_mm` 在仿真后端里没有对应钩子（逻辑在 V3.42 冻结代码中），V3.60 需在独立桥接模块里接入，不要破坏 `test_v3_44`。
+> - 实机侧目前接入 Camera 页悬停复核（`set_strategy`）；V3.61 的 `RealSkillBridge` 应直接调用同一套决策函数。
+
+- **核心目标**：把散落在代码里的经验常数全部收拢为结构化的“控制旋钮”，实现软件界面可视化调节、JSON 预设存档管理，并让仿真后端与实机模块 100% 共读同一套策略中心。
+- **新增与修改模块**：
+  1. **新建 `NERO_Strategy_Profile.py`（策略与旋钮管理中心）**：
+     定义 4 大组共 12 个核心控制旋钮（含默认值、寻优上下界 `[min, max]`、物理单位与说明）：
+     - **组 A（目标选优与排序旋钮）**：
+       - `w_dist`（距离优先权重，`[0.0, 1.0]`，默认 `0.45`）
+       - `w_clearance`（周围空旷度/防邻蛋碰撞权重，`[0.0, 1.0]`，默认 `0.35`）
+       - `w_yaw_align`（鸡蛋长轴顺手度权重，`[0.0, 1.0]`，默认 `0.20`）
+       - `slot_fill_order`（蛋托装填顺序策略：`far_to_near` / `left_to_right` / `min_joint_move`）
+     - **组 B（机械臂 IK 与姿态偏好旋钮）**：
+       - `w_base_joint_penalty`（J1–J3 底座大关节移动惩罚权重，`[0.1, 2.0]`，默认 `1.0`）
+       - `w_elbow_lift`（手肘抬高避障偏好权重，`[0.0, 1.0]`，默认 `0.5`）
+       - `w_limit_margin`（远离关节限位安全权重，`[0.1, 1.5]`，默认 `0.6`）
+     - **组 C（精细动作与柔顺夹爪旋钮）**：
+       - `hover_height_mm`（预抓取/预放置悬停高度，`[40.0, 90.0] mm`，默认 `60.0 mm`）
+       - `wrist_refine_enable` & `wrist_refine_tol_mm`（腕部精修开关与收敛阈值，`[0.8, 3.0] mm`，默认 `1.5 mm`）
+       - `grip_open_margin_mm`（夹爪下探张开安全余量，实测蛋宽 `+ [8.0, 22.0] mm`，默认 `+14.0 mm`）
+       - `grip_close_squeeze_mm`（夹爪闭合夹紧深度，实测蛋宽 `- [1.5, 4.5] mm`，默认 `-2.5 mm`）
+       - `cruise_speed_ratio` / `descent_speed_ratio`（空中巡航速度比 `[0.2, 1.0]` / 近桌面慢速下探比 `[0.10, 0.60]`）
+     - **组 D（容错与重抓恢复旋钮）**：
+       - `min_held_width_mm`（判定抓持成功的最小夹爪编码器宽度，`[28.0, 36.0] mm`，默认 `32.0 mm`）
+       - `max_retry_per_target`（单目标最大原地重抓次数，`[0, 2]`，默认 `1`）
+  2. **控制台新增「策略旋钮与预设管理」面板（`NERO_V312_Console.py`）**：
+     - 支持滑块/数值实时调整、**「预览当前桌面目标评分排序」**、**「保存策略预设 (`config/strategies/*.json`)」**、**「读取预设」**、**「恢复默认」**。
+  3. **仿真与实机决策层接入 `StrategyProfile`**：
+     - 在保持第 4 节不变量（`test_v3_44` 字节级校验）的前提下，通过非侵入式钩子将 `StrategyProfile` 注入仿真技能执行与实机规划层。
+- **阶段 1 验收标准**：
+  - 在 UI 上改动任一旋钮（如拉高 `w_clearance`），目标抓取顺序和悬停高度立即按新参数生效，无需改代码或重启；
+  - 存盘的 `.json` 策略文件可在仿真与实机面板间直接加载复用；`tests/test_v3_59.py` 与 `check_release.sh` 全部通过。
+
+### 8.2 阶段 2（V3.60）：带噪仿真自动最优化试验台（Sim-in-the-Loop Auto-Optimizer）
+
+- **核心目标**：在仿真中引入真实物理噪声（防止仿真过拟合），用科学试验设计（DOE/LHS）与贝叶斯/进化寻优算法自动跑批试验，为不同场景自动找出最优控制旋钮组合。
+- **新增与修改模块**：
+  1. **新建 `NERO_Sim_Optimizer.py`（带噪仿真寻优引擎）**：
+     - **域随机化噪声注入器（Domain Randomization）**：在每次试验的感知输出与物理交互中注入可配置的真实毛刺——目标 3D 位置高斯噪声 $\mathcal{N}(0, 2.0\text{ mm})$、偏航角噪声 $\mathcal{N}(0, 1.5^\circ)$、鸡蛋长短轴尺寸随机浮动 $\pm 1.5\text{ mm}$、蛋托初始位置/角度微扰。
+     - **综合目标评价函数 $J(\theta)$**：
+       $$J(\theta) = w_{\text{succ}} \cdot \text{成功率(\%)} + w_{\text{safe}} \cdot \text{最小邻蛋安全净空(mm)} - w_{\text{time}} \cdot \text{单颗平均耗时(s)} - w_{\text{joint}} \cdot \text{关节总移动代价(rad)}$$
+       内置两档寻优偏好：「稳健优先（Safety-First）」与「效率优先（Speed-First）」。
+     - **两阶段自动寻优算法**：
+       - **Phase A（拉丁超立方正交抽样 LHS，12–16 轮）**：均匀覆盖 12 维旋钮空间，自动计算各旋钮对成功率与耗时的敏感度排序；
+       - **Phase B（高斯过程贝叶斯优化 / 自适应进化 CMA，20–35 轮）**：围绕 Phase A Top-3 种子自动向高分区域收敛，每个候选参数在多组随机噪声种子下评估均值与最差表现。
+  2. **控制台寻优工作台 UI**：
+     - 选择目标场景（如：`标准稀疏抓蛋`、`密集贴靠抓蛋`、`边缘极限位置抓蛋`），设置试验轮数，点击 **「▶ 启动自动寻优」**；
+     - 实时显示每轮试验得分、当前最优旋钮组合，并在完成后自动保存为 `config/strategies/<scene>_optimal.json`。
+- **阶段 2 验收标准**：
+  - 给定带 `±2 mm` 视觉噪声的测试场景，寻优器在 30–40 轮内收敛，产出的 `<scene>_optimal.json` 在带噪测试集上的成功率与安全净空显著优于初始默认参数；`tests/test_v3_60.py` 全部通过。
+
+### 8.3 阶段 3（V3.61）：实机「主从视觉 + 5 cm 悬停预演（Hover Dry-Run）」安全闭环
+
+- **核心目标**：建立虚实统一技能桥接器（`RealSkillBridge`），加载阶段 2 算出的最优策略包，在不触碰真实鸡蛋的前提下，完成“主相机粗定位 → 5 cm 悬停 → 腕部相机精修对齐 → 蛋托孔位 5 cm 悬停复核”的全自动预演闭环。
+- **新增与修改模块**：
+  1. **新建 `NERO_Real_Skill_Bridge.py`（实机统一技能执行桥）**：
+     - 对上提供与仿真完全一致的技能接口（`scan_scene`、`plan_grasp`、`approach_and_refine`、`execute_pick`、`orient_and_approach_slot`、`place_in_slot`、`verify_state`）；
+     - 对下串联 `NERO_V347`（D435i 主相机全局定位）、`NERO_V349`（腕部相机 `wrist_refine_target` 精修与 `locate_egg_holder` 6 孔蛋托识别）、`NERO_V315/V316`（3D 安全围栏 + `z_table` 硬限位检查）与 `NERO_V313`（`move_and_settle` + `_wait_still` 停稳确认）。
+  2. **实机三级安全运行开关（Console 实机任务面板）**：
+     - **档位 1（纯视觉规划预览）**：主从相机识别鸡蛋和蛋托 6 孔，按当前 `StrategyProfile` 计算抓取优先级、最佳抓持偏航角和目标槽位，在画面上画出完整规划结果，机械臂完全不动；
+     - **档位 2（5 cm 悬停预演 Hover Dry-Run，默认安全档）**：机械臂自动运动到目标鸡蛋正上方 `hover_height_mm`（如 `50–60 mm`）处停稳 → 腕部相机拍照执行 `wrist_refine_target` 微调水平位置使 TCP 准星精确对准鸡蛋中心 → 随后平移到蛋托目标槽位正上方 `50–60 mm` 悬停对准 → 回安全位。**全程不进入最后 5 cm 下探区、不合夹爪**；
+     - **档位 3（实机正式抓放）**：需通过档位 2 复核确认后方可解锁。
+- **阶段 3 验收标准**：
+  - 实机桌面随意摆放鸡蛋（或假蛋/乒乓球）与 6 孔蛋托，运行「档位 2（5 cm 悬停预演）」，机械臂平顺完成粗定位接近与腕部精修，腕部实时画面中 TCP 准星与真实鸡蛋中心、蛋槽中心偏差 `≤ 2.0 mm`，全程零越界、零碰撞；`tests/test_v3_61.py` 全部通过。
+
+### 8.4 阶段 4（V3.62）：实机柔顺抓放全流程 + Agent 智能策略调度
+
+- **核心目标**：打通最后 5 cm 慢速垂直下探、真实夹爪柔顺闭合、双重抓持状态校验与失败自动补抓，实现真机连续抓鸡蛋入托，并支持 VLM Agent 根据桌面场景自动调度/微调策略包。
+- **新增与修改模块**：
+  1. **真实夹爪柔顺控制与双重抓持校验（`verify_state`）**：
+     - 下探前按视觉实测鸡蛋短轴宽度 $W_{\text{egg}}$ 张开至 $W_{\text{egg}} + \text{grip\_open\_margin\_mm}$（避免碰翻邻蛋）；
+     - 到达抓取高度停稳后，按 $W_{\text{egg}} - \text{grip\_close\_squeeze\_mm}$ 限速柔顺闭合；
+     - 垂直抬升至悬停高度后，执行**双重抓持判定**：① 检查夹爪编码器实际停住宽度是否落在 `[min_held_width_mm, W_egg + 2mm]` 区间（若闭合到底 `< 28 mm` 则立即判为空抓）；② 相机复核原桌面位置是否已无鸡蛋。若抓空且未超 `max_retry_per_target`，自动触发回退重抓闭环。
+  2. **分层垂直入槽与柔顺释放**：
+     - 复用仿真验证成熟的转腕对齐与分层垂直下降逻辑（`V3.02/V3.03`），在蛋槽正上方完成腕部偏航角对齐后，以 `descent_speed_ratio` 慢速垂直入槽、张开夹爪释放并垂直回撤至安全高度。
+  3. **VLM Agent 场景自适应策略匹配与自反思记忆**：
+     - Agent 在任务开始时根据桌面视觉特征（目标类别、密集程度、距边界距离）自动从 `config/strategies/` 中选择最匹配的仿真寻优策略包（或动态微调旋钮），并在实机执行日志中记录每次抓放的耗时与成败，持续扩充策略经验库。
+- **阶段 4 验收标准**：
+  - 实机连续抓取多颗鸡蛋（先用假蛋验证 10 次，再用真鸡蛋验证）稳健放入 6 孔蛋托，不磕碰蛋托外壁、不伤蛋壳；改变鸡蛋密集度或更换其他抓取物时，切换/自动匹配对应策略包即可稳定复现；`tests/test_v3_62.py` 全部通过。
+
+## 9. 测试环境的坑（给后续开发者的提醒）
+
+- 在没有 `tkinter` / `DISPLAY` 的云端容器环境里，独立 `test_v3_XX_gui.py` 会打印 `skipped` 并返回 0；因此必须在非 GUI 单测（如 `test_v3_57.py` X5、`test_v3_58.py` Y5）中同时包含基于 `unittest.mock` 的 `run_console('sim')`、`run_console('real')` 和 `CameraTabUI` 交互回归测试，确保任何 UI 属性初始化顺序问题在无显示器环境下也能被 100% 捕获。
+- 真机 GUI 显示效果（行高、列宽、双画布缩放）最终以用户在 Ubuntu 22.04 实机上运行 `bash tests/check_release.sh` 及实测截图为准。
+- 不要在测试中联网下载模型；`ultralytics` 在单测中统一使用 `tests/v347_fake.py` 里的假模块（`F.install()` / `F.uninstall()`）。

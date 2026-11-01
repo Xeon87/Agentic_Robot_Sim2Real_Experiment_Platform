@@ -30,8 +30,9 @@ import NERO_V347_Yolo_Perception as YP        # noqa: E402
 import NERO_V349_Real_Wrist_Camera as W49     # noqa: E402
 
 # ------------------------------------------------------------------ Y1: Version & markers
-assert CON.VERSION == "V3.58" and RR.VERSION == "V3.58" and YP.VERSION == "V3.58" and W49.VERSION == "V3.58"
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "V3.58"
+_OK_VERSIONS = ("V3.58", "V3.59")    # V3.59: version bump only (see CHANGELOG)
+assert CON.VERSION in _OK_VERSIONS and RR.VERSION in _OK_VERSIONS and YP.VERSION in _OK_VERSIONS and W49.VERSION in _OK_VERSIONS
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in _OK_VERSIONS
 h308 = hashlib.sha256((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).hexdigest()
 assert h308.startswith("020cc6680f181872"), f"NERO_V308 modified: {h308}"
 

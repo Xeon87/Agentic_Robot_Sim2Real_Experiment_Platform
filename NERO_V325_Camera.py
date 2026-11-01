@@ -62,6 +62,8 @@ DEFAULT_LOCATE_PATH = LOCATE_PATH
 # V3.56 FAST WRIST EYE-IN-HAND CALIB + LOOK-AT DOME PLANNER + FULL-RES ROI ARUCO + SCALE/LEVER-ARM SOLVER
 # V3.57 AUTO TABLETOP CHARUCO INTRINSICS + CHARUCO EIH + 2D FOCAL/SCALE SELF-CALIB
 # V3.58 KINEMATIC-ANCHORED WIDE-ANGLE INTRINSICS + FULL-QUADRANT TILT + ROBUST CHARUCO EIH
+# V3.59 STRATEGY PROFILE + CONTROL KNOBS + SIM/REAL SHARED DECISION LAYER (set_strategy: hover height, target
+#   ranking, IK posture preference and cruise speed follow NERO_Strategy_Profile only when the console links it)
 # V3.48 TCP + HOVER + OBJECTS + CLEAR CALIB: TCP pivot calibration, hover verification, general objects, clear calib
 TCP_CALIB_PATH = os.path.join(HERE, "config", "tcp_calib.json")
 DEFAULT_TCP_CALIB_PATH = TCP_CALIB_PATH
@@ -846,7 +848,7 @@ def tcp_valid(d):
 
 
 def plan_hover_target(urdf, joints, limits_rad, q0_rad, tool_T, target_xyz, base="base_link", fence_fn=None,
-                      soft_deg=3.0):
+                      soft_deg=3.0, prefer_fn=None):
     """V3.48 HOVER VERIFY: joint target (rad) that places the TCP at target_xyz (hovering above an egg/object)
     with link7 safely above the TCP, inside soft joint limits and the safety zone.
     -> (q_rad, info_dict) or (None, reason_str)"""
@@ -862,6 +864,7 @@ def plan_hover_target(urdf, joints, limits_rad, q0_rad, tool_T, target_xyz, base
         [0.0, math.radians(45.0), 0.0, math.radians(70.0), 0.0, math.radians(35.0), 0.0],
     ]
     why = "IK 无解"
+    best = None                     # V3.59: with prefer_fn every seed is tried and the lowest-cost valid IK wins
     for sd in seeds:
         q, err = CS.ik_tool(urdf, joints, sd, base, tool_T, list(target_xyz), slim, iters=250, tol=5e-4, keep_R=None)
         if q is None or err > 0.002:
@@ -880,8 +883,18 @@ def plan_hover_target(urdf, joints, limits_rad, q0_rad, tool_T, target_xyz, base
                 why = f"安全区拦截：{msg_f}"
                 continue
         T_tcp = CS.tool_pose(urdf, joints, q, base, tool_T)
-        return list(q), {"err_mm": err * 1000.0, "flange_z_m": Tf[2][3],
-                         "tcp_xyz_m": [T_tcp[0][3], T_tcp[1][3], T_tcp[2][3]]}
+        info = {"err_mm": err * 1000.0, "flange_z_m": Tf[2][3], "tcp_xyz_m": [T_tcp[0][3], T_tcp[1][3], T_tcp[2][3]]}
+        if prefer_fn is None:
+            return list(q), info
+        try:
+            cost = float(prefer_fn(list(q)))
+        except Exception:
+            cost = 0.0
+        info["v359_cost"] = cost
+        if best is None or cost < best[1]["v359_cost"] - 1e-9:
+            best = (list(q), info)
+    if best is not None:
+        return best
     return None, why
 
 
@@ -1699,6 +1712,8 @@ class CameraTabUI:
         self.workflow_bars = []
         self.workflow_state = []
         self._btn_state = {}
+        self.strategy = None                 # V3.59 STRATEGY PROFILE: None = V3.58 behaviour (not linked)
+        self._hover_before_strategy = None
         self._det_busy = False
         self._ui_q = []
         self._load_saved()
@@ -4296,7 +4311,89 @@ class CameraTabUI:
                 if e.get("det_id") == det_id:
                     return e
         trusted = [e for e in valid if e.get("trusted")]
-        return trusted[0] if trusted else valid[0]
+        pool = trusted or valid
+        if self.strategy is not None and len(pool) > 1:          # V3.59: no row selected -> best-ranked target
+            try:
+                ranking = self.strategy_ranking(pool)
+                if ranking:
+                    for e in pool:
+                        if str(e.get("det_id")) == str(ranking[0]["id"]):
+                            return e
+            except Exception as exc:
+                self.log(f"[WARN] [V3.59 策略] 目标排序失败，改用第一个可信目标：{exc}")
+        return pool[0]
+
+    # ------------------------------------------------------------------ V3.59 STRATEGY PROFILE
+    def set_strategy(self, profile):
+        """V3.59: profile (NERO_Strategy_Profile.StrategyProfile) links hover height / ranking / IK preference /
+        cruise speed to the shared knobs; None unlinks and restores the previous hover height."""
+        if profile is None:
+            if self.strategy is not None:
+                self.strategy = None
+                if self._hover_before_strategy is not None and hasattr(self, "v_hover_mm"):
+                    self.v_hover_mm.set(self._hover_before_strategy)
+                self._hover_before_strategy = None
+                self.log("[INFO] [V3.59 策略] Camera 页已脱离策略包（悬停高度恢复为原值）")
+            return
+        first = self.strategy is None
+        self.strategy = profile
+        if hasattr(self, "v_hover_mm"):
+            if first:
+                self._hover_before_strategy = self.v_hover_mm.get()
+            hv = min(HOVER_RANGE_MM[1], max(HOVER_RANGE_MM[0], float(profile["hover_height_mm"])))
+            if self.v_hover_mm.get() != f"{hv:.0f}":
+                self.v_hover_mm.set(f"{hv:.0f}")
+        if first:
+            self.log(f"[OK] [V3.59 策略] Camera 页跟随策略包 {profile.name}：悬停 {profile['hover_height_mm']:.0f} mm，"
+                     f"未选中行时悬停复核选排序第 1 的目标，IK 多解按姿态偏好选择，速度 × 巡航比")
+
+    def _tcp_xyz_now(self):
+        try:
+            import NERO_V315_Consistency_Safety as CS
+            q = self.actual_q()
+            m = self._model()
+            if not q or not m:
+                return None
+            T = CS.tool_pose(self._urdf(), m["joints"], [math.radians(v) for v in q], m.get("base_link") or "base_link",
+                             self._active_tcp_T())
+            return T_t(T) if T is not None else None
+        except Exception:
+            return None
+
+    def strategy_scene(self):
+        """-> (scene dict, source label) for the strategy panel preview, or None when nothing is located."""
+        import NERO_Strategy_Profile as SP
+        eggs = [e for e in (self.eggs or []) if e.get("xyz_m") and e.get("status") != "rejected"]
+        if not eggs:
+            return None
+        tcp = self._tcp_xyz_now()
+        src = f"实机主相机识别结果（{len(eggs)} 个目标，" + ("TCP 来自关节反馈）" if tcp else "无关节反馈：TCP 用默认点）")
+        return SP.real_scene_from_eggs(eggs, tcp), src
+
+    def strategy_ranking(self, eggs=None):
+        import NERO_Strategy_Profile as SP
+        if self.strategy is None:
+            return []
+        eggs = [e for e in (eggs if eggs is not None else (self.eggs or [])) if e.get("xyz_m")]
+        sc = SP.real_scene_from_eggs(eggs, self._tcp_xyz_now())
+        objs = [{"id": k, "xyz_m": v["xyz_m"], "width_mm": v["grasp_geometry"].get("effective_width_mm")}
+                for k, v in sc["objects"].items()]
+        return SP.rank_targets(objs, sc["tcp"]["xyz_m"], self.strategy)
+
+    def _strategy_prefer_fn(self, q0r, limits_rad):
+        if self.strategy is None:
+            return None
+        import NERO_Strategy_Profile as SP
+        import NERO_V315_Consistency_Safety as CS
+        m = self._model()
+        urdf = self._urdf()
+        base = m.get("base_link") or "base_link"
+
+        def elbow_z(q):
+            T = CS.fk(urdf, dict(zip(m["joints"], q)), base, "link4")
+            return T[2][3] if T is not None else 0.0
+        prof = self.strategy
+        return lambda q: SP.ik_preference_cost(q, q0r, limits_rad, prof, elbow_z_fn=elbow_z)
 
     def on_hover_target(self):
         """V3.48 HOVER VERIFY: move the TCP to hover HOVER_DEFAULT_MM (e.g. 100 mm) directly above the selected
@@ -4339,11 +4436,14 @@ class CameraTabUI:
             return True, ""
 
         q_tgt, info = plan_hover_target(urdf, model["joints"], model["limits"], q0r, tool_T, target_xyz,
-                                        base=base, fence_fn=fence_fn)
+                                        base=base, fence_fn=fence_fn,
+                                        prefer_fn=self._strategy_prefer_fn(q0r, model["limits"]))
         if q_tgt is None:
             self.log(f"[FAIL] [V3.48 hover] 悬停规划失败（{tgt_item.get('det_id')}）：{info}")
             return
         speed = min(CALIB_MAX_SPEED, max(0.01, float(self.cfg_fn().get("speed_percent", 10)) / 100.0))
+        if self.strategy is not None:                 # V3.59: cruise_speed_ratio (<= 1, only ever slower)
+            speed = max(0.01, speed * min(1.0, float(self.strategy["cruise_speed_ratio"])))
         det_id = tgt_item.get("det_id", "目标")
         untrusted_warn = "" if tgt_item.get("trusted") else "\n⚠ 注意：该目标当前标为「不可信」！"
 

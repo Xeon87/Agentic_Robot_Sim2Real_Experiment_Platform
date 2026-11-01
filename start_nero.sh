@@ -23,6 +23,7 @@ SAFE="$HERE/NERO_V316_Safety_Editor.py"
 CAM="$HERE/NERO_V325_Camera.py"
 YOLO347="$HERE/NERO_V347_Yolo_Perception.py"   # V3.47 YOLOE egg perception (Camera调试 → 视觉定位)
 WRIST349="$HERE/NERO_V349_Real_Wrist_Camera.py" # V3.49 real USB wrist camera + intrinsics + eye-in-hand + holder
+STRAT359="$HERE/NERO_Strategy_Profile.py"       # V3.59 STRATEGY PROFILE: shared control knobs (sim + real)
 
 if [[ "${1:-}" == "--sim" ]]; then
   shift
@@ -41,7 +42,7 @@ echo "============================================================"
 echo " NERO ${RELEASE} — console"
 echo " Folder: $HERE"
 echo "============================================================"
-for f in "$SIM" "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" "$CAM" "$YOLO347" "$WRIST349" "$HERE/SHA256SUMS.txt"; do
+for f in "$SIM" "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" "$CAM" "$YOLO347" "$WRIST349" "$STRAT359" "$HERE/SHA256SUMS.txt"; do
   [[ -f "$f" ]] || die "NERO file missing from this folder: $f"
 done
 if ( cd "$HERE" && sha256sum --quiet -c SHA256SUMS.txt ) >/dev/null 2>&1; then
