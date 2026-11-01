@@ -58,7 +58,6 @@ CAMERA="$HERE/NERO_V308_Camera_Perception.py"
 WRIST="$HERE/NERO_V326_Wrist_Camera.py"
 FIXED331="$HERE/NERO_V331_Fixed_Camera.py"
 SCENES343="$HERE/NERO_V343_Scenes.py"
-STRAT359="$HERE/NERO_Strategy_Profile.py"   # V3.59 STRATEGY PROFILE (Agent advice hook, used only when NERO_V359_STRATEGY_PROFILE is set)
 NERO_MODULES="NERO_V2_7_1_Agent NERO_V71_Hybrid_GPU_Planner_Core NERO_GPU_Planner_Client NERO_V308_Camera_Perception"
 
 LOG_DIR="$HERE/logs"
@@ -147,7 +146,6 @@ else
   fi
 fi
 python3 -m py_compile "$BACKEND" "$AGENT" "$CORE" "$CLIENT" "$GPU_SERVER" "$CAMERA" "$WRIST" "$FIXED331" "$SCENES343" || fatal "py_compile failed"
-python3 -m py_compile "$STRAT359" || fatal "py_compile failed: NERO_Strategy_Profile.py (V3.59 STRATEGY PROFILE)"
 status OK "py_compile PASS"
 status INFO "MuJoCo model (external): $MODEL_FILE sha256=$(sha256sum "$MODEL_FILE" | cut -c1-16)"
 # V3.44 MUJOCO SCENE: chosen before start (NERO console drop-down -> NERO_SCENE); unset = fill_egg_holder

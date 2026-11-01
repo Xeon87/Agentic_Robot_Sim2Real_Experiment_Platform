@@ -62,8 +62,7 @@ DEFAULT_LOCATE_PATH = LOCATE_PATH
 # V3.56 FAST WRIST EYE-IN-HAND CALIB + LOOK-AT DOME PLANNER + FULL-RES ROI ARUCO + SCALE/LEVER-ARM SOLVER
 # V3.57 AUTO TABLETOP CHARUCO INTRINSICS + CHARUCO EIH + 2D FOCAL/SCALE SELF-CALIB
 # V3.58 KINEMATIC-ANCHORED WIDE-ANGLE INTRINSICS + FULL-QUADRANT TILT + ROBUST CHARUCO EIH
-# V3.59 STRATEGY PROFILE + CONTROL KNOBS + SIM/REAL SHARED DECISION LAYER (set_strategy: hover height, target
-#   ranking, IK posture preference and cruise speed follow NERO_Strategy_Profile only when the console links it)
+# V3.59 SKILL STRATEGY KNOBS + MULTI-POINT HOVER DRY-RUN + CALIB BADGE CONSISTENCY
 # V3.48 TCP + HOVER + OBJECTS + CLEAR CALIB: TCP pivot calibration, hover verification, general objects, clear calib
 TCP_CALIB_PATH = os.path.join(HERE, "config", "tcp_calib.json")
 DEFAULT_TCP_CALIB_PATH = TCP_CALIB_PATH
@@ -848,7 +847,7 @@ def tcp_valid(d):
 
 
 def plan_hover_target(urdf, joints, limits_rad, q0_rad, tool_T, target_xyz, base="base_link", fence_fn=None,
-                      soft_deg=3.0, prefer_fn=None):
+                      soft_deg=3.0):
     """V3.48 HOVER VERIFY: joint target (rad) that places the TCP at target_xyz (hovering above an egg/object)
     with link7 safely above the TCP, inside soft joint limits and the safety zone.
     -> (q_rad, info_dict) or (None, reason_str)"""
@@ -864,7 +863,6 @@ def plan_hover_target(urdf, joints, limits_rad, q0_rad, tool_T, target_xyz, base
         [0.0, math.radians(45.0), 0.0, math.radians(70.0), 0.0, math.radians(35.0), 0.0],
     ]
     why = "IK 无解"
-    best = None                     # V3.59: with prefer_fn every seed is tried and the lowest-cost valid IK wins
     for sd in seeds:
         q, err = CS.ik_tool(urdf, joints, sd, base, tool_T, list(target_xyz), slim, iters=250, tol=5e-4, keep_R=None)
         if q is None or err > 0.002:
@@ -883,18 +881,8 @@ def plan_hover_target(urdf, joints, limits_rad, q0_rad, tool_T, target_xyz, base
                 why = f"安全区拦截：{msg_f}"
                 continue
         T_tcp = CS.tool_pose(urdf, joints, q, base, tool_T)
-        info = {"err_mm": err * 1000.0, "flange_z_m": Tf[2][3], "tcp_xyz_m": [T_tcp[0][3], T_tcp[1][3], T_tcp[2][3]]}
-        if prefer_fn is None:
-            return list(q), info
-        try:
-            cost = float(prefer_fn(list(q)))
-        except Exception:
-            cost = 0.0
-        info["v359_cost"] = cost
-        if best is None or cost < best[1]["v359_cost"] - 1e-9:
-            best = (list(q), info)
-    if best is not None:
-        return best
+        return list(q), {"err_mm": err * 1000.0, "flange_z_m": Tf[2][3],
+                         "tcp_xyz_m": [T_tcp[0][3], T_tcp[1][3], T_tcp[2][3]]}
     return None, why
 
 
@@ -1712,8 +1700,6 @@ class CameraTabUI:
         self.workflow_bars = []
         self.workflow_state = []
         self._btn_state = {}
-        self.strategy = None                 # V3.59 STRATEGY PROFILE: None = V3.58 behaviour (not linked)
-        self._hover_before_strategy = None
         self._det_busy = False
         self._ui_q = []
         self._load_saved()
@@ -1785,6 +1771,9 @@ class CameraTabUI:
         tk, ttk = self.tk, self.ttk
         import NERO_V349_Real_Wrist_Camera as W49
         self.W49 = W49
+        import NERO_V359_Strategy as ST59
+        self.ST59 = ST59
+        self.strategy_profile = ST59.get_active_strategy()
         p = ttk.Frame(nb, padding=6)
         nb.add(p, text="相机信息")
         ttk.Label(p, text="主相机（固定 D435i，eye-to-hand）", font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
@@ -2296,6 +2285,8 @@ class CameraTabUI:
             has_tgt = any(e.get("xyz_m") and e.get("status") != "rejected" for e in (self.eggs or []))
             self._en(self.b_hover, bool(c or r) and has_tgt and jp and not busy)
             self._en(self.b_hover_back, bool(self._pre_hover_q) and jp and not busy)
+            if hasattr(self, "b_dry_run"):
+                self._en(self.b_dry_run, bool(c or r) and (has_tgt or bool(self.v_dry_dest_xyz.get().strip())) and jp and not busy)
             if hasattr(self, "b_wrefine"):
                 w_ready = bool(self.wrist_src and (self.wrist_intr or getattr(self.wrist_src, "K", None))
                                and (self.wrist_calib or self.wcalib_result))
@@ -2503,6 +2494,29 @@ class CameraTabUI:
         self.b_walign = ttk.Button(rhov, text="✥ 一键微调对齐", command=self.on_wrist_align)
         self.b_walign.pack(side="left", padx=2)
         ttk.Button(rhov, text="■ 停止", command=self.on_stop).pack(side="left", padx=(2, 0))
+        # V3.59 MULTI-POINT HOVER DRY-RUN (gripper-free pick-to-place / multi-object hover verification)
+        rdry = ttk.Frame(p)
+        rdry.pack(fill="x", pady=(3, 0))
+        self.b_dry_run = ttk.Button(rdry, text="▶ 多点悬停预演 (Dry-Run)", command=self.on_hover_dry_run)
+        self.b_dry_run.pack(side="left")
+        ttk.Label(rdry, text=" 航线:").pack(side="left")
+        self._dry_mode_items = (
+            ("next_target", "源目标 → 下一个目标"),
+            ("all_trusted", "巡检全部可信目标"),
+            ("first_empty_slot", "源目标 → 蛋托首空孔"),
+            ("manual_xyz", "源目标 → 手动目标B"),
+        )
+        self.v_dry_dest_mode = tk.StringVar(value=self._dry_mode_items[0][1])
+        self.cb_dry_dest = ttk.Combobox(
+            rdry, textvariable=self.v_dry_dest_mode,
+            values=[m[1] for m in self._dry_mode_items], state="readonly", width=18,
+        )
+        self.cb_dry_dest.pack(side="left", padx=2)
+        ttk.Label(rdry, text=" 目标B(x,y,z mm):").pack(side="left")
+        self.v_dry_dest_xyz = tk.StringVar(value="-450, 123, 43")
+        ttk.Entry(rdry, textvariable=self.v_dry_dest_xyz, width=14).pack(side="left", padx=2)
+        ttk.Label(rdry, text="（无夹爪测试：物体A悬停 → 抬升过渡 → 目标B悬停 → 回原位）",
+                  foreground="#607d8b").pack(side="left", padx=2)
         rtcp = ttk.Frame(p)
         rtcp.pack(fill="x", pady=(4, 0))
         ttk.Label(rtcp, text="TCP 标定（多姿态碰同一点）：", font=("TkDefaultFont", 9, "bold")).pack(side="left")
@@ -2788,8 +2802,15 @@ class CameraTabUI:
         pos = T_t(X)
         y = c["marker_in_flange"]
         loo_m, loo_x = c.get("loo_mean_mm"), c.get("loo_max_mm")
-        good = (loo_m is not None and loo_m <= CALIB_GOOD_MEAN_MM and loo_x <= CALIB_GOOD_MAX_MM)
-        lines = [f"{src}  ·  {'合格 ✓' if good else '未达标 ⚠'}",
+        loo_ok = (loo_m is not None and loo_m <= CALIB_GOOD_MEAN_MM and loo_x <= CALIB_GOOD_MAX_MM)
+        good = bool(c.get("good", loo_ok and not c.get("warnings")))
+        if good:
+            badge_str = "合格 ✓"
+        elif loo_ok and c.get("warnings"):
+            badge_str = "未达标 ⚠（留一精度已合格，需补够下方朝向/范围要求）"
+        else:
+            badge_str = "未达标 ⚠"
+        lines = [f"{src}  ·  {badge_str}",
                  f"拟合残差 平均 {c['mean_mm']:.2f} / 最大 {c['max_mm']:.2f} mm · 留一（独立检验） 平均 "
                  f"{(loo_m or 0):.2f} / 最大 {(loo_x or 0):.2f} mm",
                  f"相机位置（base_link）x {pos[0]:+.3f}  y {pos[1]:+.3f}  z {pos[2]:+.3f} m",
@@ -4299,6 +4320,17 @@ class CameraTabUI:
         u = self._urdf_tcp_vec()
         self.log(f"[OK] [V3.48 tcp] 已恢复 URDF 默认 TCP 偏移：({u[0] * 1000:+.1f}, {u[1] * 1000:+.1f}, {u[2] * 1000:+.1f}) mm")
 
+    def apply_strategy_profile(self, profile):
+        """V3.59: Synchronize active StrategyProfile knobs with CameraTabUI hover & dry-run parameters."""
+        if profile is None:
+            return
+        self.strategy_profile = profile
+        if hasattr(self, "v_hover_mm"):
+            h_mm = float(profile.get("cam_hover_verify_height_mm", HOVER_DEFAULT_MM))
+            if HOVER_RANGE_MM[0] <= h_mm <= HOVER_RANGE_MM[1]:
+                self.v_hover_mm.set(f"{h_mm:.0f}")
+        self._update_calib_ui()
+
     def _selected_hover_target(self):
         valid = [e for e in (self.eggs or []) if e.get("xyz_m") and e.get("status") != "rejected"]
         if not valid:
@@ -4310,90 +4342,175 @@ class CameraTabUI:
             for e in valid:
                 if e.get("det_id") == det_id:
                     return e
-        trusted = [e for e in valid if e.get("trusted")]
-        pool = trusted or valid
-        if self.strategy is not None and len(pool) > 1:          # V3.59: no row selected -> best-ranked target
-            try:
-                ranking = self.strategy_ranking(pool)
-                if ranking:
-                    for e in pool:
-                        if str(e.get("det_id")) == str(ranking[0]["id"]):
-                            return e
-            except Exception as exc:
-                self.log(f"[WARN] [V3.59 策略] 目标排序失败，改用第一个可信目标：{exc}")
-        return pool[0]
+        knobs = self.strategy_profile.knobs if getattr(self, "strategy_profile", None) else None
+        ranked = self.ST59.rank_detected_targets(valid, knobs=knobs)
+        return ranked[0] if ranked else valid[0]
 
-    # ------------------------------------------------------------------ V3.59 STRATEGY PROFILE
-    def set_strategy(self, profile):
-        """V3.59: profile (NERO_Strategy_Profile.StrategyProfile) links hover height / ranking / IK preference /
-        cruise speed to the shared knobs; None unlinks and restores the previous hover height."""
-        if profile is None:
-            if self.strategy is not None:
-                self.strategy = None
-                if self._hover_before_strategy is not None and hasattr(self, "v_hover_mm"):
-                    self.v_hover_mm.set(self._hover_before_strategy)
-                self._hover_before_strategy = None
-                self.log("[INFO] [V3.59 策略] Camera 页已脱离策略包（悬停高度恢复为原值）")
-            return
-        first = self.strategy is None
-        self.strategy = profile
-        if hasattr(self, "v_hover_mm"):
-            if first:
-                self._hover_before_strategy = self.v_hover_mm.get()
-            hv = min(HOVER_RANGE_MM[1], max(HOVER_RANGE_MM[0], float(profile["hover_height_mm"])))
-            if self.v_hover_mm.get() != f"{hv:.0f}":
-                self.v_hover_mm.set(f"{hv:.0f}")
-        if first:
-            self.log(f"[OK] [V3.59 策略] Camera 页跟随策略包 {profile.name}：悬停 {profile['hover_height_mm']:.0f} mm，"
-                     f"未选中行时悬停复核选排序第 1 的目标，IK 多解按姿态偏好选择，速度 × 巡航比")
+    def _dry_dest_mode_key(self):
+        if not hasattr(self, "v_dry_dest_mode"):
+            return "next_target"
+        lab = self.v_dry_dest_mode.get()
+        for k, text in getattr(self, "_dry_mode_items", ()):
+            if text == lab:
+                return k
+        return "next_target"
 
-    def _tcp_xyz_now(self):
+    def plan_dry_run_from_ui(self, dest_mode=None, manual_dest_text=None, knobs=None):
+        """V3.59: Plan a gripper-free multi-point Hover Dry-Run sequence from current UI state without moving the arm."""
+        k = dict(self.strategy_profile.knobs) if getattr(self, "strategy_profile", None) else dict(self.ST59.BASELINE_KNOBS)
+        if isinstance(knobs, dict):
+            k.update(knobs)
         try:
-            import NERO_V315_Consistency_Safety as CS
-            q = self.actual_q()
-            m = self._model()
-            if not q or not m:
-                return None
-            T = CS.tool_pose(self._urdf(), m["joints"], [math.radians(v) for v in q], m.get("base_link") or "base_link",
-                             self._active_tcp_T())
-            return T_t(T) if T is not None else None
+            hover_mm = float(self.v_hover_mm.get())
+            if HOVER_RANGE_MM[0] <= hover_mm <= HOVER_RANGE_MM[1]:
+                k["cam_hover_verify_height_mm"] = hover_mm
         except Exception:
-            return None
-
-    def strategy_scene(self):
-        """-> (scene dict, source label) for the strategy panel preview, or None when nothing is located."""
-        import NERO_Strategy_Profile as SP
-        eggs = [e for e in (self.eggs or []) if e.get("xyz_m") and e.get("status") != "rejected"]
-        if not eggs:
-            return None
-        tcp = self._tcp_xyz_now()
-        src = f"实机主相机识别结果（{len(eggs)} 个目标，" + ("TCP 来自关节反馈）" if tcp else "无关节反馈：TCP 用默认点）")
-        return SP.real_scene_from_eggs(eggs, tcp), src
-
-    def strategy_ranking(self, eggs=None):
-        import NERO_Strategy_Profile as SP
-        if self.strategy is None:
-            return []
-        eggs = [e for e in (eggs if eggs is not None else (self.eggs or [])) if e.get("xyz_m")]
-        sc = SP.real_scene_from_eggs(eggs, self._tcp_xyz_now())
-        objs = [{"id": k, "xyz_m": v["xyz_m"], "width_mm": v["grasp_geometry"].get("effective_width_mm")}
-                for k, v in sc["objects"].items()]
-        return SP.rank_targets(objs, sc["tcp"]["xyz_m"], self.strategy)
-
-    def _strategy_prefer_fn(self, q0r, limits_rad):
-        if self.strategy is None:
-            return None
-        import NERO_Strategy_Profile as SP
-        import NERO_V315_Consistency_Safety as CS
-        m = self._model()
+            pass
+        mode = dest_mode or self._dry_dest_mode_key()
+        m_txt = manual_dest_text if manual_dest_text is not None else (
+            self.v_dry_dest_xyz.get() if hasattr(self, "v_dry_dest_xyz") else ""
+        )
+        sel_ids = []
+        if hasattr(self, "tv_eggs"):
+            for it in self.tv_eggs.selection():
+                vals = self.tv_eggs.item(it, "values") or ()
+                if vals:
+                    sel_ids.append(str(vals[0]))
+        targets = self.ST59.build_dry_run_targets(
+            self.eggs or [], selected_ids=sel_ids, dest_mode=mode, manual_dest_text=m_txt, knobs=k,
+        )
+        if not targets and m_txt and str(m_txt).strip():
+            t_manual = self.ST59.parse_waypoint_spec(m_txt, fallback_id="目标点B")
+            if t_manual:
+                targets = [t_manual]
+        q0 = self.actual_q()
+        if not q0:
+            self.log("[WARN] [V3.59 dry-run] 没有关节反馈（请先连接实机或启动监控）")
+            return {"ok": False, "error": "没有关节反馈"}
+        model = self._model()
         urdf = self._urdf()
-        base = m.get("base_link") or "base_link"
+        base = model.get("base_link") or "base_link"
+        tool_T = self._active_tcp_T()
+        f = self._fence()
+        zt = float((f or {}).get("z_table", 0.0))
+        q0r = [math.radians(v) for v in q0]
 
-        def elbow_z(q):
-            T = CS.fk(urdf, dict(zip(m["joints"], q)), base, "link4")
-            return T[2][3] if T is not None else 0.0
-        prof = self.strategy
-        return lambda q: SP.ik_preference_cost(q, q0r, limits_rad, prof, elbow_z_fn=elbow_z)
+        def fence_fn(q_rad):
+            if hasattr(self.pipe, "fence_goal_check"):
+                r_ = self.pipe.fence_goal_check(model, q_rad)
+                return bool(r_[0]), (r_[1] if len(r_) > 1 else "")
+            return True, ""
+
+        plan = self.ST59.plan_hover_dry_run_sequence(
+            urdf, model["joints"], model["limits"], q0r, tool_T, targets,
+            z_table_m=zt, base=base, fence_fn=fence_fn, knobs=k, plan_hover_fn=plan_hover_target,
+        )
+        if plan.get("ok"):
+            self.log(f"[OK] [V3.59 dry-run] 预演航线规划校验通过：{plan['summary']}")
+        else:
+            self.log(f"[FAIL] [V3.59 dry-run] {plan.get('error')}")
+        return plan
+
+    def on_hover_dry_run(self, dest_mode=None, manual_dest_text=None, knobs=None, status_cb=None):
+        """V3.59 MULTI-POINT HOVER DRY-RUN: execute Target A hover -> safe transit lift -> Target B hover -> return home."""
+        if self._busy():
+            self.log("[WARN] [V3.59 dry-run] 上一个操作还在进行")
+            return
+        if getattr(self.pipe, "teach_mode", False) or not getattr(self.jpanel, "enabled", False):
+            self.log("[WARN] [V3.59 dry-run] 需要退出示教模式且 MoveIt / 关节面板就绪")
+            return
+        plan = self.plan_dry_run_from_ui(dest_mode=dest_mode, manual_dest_text=manual_dest_text, knobs=knobs)
+        if not plan or not plan.get("ok"):
+            if status_cb:
+                status_cb(f"✗ 规划未通过：{(plan or {}).get('error', '')}")
+            return
+        k = dict(self.strategy_profile.knobs) if getattr(self, "strategy_profile", None) else dict(self.ST59.BASELINE_KNOBS)
+        if isinstance(knobs, dict):
+            k.update(knobs)
+        max_spd_pct = float(k.get("cam_hover_max_speed_pct", 10.0))
+        cfg_spd_pct = float(self.cfg_fn().get("speed_percent", 10))
+        speed = min(max_spd_pct / 100.0, max(0.01, cfg_spd_pct / 100.0))
+        model = self._model()
+        urdf = self._urdf()
+        base = model.get("base_link") or "base_link"
+        tool_T = self._active_tcp_T()
+        q0 = self.actual_q()
+        q0r = [math.radians(v) for v in q0]
+
+        station_lines = []
+        for s in plan["steps"]:
+            if s["kind"] == "hover":
+                tx, ty, tz = [v * 1000.0 for v in s["tcp_xyz_m"]]
+                ox, oy, oz = [v * 1000.0 for v in s["obj_xyz_m"]]
+                station_lines.append(
+                    f"  · 悬停站 {s['det_id']}：物心 ({ox:+.0f}, {oy:+.0f}, {oz:+.0f}) → 悬停 TCP ({tx:+.0f}, {ty:+.0f}, {tz:+.0f}) mm"
+                )
+        stations_txt = "\n".join(station_lines)
+
+        def job():
+            if not self.ask(
+                "多点悬停预演 (Dry-Run)",
+                f"机械臂将执行无夹爪多点悬停预演（{plan['summary']}）：\n"
+                f"{stations_txt}\n"
+                f"运行速度：{speed * 100:.0f}% · 驻留 {plan['dwell_s']:.1f} s/站 · 只走上方悬停与过渡点，不下探、不动夹爪。\n"
+                "确认桌面周围无障碍并开始预演？",
+            ):
+                return
+            self._pre_hover_q = list(q0r)
+            if status_cb:
+                self._ui(lambda: status_cb(f"▶ 正在执行多点悬停预演：{plan['summary']} …"))
+            import NERO_V315_Consistency_Safety as CS
+
+            def _move(q_rad, label):
+                return self.pipe.move_and_settle(model, q_rad, speed, label=label)
+
+            def _fk_tcp(q_rad):
+                T_act = CS.tool_pose(urdf, model["joints"], q_rad, base, tool_T)
+                return T_t(T_act) if T_act is not None else None
+
+            def _wrist_chk(tgt_obj):
+                if not bool(k.get("dry_run_wrist_refine", True)):
+                    return None
+                ws = self.wrist_src
+                intr = self.intr_result or self.wrist_intr
+                K_w = (getattr(ws, "K", None) if ws else None) or (intr.get("K") if intr else None)
+                he = self.wcalib_result or self.wrist_calib
+                if not ws or not K_w or not he or not he.get("T_flange_cam"):
+                    return None
+                rgb, _d, _fid = ws.frames()
+                qa = self.actual_q()
+                if rgb is None or not qa:
+                    return None
+                T_bf = self.flange_T(qa)
+                if T_bf is None:
+                    return None
+                f_ = self._fence()
+                zt_ = float((f_ or {}).get("z_table", 0.0))
+                return self.W49.wrist_refine_target(
+                    rgb, dict(K_w), T_bf, he, tool_T, tgt_obj, table_z=zt_,
+                )
+
+            res = self.ST59.execute_hover_dry_run(
+                plan,
+                move_fn=_move,
+                actual_q_fn=self.actual_q,
+                fk_tcp_fn=_fk_tcp,
+                wrist_check_fn=_wrist_chk,
+                stop_fn=lambda: bool(self.stop_flag),
+                log_fn=self.log,
+            )
+            if res.get("ok") and plan.get("return_home"):
+                self._pre_hover_q = None
+            if status_cb:
+                msg = (
+                    f"✓ 多点悬停预演完成：共走完 {res['completed_hovers']} 个悬停站"
+                    if res.get("ok")
+                    else f"⚠ 悬停预演中止：{res.get('error', '')}"
+                )
+                self._ui(lambda m=msg: status_cb(m))
+            self._ui(self._update_calib_ui)
+
+        self._run(job)
 
     def on_hover_target(self):
         """V3.48 HOVER VERIFY: move the TCP to hover HOVER_DEFAULT_MM (e.g. 100 mm) directly above the selected
@@ -4436,14 +4553,11 @@ class CameraTabUI:
             return True, ""
 
         q_tgt, info = plan_hover_target(urdf, model["joints"], model["limits"], q0r, tool_T, target_xyz,
-                                        base=base, fence_fn=fence_fn,
-                                        prefer_fn=self._strategy_prefer_fn(q0r, model["limits"]))
+                                        base=base, fence_fn=fence_fn)
         if q_tgt is None:
             self.log(f"[FAIL] [V3.48 hover] 悬停规划失败（{tgt_item.get('det_id')}）：{info}")
             return
         speed = min(CALIB_MAX_SPEED, max(0.01, float(self.cfg_fn().get("speed_percent", 10)) / 100.0))
-        if self.strategy is not None:                 # V3.59: cruise_speed_ratio (<= 1, only ever slower)
-            speed = max(0.01, speed * min(1.0, float(self.strategy["cruise_speed_ratio"])))
         det_id = tgt_item.get("det_id", "目标")
         untrusted_warn = "" if tgt_item.get("trusted") else "\n⚠ 注意：该目标当前标为「不可信」！"
 

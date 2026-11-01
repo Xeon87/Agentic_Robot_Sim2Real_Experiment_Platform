@@ -1,12 +1,15 @@
-## V3.59 (2026-11-01) — 策略旋钮（Strategy Profile）+ 虚实共用决策层（Sim2Real 四阶段计划 · 阶段 1）
-- **新模块 `NERO_Strategy_Profile.py`**：4 组 16 个控制旋钮（AGENTS.md 8.1 列出的 14 项；文档称 “12 个旋钮”，按列出条目全部实现），每个带默认值、寻优上下界、单位与中文说明；`StrategyProfile` 校验/截断、JSON 存取（`config/strategies/*.json`）、`optimizer_space()`（给 V3.60 寻优器用）。
-- **共享决策层（仿真与实机调用同一份代码）**：`rank_targets`（距离 / 邻物净空 / 长轴顺手度加权评分）、`order_slots`（`numeric` 默认 = V3.04 原行为、`far_to_near`、`left_to_right`、`min_joint_move`）、`ik_preference_cost` / `pick_ik_solution`（J1–J3 移动惩罚、限位裕量、手肘抬高）、夹爪张开/闭合宽度、`held_check`、`hover_z`。
-- **控制台新增「策略旋钮」页**：滑块 + 数值框实时调整、「预览当前桌面目标评分排序」（有实机识别结果时用实机目标，否则用示例场景）、「保存策略预设」「读取预设」「恢复默认」；两个联动开关默认**关闭**（关闭时仿真与实机行为与 V3.58 完全一致）：
-  - 「仿真启动时注入此策略」：通过后端**已有**的环境变量注入（`NERO_V304_EGG_APERTURE_MARGIN_MM`、`NERO_V304_FINAL_APPROACH_SLOW`、`NERO_V303_HOVER_ABOVE_ENTRY_M`、`NERO_V341_LIMIT_MARGIN_DEG`），后端 `NERO_V2_7_1_Unified_Backend.py` 一字未改（`test_v3_44` C1/C2/C3 不变量保持）；Agent 新增 `V3.59 STRATEGY PROFILE ADVICE` 钩子，按策略给出抓取顺序与装填顺序，并按文件 mtime 实时重读（运行中改旋钮，下一次工具调用即生效）。
-  - 「实机 Camera 页跟随策略」：悬停高度、未选中行时的悬停目标（排序第 1）、`plan_hover_target` IK 多解按姿态偏好选择（新参数 `prefer_fn`，默认 None = 原行为）、悬停复核速度 × `cruise_speed_ratio`。
-- 附带 3 个预设：`default`（文档默认值）、`dense_safe`、`speed_first`（后两个是人工示例，**未经寻优**，V3.60 自动寻优后替换）。
-- 测试：新增 `tests/test_v3_59.py`（Z1–Z6）与 `tests/test_v3_59_gui.py`；老测试版本白名单扩展到 V3.59；`tests/test_v3_58.py` 的版本断言改为接受 V3.58/V3.59（有意变更：仅版本号）。
-- 未改动：`NERO_V308`、仿真后端、仿真腕部相机 `NERO_V326`、实机腕部 USB 相机模块 `NERO_V349`（仅 `VERSION` 字符串）。
+## V3.59 (2026-11-01) — Baseline-Equivalent Strategy Knobs Tab + LLM Skill Cards + Multi-Point Hover Dry-Run
+- **100% Baseline-Equivalent Decomposed Strategy Knobs (`NERO_V359_Strategy.py`, `config/strategies/egg_grasp_v345_baseline.json`, `NERO_V2_7_1_Unified_Backend.py`)**:
+  - Decomposes the verified V2.7 / V2.7.2 / V2.9 / V2.16 / V3.02 / V3.04 / V3.40 / V3.41 / V3.48 manipulation logic into 5 groups and 35 explicit parameters (`grasp_scoring`, `gripper_approach`, `ik_posture`, `placement_recovery`, `hover_dry_run`).
+  - Pre-saves `config/strategies/egg_grasp_v345_baseline.json` (and `default.json`) as the default active profile in both the GUI and backend; substituting its defaults reproduces candidate grasp scores (`score_grasp_candidate`), gripper opening margins (`compute_gripper_prior`), wrist reorientation costs (`compute_wrist_reorient_score`), joint-limit margin buckets (`v341_margin_required_deg`), and slot ordering (`order_empty_slots`) with zero numerical deviation.
+- **Natural-Language Skill Cards (`skill_card`) for LLM Understanding & Dynamic Selection (`NERO_V359_Strategy.py`, `NERO_V2_7_1_Unified_Backend.py`)**:
+  - Every strategy `.json` embeds a `skill_card` block (`name`, `when_to_use`, `when_not_to_use`, `behavior_summary`, `scene_tags`, `sim_benchmark`) alongside `knobs`.
+  - Includes `describe_diff_vs_baseline(knobs)` to automatically generate a Chinese natural-language summary of parameter differences relative to `egg_grasp_v345_baseline`, and `export_llm_skill_catalog()` injected into `observe_scene["strategy_skills"]` for LLM/VLM inspection.
+- **New Console GUI Tab `技能参数旋钮` (`SkillStrategyTabUI` in `NERO_V359_Strategy.py`, `NERO_V312_Console.py`)**:
+  - Provides preset switching (`egg_grasp_v345_baseline`, `dense_cluster_anti_poke`, `hover_dry_run_safe`), Skill Card natural-language editing, one-click auto-summary generation, JSON save/load/save-as, one-click baseline reset (`↺ 一键还原抓鸡蛋基准`), and 5 grouped control knob panels.
+- **Gripper-Free Multi-Point Hover Dry-Run (`plan_hover_dry_run_sequence`, `execute_hover_dry_run`, `NERO_V325_Camera.py`)**:
+  - Enables testing complete pick-to-place or multi-object hover sequences (`Target A Hover` -> `Safe Transit Lift (+40 mm)` -> `Target B / Slot / Manual XYZ Hover` -> `Return to Start`) before a physical gripper (such as SO-101) is attached, with 3D safety fence verification at every waypoint and optional wrist-camera crosshair refinement at each hover station.
+  - Also synchronizes `_calib_text()` first-line status badge with `c["good"]` when LOO passes (`<= 3 / 5 mm`) but rotation/translation span warnings exist.
 
 ## V3.58 (2026-10-31) — Kinematic-Anchored Wide-Angle Intrinsic Solver + Per-View RANSAC Corner Pruning + Full-Quadrant Tilt Planner
 - **Robot-Kinematic Metric Focal-Length Anchoring (`calibrate_intrinsics` in `NERO_V349_Real_Wrist_Camera.py`)**: Fixes the planar homography focal-length singularity (`fx = 2147 / 3134 / 5164 px`, `z = 1147 mm`, `RMS = 1.058..2.166 px`) when calibrating a 130° wide-angle wrist camera on low-tilt tabletop ChArUco views. Couples the 1D wide-angle focal-length profile search (`[0.31*w, 0.78*w]`) directly with the robot arm's 3D metric FK (`T_base_flange`) via `solve_eye_in_hand`, locking `fx, fy` to the exact physical focal length (`~700 px`) and true tabletop distance (`~220..280 mm`).

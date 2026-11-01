@@ -23,7 +23,7 @@ SAFE="$HERE/NERO_V316_Safety_Editor.py"
 CAM="$HERE/NERO_V325_Camera.py"
 YOLO347="$HERE/NERO_V347_Yolo_Perception.py"   # V3.47 YOLOE egg perception (Camera调试 → 视觉定位)
 WRIST349="$HERE/NERO_V349_Real_Wrist_Camera.py" # V3.49 real USB wrist camera + intrinsics + eye-in-hand + holder
-STRAT359="$HERE/NERO_Strategy_Profile.py"       # V3.59 STRATEGY PROFILE: shared control knobs (sim + real)
+STRAT359="$HERE/NERO_V359_Strategy.py"         # V3.59 skill strategy knobs + skill card + hover dry-run
 
 if [[ "${1:-}" == "--sim" ]]; then
   shift
@@ -56,7 +56,7 @@ fi
 # The console uses only the Python standard library + tkinter.
 PY="${NERO_CONSOLE_PYTHON:-/usr/bin/python3}"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
-"$PY" -m py_compile "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" || die "py_compile failed: $CONSOLE / $REAL / $JOINT / $CONS / $SAFE"
+"$PY" -m py_compile "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" "$STRAT359" || die "py_compile failed: $CONSOLE / $REAL / $JOINT / $CONS / $SAFE"
 "$PY" -c "import tkinter" 2>/dev/null || die "tkinter missing for $PY (sudo apt install python3-tk), or run the simulation directly: ./start_nero.sh --sim"
 bash -n "$SIM" || die "syntax error in $SIM"
 
