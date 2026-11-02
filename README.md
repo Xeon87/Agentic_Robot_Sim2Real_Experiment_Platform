@@ -1,4 +1,12 @@
-# NERO V3.62 — single-folder release
+# NERO V3.63 — single-folder release
+
+**V3.63**（叠杯子：修复放置时 J7 越限急停 + 支持固定主相机 D435i 作为位姿源）
+1. V3.62 失败原因：放置时一次小的直线对中让 J7 越过 MuJoCo 限位 → 急停硬复位；技能没检查急停，继续空转。
+2. 修复：执行前逐点检查轨迹（离限位 ≥ 4°、无跳变，不合格改走关节空间）；先原地转腕再等高平移；整条链路联合规划（持杯姿态 ≥ 8°、J7 优先 ≥ 15°，从真实关节出发）；急停即停 + 自动解锁 + 允许重试一次；不做 < 3 mm 的小修正。
+3. 新：位姿源可选「fixed stand camera D435i」——相机进程用 RGB-D 识别红色杯子（锥面拟合杯轴 / 高度，识别已套叠），不用仿真真值。
+4. 怎么用：同 V3.62（场景 `stack_cups`，任务 `Stack cup_1 into cup_2`）；想用相机就把位姿源切到固定主相机。
+5. 怎么验证：`bash tests/check_release.sh`（rc=0）；`python3 tests/test_v3_63.py`（需 mujoco；有 OpenGL 时还会用相机跑一次完整任务）。
+6. 只在替身里验证过，**完整仿真链路请复测，真机未验证**。
 
 **V3.62**（叠杯子 Agent 技能：仿真里填 API key、输入任务，机械臂自动把一只杯子放进另一只）
 1. 怎么用：`bash start_nero.sh` → 仿真页场景选 `stack_cups - 叠杯子 (RoboDojo)` → ▶ 启动仿真 → NERO SimAgent 页填 API key → 任务输入 `Stack cup_1 into cup_2`（或「把 cup_2 放进 cup_1」）→ ▶ RUN TASK。位姿源保持 JSON ground truth。

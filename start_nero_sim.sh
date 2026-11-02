@@ -150,6 +150,8 @@ python3 -m py_compile "$BACKEND" "$AGENT" "$CORE" "$CLIENT" "$GPU_SERVER" "$CAME
 python3 -m py_compile "$HERE/NERO_V359_Strategy.py" "$HERE/NERO_V314_Joint_Control.py" || fatal "py_compile failed: NERO_V359_Strategy.py / NERO_V314_Joint_Control.py (V3.60 SIM SKILL TAB)"
 # V3.62 STACK CUPS AGENT: RUN TASK in the stack_cups scene imports the cup skills (+ the URDF IK planner they use)
 python3 -m py_compile "$HERE/NERO_V362_Cup_Skills.py" "$HERE/NERO_V361_Cup_Stack.py" "$HERE/NERO_V315_Consistency_Safety.py" || fatal "py_compile failed: NERO_V362_Cup_Skills.py / NERO_V361_Cup_Stack.py / NERO_V315_Consistency_Safety.py (V3.62 STACK CUPS AGENT)"
+# V3.63 FIXED D435i CUP PERCEPTION: the fixed camera process imports the cup perception in the stack_cups scene
+python3 -m py_compile "$HERE/NERO_V363_Cup_Perception.py" || fatal "py_compile failed: NERO_V363_Cup_Perception.py (V3.63 FIXED D435i CUP PERCEPTION)"
 status OK "py_compile PASS"
 status INFO "MuJoCo model (external): $MODEL_FILE sha256=$(sha256sum "$MODEL_FILE" | cut -c1-16)"
 # V3.44 MUJOCO SCENE: chosen before start (NERO console drop-down -> NERO_SCENE); unset = fill_egg_holder

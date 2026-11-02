@@ -13545,6 +13545,10 @@ def run_gui(
                     "slow": _v218_slow_trajectory_in_place, "go_q0": _v307_go_q0,
                     "start_check": _v239_task_start_posture_check, "safety_gate": _v2521_run_task_safety_gate,
                     "pose_source_mode": v311_mode,
+                    # V3.63 FIXED D435i CUP PERCEPTION + SAFETY LATCH RECOVERY (STOP + RECOVER, hold kept)
+                    "capture": v311_capture_sync, "wrist_selected": v326_wrist_selected,
+                    "camera_available": v311_camera_available,
+                    "latch_pending": _v337_latch_pending, "clear_latch": _v337_clear_latch,
                     "shared": {"gripper_target_mm": gripper_target_mm, "gripper_actual_mm": gripper_actual_mm,
                                "gripper_force_mode": gripper_force_mode, "gripper_force_N": gripper_force_N,
                                "clamp_speed_mult_shared": clamp_speed_mult_shared,

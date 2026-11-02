@@ -25,9 +25,10 @@ import os
 import re
 import time
 
-VERSION = "V3.62"
+VERSION = "V3.63"
 # V3.61 COLLAPSIBLE SKILL TAB + CODES AFTER SKILL NAMES + STACK CUPS SKILL (CS)
 # V3.62 CUP KNOBS READ BY THE SIM CUP SKILLS (NERO_V362_Cup_Skills): group 6 = 11 knobs, tag [仿真技能✓]
+# V3.63 CS skill card: joint-space safe motion + fixed D435i cup perception (knob values unchanged)
 # V3.60 BASELINE-EXACT DEFAULTS + SKILL CODES + READ-ONLY RELEASE FILES + SIM ENV INJECTION + SIM TAB
 #   * defaults restore V3.58 real behaviour (hover 100 mm, table order + trusted first)
 #   * every skill has short_name (English) + 2-letter code (EB / DP / HD / QH ...)
@@ -1186,13 +1187,16 @@ def builtin_strategy_presets():
         "when_to_use": "stack_cups 场景：两只直立的一次性派对杯（外红内白），把一只放进另一只里面叠起来。",
         "when_not_to_use": "杯子倒放、已被压扁或杯口朝下；杯子距机械臂太远（|x| > 0.36 m 时竖直向下够不到运送高度）。",
         "behavior_summary": ("捏住杯沿（接近方向沿杯壁倾斜 8.2°，一指在内、一指在外，TCP 在杯口下 35 mm，指垫在卷边下方）→ 抬到杯底"
-                             "高出另一杯口 20 mm → 慢速（0.04 m/s）运到目标杯上方 → 按实测杯位闭环对中 → 慢速下降到套好位置上方 85 mm"
-                             "（杯底刚进杯口）松手，杯子自己滑到底 → 上抬退出。抓取与放置的杯沿方位由 URDF 严格 IK 选，夹爪翻转保持一致。"),
+                             "高出另一杯口 20 mm → 原地慢速转腕到放置朝向 → 等高平移到目标杯上方（实测偏差并入同一步）→ 慢速下降到套好位置"
+                             "上方 85 mm（杯底刚进杯口）松手，杯子自己滑到底 → 上抬退出。V3.63：整条链路的关节解在规划时选好（每个关节离限位"
+                             " ≥ 8°，放置时 J7 优先 ≥ 15°），执行时朝这组关节解运动；直线路径逐点检查，不合格改走关节空间；急停自动解锁后可重试一次。"
+                             "位姿来源：仿真真值或固定主相机 D435i（RGB-D 感知）。"),
         "scene_tags": ["stack_cups", "cup", "rim_pinch", "nesting"],
         "sim_benchmark": {"trained_scene": "stack_cups", "noise_level": "cup position +-10 mm", "success_rate": None,
                           "avg_cycle_time_s": None,
-                          "notes": "V3.62 无界面替身（官方指垫 + 后端夹爪逻辑 + 场景杯子，不含机械臂动力学）16/16 次全部套到底；"
-                                   "完整仿真链路（MoveIt/cuRobo + Agent）和真机尚未运行，成功率未填"},
+                          "notes": "V3.63 替身（官方指垫 + 后端夹爪逻辑 + URDF 运动学 + 场景杯子，不含机械臂动力学）：见 "
+                                   "config/cup_stack_study_v363.json；V3.62 完整仿真链路在放置时触发 J7 越限急停（已修复，待复测）；"
+                                   "真机未运行，成功率未填"},
     }
     cs = StrategyProfile(
         skill_id="cup_stack_rim_pinch",

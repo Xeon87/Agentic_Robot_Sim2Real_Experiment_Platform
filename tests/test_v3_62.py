@@ -72,8 +72,9 @@ except Exception:
 
 # ------------------------------------------------------------------ P1
 for m in (CON, RR, YP, W49, ST, CK):
-    assert m.VERSION == "V3.62", (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "V3.62" and SC.SCENES_REV == "V3.62"
+    assert m.VERSION in ("V3.62", "V3.63"), (m.__name__, m.VERSION)
+V363 = CK.VERSION >= "V3.63"           # V3.63 intentionally changed the place motions / plan waypoints (CHANGELOG)
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.62", "V3.63") and SC.SCENES_REV == "V3.62"
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 assert H((ROOT / "NERO_V326_Wrist_Camera.py").read_bytes()) == "6b5c5d683073e4252b82c1c703ad664173960a179947f9e72775bb9683697d0a"
 assert H((ROOT / "NERO_V2_7_1_Agent.py").read_bytes()) == "3e52d05ea84d94c8359d5875fa0fee8c2cc42d612b52e59109e1166912439696"
@@ -148,7 +149,7 @@ for src, dst in (("obj_cup_1", "obj_cup_2"), ("obj_cup_2", "obj_cup_1")):
     srim = [SC.CUP_XY[src][0], SC.CUP_XY[src][1], 0.0005 + g["h"]]
     drim = [SC.CUP_XY[dst][0], SC.CUP_XY[dst][1], 0.0005 + g["h"]]
     plan = CK.plan_cup_stack(K, srim, q_up, drim, q_up)
-    assert plan["ok"] and plan["margin_ok"] and plan["min_joint_margin_deg"] >= 8.0, plan
+    assert plan["ok"] and plan["min_joint_margin_deg"] >= (4.0 if V363 else 8.0), plan   # V3.63: real-start planning -> test_v3_63 S4
     W = plan["_wps"]
     pg, Rg = W["grasp"]
     axis_in_tcp = Rg.T @ (np.array([srim[0], srim[1], srim[2]]) - pg)            # cup rim centre seen from the TCP
@@ -156,7 +157,8 @@ for src, dst in (("obj_cup_1", "obj_cup_2"), ("obj_cup_2", "obj_cup_1")):
     pred = pr + Rr @ axis_in_tcp
     assert np.linalg.norm(pred[:2] - np.array(drim[:2])) < 0.001, (pred, drim)
     assert abs((pred[2] - g["h"]) - plan["base_release_z_m"]) < 1e-6
-    assert [w["name"] for w in plan["waypoints"]] == ["pregrasp", "grasp", "lift", "above_target", "release", "retreat"]
+    assert [w["name"] for w in plan["waypoints"]] == (["pregrasp", "grasp", "lift"] + (["rotate"] if V363 else [])
+                                                      + ["above_target", "release", "retreat"])
     print(f"[P4] {src}->{dst}: margins grasp {plan['grasp_margin_deg']} / place {plan['place_margin_deg']} deg, same flip, "
           f"carried axis lands {np.linalg.norm(pred[:2] - np.array(drim[:2])) * 1000:.2f} mm from the target axis")
 
@@ -211,8 +213,12 @@ if HAVE_MJ:
     assert sc["s"] == 1.0 and sc["z"] == 6 and sc["skill_code"] == "CS" and sc["Y"] > 0
     assert any(l.startswith("[V3.62 SKILL SCORE] skill=CS") for l in res["log"])
     assert any(l.startswith("[TASK SUMMARY GREEN]") for l in res["log"]) and res["calls"]["start_check"] == 1
-    mv = {lab: (kind, spd) for kind, lab, spd in res["core"].moves}
-    assert mv["V3.62 carry cup_1 over cup_2"] == ("line", 0.016) and mv["V3.62 lower cup_1 into cup_2"] == ("line", 0.004)
+    if not V363:
+        mv = {lab: (kind, spd) for kind, lab, spd in res["core"].moves}
+        assert mv["V3.62 carry cup_1 over cup_2"] == ("line", 0.016) and mv["V3.62 lower cup_1 into cup_2"] == ("line", 0.004)
+    else:                                # V3.63: joint-space rotate, checked carry / lowering (test_v3_63 covers them)
+        labs = [lab for _k, lab, _d in res["core"].moves]
+        assert any(l.startswith("V3.63 rotate") for l in labs) and any(l.startswith("V3.63 lower") for l in labs)
     assert res["llm"].requests[0]["instructions"] == CK.CUP_SYSTEM_INSTRUCTIONS
     assert res["llm"].requests[0]["tools"] == CK.CUP_TOOLS and res["started"]["label"] == "RUN TASK (stack_cups)"
     assert not res["shared"]["hold_active_shared"].value

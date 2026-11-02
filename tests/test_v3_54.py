@@ -38,8 +38,8 @@ import NERO_V347_Yolo_Perception as YP        # noqa: E402
 import NERO_V349_Real_Wrist_Camera as W49     # noqa: E402
 
 # ---------------------------------------------------------------- V1: version & markers
-assert CON.VERSION in ("V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60", "V3.61", "V3.62") and RR.VERSION in ("V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60", "V3.61", "V3.62") and YP.VERSION in ("V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60", "V3.61", "V3.62") and W49.VERSION in ("V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60", "V3.61", "V3.62")
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60", "V3.61", "V3.62")
+assert CON.VERSION in ("V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60", "V3.61", "V3.62", "V3.63") and RR.VERSION in ("V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60", "V3.61", "V3.62", "V3.63") and YP.VERSION in ("V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60", "V3.61", "V3.62", "V3.63") and W49.VERSION in ("V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60", "V3.61", "V3.62", "V3.63")
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.54", "V3.55", "V3.56", "V3.57", "V3.58", "V3.59", "V3.60", "V3.61", "V3.62", "V3.63")
 assert RR.DEFAULT_FW_VERSION == "v121"
 h308 = hashlib.sha256((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).hexdigest()
 assert h308.startswith("020cc6680f181872"), f"NERO_V308 modified: {h308}"

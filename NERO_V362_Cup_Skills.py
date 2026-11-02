@@ -38,8 +38,9 @@ import sys
 import threading
 import time
 
-VERSION = "V3.62"
+VERSION = "V3.63"
 MARKER = "V3.62 STACK CUPS AGENT SKILLS"
+MARKER_V363 = "V3.63 JOINT-SPACE SAFE MOTION + FIXED D435i CUP PERCEPTION"
 HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
@@ -55,6 +56,13 @@ CARRY_SLOW_FACTOR = 2.5        # backend: carry trajectory slowed by this factor
 PLACE_SPEED = 0.01             # m/s for centring + lowering into the target (twin: 0.03 m/s made the cup swing)
 MIN_MARGIN_RELAXED_DEG = 4.0   # below this (V3.41 relaxed limit) the plan is refused, not just warned
 MIN_MARGIN_DEG = 8.0                                         # V3.41 rule: every joint >= 8 deg from its limits
+# V3.63 JOINT-SPACE SAFE MOTION (user run V3.62: a 4-point MoveIt Cartesian centring move drove J7 past the MuJoCo
+# limit -> 'invalid arm state' emergency restore; MoveIt / cuRobo may use wider joint limits than the MuJoCo model
+# and pick another IK branch of the 7-DoF arm than the one the plan checked)
+PLACE_J7_PREF_DEG = 15.0       # place poses: prefer J7 >= 15 deg from its limit (J7 turns the carried cup)
+PATH_MARGIN_DEG = 4.0          # every point of an executed path keeps all joints >= 4 deg inside the MuJoCo limits
+PATH_JUMP_DEG = 5.0            # max joint change between two consecutive path points (more = IK branch flip)
+SMALL_CORRECTION_M = 0.003     # centring errors below this are not corrected (no tiny moves)
 CLAMP_CENTRE_Y_M = 0.002       # the two pads close on TCP y = +2.0 mm (finger 1 / finger 2 stud faces, measured)
 T_L7_TCP = np.array([[0, 0, 1, 0.1553], [-1, 0, 0, 0], [0, -1, 0, -0.0215], [0, 0, 0, 1.0]])   # URDF tool frame
 
@@ -126,6 +134,11 @@ def R_to_quat_xyzw(R):
     return [float(v) for v in q / np.linalg.norm(q)]
 
 
+def quat_from_tilt_wxyz(tilt_deg, azimuth_rad=0.0):
+    t = math.radians(float(tilt_deg)) / 2.0
+    return [math.cos(t), -math.sin(azimuth_rad) * math.sin(t), math.cos(azimuth_rad) * math.sin(t), 0.0]
+
+
 def quat_xyzw_to_R(q):
     x, y, z, w = [float(v) for v in q]
     return quat_wxyz_to_R((w, x, y, z))
@@ -172,18 +185,103 @@ def base_dir(xy):
 
 
 # =============================================================================================== planning (URDF IK)
+class FastArm:
+    """V3.63 FAST IK: numpy forward kinematics + analytic geometric Jacobian of the URDF chain base_link -> link7 ->
+    tool (same URDF / tool transform as NERO_V315; ~10x faster than the numeric-Jacobian pose_ik of V3.61)."""
+
+    def __init__(self):
+        import NERO_V315_Consistency_Safety as CS
+        U = CS.load_sim_urdf()
+        self.joints = [f"joint{i}" for i in range(1, 8)]
+        self.steps = []                                   # (fixed 4x4, axis (unit) or None, arm joint index or None)
+        for jn in CS.link_chain(U, "base_link", "link7"):
+            j = U["joints"][jn]
+            Tf = np.array(CS._T(CS._rpy_mat(*j["rpy"]), j["xyz"]), float)
+            if j["type"] in ("revolute", "continuous") and jn in self.joints:
+                ax = np.asarray(j["axis"], float)
+                self.steps.append((Tf, ax / np.linalg.norm(ax), self.joints.index(jn)))
+            else:
+                self.steps.append((Tf, None, None))
+        self.tool = np.array(CS.tool_transform_from_sim(U), float)
+        self.lo = np.array([a for a, _ in JOINT_LIMITS])
+        self.hi = np.array([b for _, b in JOINT_LIMITS])
+
+    @staticmethod
+    def _rot(ax, q):
+        x, y, z = ax
+        c, s_, C = math.cos(q), math.sin(q), 1 - math.cos(q)
+        return np.array([[c + x * x * C, x * y * C - z * s_, x * z * C + y * s_],
+                         [y * x * C + z * s_, c + y * y * C, y * z * C - x * s_],
+                         [z * x * C - y * s_, z * y * C + x * s_, c + z * z * C]])
+
+    def fk(self, q, jac=False):
+        T = np.eye(4)
+        origins, axes = [None] * 7, [None] * 7
+        for Tf, ax, k in self.steps:
+            T = T @ Tf
+            if ax is not None:
+                origins[k], axes[k] = T[:3, 3].copy(), T[:3, :3] @ ax
+                M = np.eye(4)
+                M[:3, :3] = self._rot(ax, q[k])
+                T = T @ M
+        T = T @ self.tool
+        if not jac:
+            return T
+        Jm = np.zeros((6, 7))
+        for k in range(7):
+            Jm[:3, k] = np.cross(axes[k], T[:3, 3] - origins[k])
+            Jm[3:, k] = axes[k]
+        return T, Jm
+
+    def ik(self, seeds, xyz, R_des, iters=80, tol_m=5e-4, tol_deg=1.0, w_rot=0.10):
+        xyz, R_des = np.asarray(xyz, float), np.asarray(R_des, float)
+        best = (None, 1e9, 1e9)
+        for sd in seeds:
+            q = np.clip(np.asarray(sd, float), self.lo + 1e-3, self.hi - 1e-3)
+            lam = 1e-3
+            for it in range(iters):
+                T, Jm = self.fk(q, True)
+                ep = xyz - T[:3, 3]
+                Re = R_des @ T[:3, :3].T
+                ang = math.acos(max(-1.0, min(1.0, (np.trace(Re) - 1) / 2)))
+                if ang < 1e-9:
+                    er = np.zeros(3)
+                else:
+                    er = ang / (2 * math.sin(ang)) * np.array([Re[2, 1] - Re[1, 2], Re[0, 2] - Re[2, 0], Re[1, 0] - Re[0, 1]]) \
+                        if ang < math.pi - 1e-6 else np.zeros(3) + ang
+                pe, re = float(np.linalg.norm(ep)), math.degrees(float(np.linalg.norm(er)))
+                if pe < tol_m and re < tol_deg:
+                    return [float(v) for v in q], pe, re
+                if (it >= 20 and pe > 0.02) or (it >= 40 and (pe > 0.003 or re > 5.0)):
+                    break                                   # this seed is not converging (joint limit / unreachable)
+                e = np.concatenate([ep, w_rot * er])
+                Jw = np.vstack([Jm[:3], w_rot * Jm[3:]])
+                dq = Jw.T @ np.linalg.solve(Jw @ Jw.T + lam * np.eye(6), e)
+                qn = np.clip(q + dq, self.lo + 1e-4, self.hi - 1e-4)
+                Tn = self.fk(qn)
+                if np.linalg.norm(xyz - Tn[:3, 3]) + w_rot * np.linalg.norm(er) * 0 <= pe + 1e-12 or lam > 1e2:
+                    q, lam = qn, max(1e-6, lam * 0.5)
+                else:
+                    q, lam = qn, lam * 4.0
+            if pe + re / 1000.0 < best[1] + best[2] / 1000.0:
+                best = (None, pe, re)
+        return best
+
+
 def _ik_tools():
-    import NERO_V315_Consistency_Safety as CS
-    import NERO_V361_Cup_Stack as C61
-    U = CS.load_sim_urdf()
-    return U, [f"joint{i}" for i in range(1, 8)], CS.tool_transform_from_sim(U), C61.pose_ik
+    arm = FastArm()
+
+    def pose_ik(U, J, limits, seeds, T, xyz, R_des, iters=80, **_):
+        return arm.ik(seeds, xyz, R_des, iters=iters)
+    return arm, arm.joints, arm.tool, pose_ik
 
 
 _IK = {}
 
 
-def ik_chain(chain, q_start=None):
-    """strict 6-DoF IK along [(name, xyz, R), ...]; -> dict(ok, why, min_margin_deg, binding, q)"""
+def ik_chain(chain, q_start=None, start_first=True):
+    """strict 6-DoF IK along [(name, xyz, R), ...]; -> dict(ok, why, min_margin_deg, binding, q).
+    start_first=False tries the generic seeds before q_start for the first pose (another IK branch of the 7-DoF arm)."""
     if "t" not in _IK:
         _IK["t"] = _ik_tools()
     U, J, T, pose_ik = _IK["t"]
@@ -191,9 +289,15 @@ def ik_chain(chain, q_start=None):
     for name, p, R in chain:
         a1 = math.atan2(p[1], p[0])
         a1 = a1 + math.pi if a1 < 0 else a1 - math.pi
-        seeds = ([q_prev] if q_prev else []) + [[a1, j2, 0.0, j4, 0.0, j6, j7] for j2 in (0.2, 0.6) for j4 in (0.8, 1.6)
-                                                for j6 in (0.5, -0.2) for j7 in (0.0, 1.0, -1.0)]
-        q, pe, re = pose_ik(U, J, JOINT_LIMITS, seeds, T, [float(v) for v in p], np.asarray(R).tolist())
+        generic = [[a1, j2, 0.0, j4, 0.0, j6, j7] for j2 in (0.2, 0.6) for j4 in (0.8, 1.6)
+                   for j6 in (0.5, -0.2) for j7 in (0.0, 1.0, -1.0)]
+        if q_prev and (qs or start_first is None):
+            seeds = [q_prev] + generic[::12]           # later poses of a chain: continue the branch (fast fail)
+        elif q_prev and start_first:
+            seeds = [q_prev] + generic
+        else:
+            seeds = generic + ([q_prev] if q_prev else [])
+        q, pe, re = pose_ik(U, J, JOINT_LIMITS, seeds, T, [float(v) for v in p], np.asarray(R).tolist(), iters=60)
         if q is None:
             return {"ok": False, "why": f"{name}: no 6-DoF IK (pos {pe * 1000:.1f} mm, rot {re:.1f} deg)",
                     "min_margin_deg": None, "binding": name, "q": qs}
@@ -204,6 +308,37 @@ def ik_chain(chain, q_start=None):
         qs.append(q)
         q_prev = q
     return {"ok": True, "why": "", "min_margin_deg": round(worst, 1), "binding": binding, "q": qs}
+
+
+def joint_margins_deg(q):
+    return [math.degrees(min(v - lo, hi - v)) for v, (lo, hi) in zip(q, JOINT_LIMITS)]
+
+
+def check_joint_path(qs, margin_deg=PATH_MARGIN_DEG, jump_deg=PATH_JUMP_DEG):
+    """V3.63: a joint path is executable only if every point keeps all joints >= margin_deg inside the (MuJoCo)
+    limits and no joint changes by more than jump_deg between consecutive points.  -> dict(ok, why, ...)"""
+    worst, wj, jump, jj = 1e9, -1, 0.0, -1
+    for i, q in enumerate(qs):
+        m = joint_margins_deg(q)
+        k = min(range(7), key=lambda j: m[j])
+        if m[k] < worst:
+            worst, wj = m[k], k
+        if i:
+            d = [abs(math.degrees(a - b)) for a, b in zip(q, qs[i - 1])]
+            k2 = max(range(7), key=lambda j: d[j])
+            if d[k2] > jump:
+                jump, jj = d[k2], k2
+    ok = worst >= margin_deg and jump <= jump_deg
+    why = "" if ok else (f"J{wj + 1} only {worst:.1f} deg from its limit" if worst < margin_deg
+                         else f"J{jj + 1} jumps {jump:.1f} deg between two path points (IK branch flip)")
+    return {"ok": bool(ok), "why": why, "min_margin_deg": round(worst, 1), "binding": f"J{wj + 1}",
+            "max_jump_deg": round(jump, 1), "points": len(qs)}
+
+
+def ik_from(q_now, xyz, R):
+    """strict 6-DoF IK seeded from the current joints (stays on the current branch when possible) -> q or None"""
+    r = ik_chain([("target", np.asarray(xyz, float), np.asarray(R, float))], q_now)
+    return r["q"][-1] if r["ok"] and r["q"] else None
 
 
 def _angle_order(pref_deg, step=15, span=180):
@@ -223,7 +358,7 @@ def stack_heights(knobs, src_base_z, dst_base_z):
     return base_lift, base_release
 
 
-def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, log=None):
+def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, log=None, _wide=False):
     """rim pinch plan: grasp rim angle + flip (pregrasp / grasp / lift reachable), then place rim angle with the SAME
     flip (the cup axis offset in the TCP frame is fixed by the grasp; V3.61 chose the flips independently, which
     would have put the carried cup 2 x rim radius off the target).  Knob angles are relative to the cup -> base
@@ -236,41 +371,72 @@ def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, lo
     d_rim, d_base, _ = cup_axis_points(dst_rim, dst_quat)
     base_lift, base_release = stack_heights(knobs, s_base[2], d_base[2])
     dz_lift = base_lift - s_base[2]
-    best_g = None
+    # V3.63: joint search over grasp candidates (rim angle x flip x IK branch) and the place rim angle, so that the
+    # WHOLE chain (pregrasp ... retreat) keeps every joint >= 8 deg and J7 >= 15 deg from its limits during placing
+    # (a grasp chain seeded from the real home posture can end on a branch where J7 runs into its limit while placing)
+    rim_lift = np.array([d_base[0], d_base[1], base_lift + g["h"]])
+    rim_rel = np.array([d_base[0], d_base[1], base_release + g["h"]])
+    best = None
     tried = 0
-    for phi in _angle_order(math.degrees(base_dir(s_rim)) + float(knobs["cup_grasp_rim_angle_deg"])):
+    grasp_found = False
+    for phi in _angle_order(math.degrees(base_dir(s_rim)) + float(knobs["cup_grasp_rim_angle_deg"]),
+                            span=180 if _wide else 45):
         for flip in (False, True):
             p, R = pinch_tcp(s_rim, phi, depth, flip, tilt)
             ch = [("pregrasp", p + [0, 0, pre], R), ("grasp", p, R), ("lift", p + [0, 0, dz_lift], R)]
-            r = ik_chain(ch, q_start)
-            tried += 1
-            if r["ok"] and (best_g is None or r["min_margin_deg"] > best_g["r"]["min_margin_deg"]):
-                best_g = {"phi": phi, "flip": flip, "r": r, "tcp": p, "R": R}
-        if best_g and best_g["r"]["min_margin_deg"] >= MIN_MARGIN_DEG:
+            for start_first in ((True, False) if q_start is not None else (True,)):
+                r = ik_chain(ch, q_start, start_first=start_first)
+                tried += 1
+                if not r["ok"] or r["min_margin_deg"] < MIN_MARGIN_RELAXED_DEG:
+                    continue
+                grasp_found = True
+                bg = {"phi": phi, "flip": flip, "r": r, "tcp": p, "R": R}
+                lift_tcp = p + [0, 0, dz_lift]
+                for phi_p in _angle_order(math.degrees(base_dir(d_rim)) + float(knobs["cup_place_rim_angle_deg"]),
+                                          span=180 if _wide else 90):
+                    p1, R1 = pinch_tcp(rim_lift, phi_p, depth, flip, tilt)
+                    p2, _ = pinch_tcp(rim_rel, phi_p, depth, flip, tilt)
+                    chp = [("rotate", lift_tcp, R1), ("above_target", p1, R1), ("release", p2, R1),
+                           ("retreat", p2 + [0, 0, 0.08], R1)]
+                    rp = ik_chain(chp, r["q"][-1], start_first=None)
+                    if not rp["ok"]:
+                        continue
+                    # the cup is free at the retreat pose: 4 deg is enough there, the margin key uses the held poses
+                    m_ret = min(joint_margins_deg(rp["q"][-1]))
+                    if m_ret < MIN_MARGIN_RELAXED_DEG:
+                        continue
+                    rp["min_margin_deg"] = round(min(min(joint_margins_deg(q_)) for q_ in rp["q"][:-1]), 1)
+                    j7 = min(math.degrees(min(q[6] - JOINT_LIMITS[6][0], JOINT_LIMITS[6][1] - q[6])) for q in rp["q"][:-1])
+                    rp["j7_margin_deg"] = round(j7, 1)
+                    mm = min(r["min_margin_deg"], rp["min_margin_deg"])
+                    key = (mm >= MIN_MARGIN_DEG and j7 >= PLACE_J7_PREF_DEG, mm >= MIN_MARGIN_DEG, mm)
+                    if best is None or key > best["key"]:
+                        best = {"key": key, "g": bg, "p": {"phi": phi_p, "r": rp, "tcp_above": p1, "tcp_release": p2,
+                                                           "R": R1}}
+                    if key[0]:
+                        break
+                if best and best["key"][0]:
+                    break
+            if best and best["key"][0]:
+                break
+        if best and best["key"][0]:
             break
-    if best_g is None:
+    if not grasp_found:
         return {"ok": False, "reason": "GRASP_UNREACHABLE", "detail": f"no reachable rim pinch on the source cup ({tried} tried)"}
-    flip = best_g["flip"]
-    best_p = None
-    lift_tcp = best_g["tcp"] + [0, 0, dz_lift]
-    for phi in _angle_order(math.degrees(base_dir(d_rim)) + float(knobs["cup_place_rim_angle_deg"])):
-        # rim centre of the carried cup when it is over the target at lift / release height
-        rim_lift = np.array([d_base[0], d_base[1], base_lift + g["h"]])
-        rim_rel = np.array([d_base[0], d_base[1], base_release + g["h"]])
-        p1, R1 = pinch_tcp(rim_lift, phi, depth, flip, tilt)
-        p2, _ = pinch_tcp(rim_rel, phi, depth, flip, tilt)
-        ch = [("above_target", p1, R1), ("release", p2, R1), ("retreat", p2 + [0, 0, 0.08], R1)]
-        r = ik_chain(ch, best_g["r"]["q"][-1] if best_g["r"]["q"] else None)
-        if r["ok"] and (best_p is None or r["min_margin_deg"] > best_p["r"]["min_margin_deg"]):
-            best_p = {"phi": phi, "r": r, "tcp_above": p1, "tcp_release": p2, "R": R1}
-        if best_p and best_p["r"]["min_margin_deg"] >= MIN_MARGIN_DEG:
-            break
+    best_g, best_p = (best["g"], best["p"]) if best else (None, None)
+    flip = best_g["flip"] if best_g else False
+    lift_tcp = best_g["tcp"] + [0, 0, dz_lift] if best_g else None
+    if best_p is None and not _wide:
+        # V3.63: nothing in the usual window -> one wide search (all rim angles), slower but only on failure
+        if log:
+            log("[INFO] [V3.63 CUP PLAN] no reachable chain within +-45 / +-90 deg of the knob angles -> wide search")
+        return plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=q_start, log=log, _wide=True)
     if best_p is None:
         return {"ok": False, "reason": "PLACE_UNREACHABLE",
                 "detail": "the source cup can be grasped but no reachable carry/release pose over the target with the same grip"}
     wq = lambda R: R_to_quat_xyzw(R)
     wps = [("pregrasp", best_g["tcp"] + [0, 0, pre], best_g["R"]), ("grasp", best_g["tcp"], best_g["R"]),
-           ("lift", lift_tcp, best_g["R"]), ("above_target", best_p["tcp_above"], best_p["R"]),
+           ("lift", lift_tcp, best_g["R"]), ("rotate", lift_tcp, best_p["R"]), ("above_target", best_p["tcp_above"], best_p["R"]),
            ("release", best_p["tcp_release"], best_p["R"]), ("retreat", best_p["tcp_release"] + [0, 0, 0.08], best_p["R"])]
     margin = min(best_g["r"]["min_margin_deg"], best_p["r"]["min_margin_deg"])
     out = {"ok": True, "flip": bool(flip),
@@ -282,11 +448,14 @@ def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, lo
            "base_lift_z_m": round(base_lift, 4), "base_release_z_m": round(base_release, 4),
            "waypoints": [{"name": n, "tcp_xyz_m": [round(float(v), 4) for v in p], "quat_xyzw": [round(v, 5) for v in wq(R)]}
                          for n, p, R in wps],
-           "_wps": {n: (np.asarray(p, float), np.asarray(R, float)) for n, p, R in wps}}
+           "_wps": {n: (np.asarray(p, float), np.asarray(R, float)) for n, p, R in wps},
+           "place_j7_margin_deg": best_p["r"].get("j7_margin_deg"),
+           "_q": dict(zip(["pregrasp", "grasp", "lift", "rotate", "above_target", "release", "retreat"],
+                          [list(q) for q in best_g["r"]["q"]] + [list(q) for q in best_p["r"]["q"]]))}
     if log:
-        log(f"[V3.62 CUP PLAN] grasp rim {out['grasp_rim_angle_rel_deg']:+.0f} deg (margin {out['grasp_margin_deg']} deg, "
+        log(f"[V3.63 CUP PLAN] grasp rim {out['grasp_rim_angle_rel_deg']:+.0f} deg (margin {out['grasp_margin_deg']} deg, "
             f"{out['grasp_binding']}) | place rim {out['place_rim_angle_rel_deg']:+.0f} deg (margin {out['place_margin_deg']} "
-            f"deg, {out['place_binding']}) | flip={flip}")
+            f"deg, {out['place_binding']}, J7 {out['place_j7_margin_deg']} deg) | flip={flip}")
     return out
 
 
@@ -316,12 +485,22 @@ def twin_xml(cup_xy=None):
     cups = "\n".join(SC.cup_body_xml(n, xy[n], z0=0.0005, origin=SC.CUP_ORIGIN) for n in SC.CUP_NAMES)
     holds = "".join(f'<connect name="hold_{n}" body1="link7" body2="{n}" anchor="0 0 0" active="false" '
                     'solref="0.008 1" solimp="0.98 0.995 0.001"/>' for n in SC.CUP_NAMES)
+    try:                                     # V3.63: the fixed stand D435i (same pose / fovy as the backend camera)
+        import NERO_V308_Camera_Perception as P8
+        cam = P8.camera_xml(P8.camera_config())
+    except Exception:
+        cam = ""
     return f"""<mujoco model="nero_v362_cup_twin">
   <option timestep="0.001" integrator="implicitfast"/>
-  <visual><global offwidth="1280" offheight="960"/></visual>
+  <visual><global offwidth="1280" offheight="960"/><headlight ambient="0.25 0.25 0.25" diffuse="0.30 0.30 0.30"/></visual>
   <asset>{SC.CUP_ASSETS}</asset>
   <worldbody>
     <light pos="0 0 2" dir="0 0 -1"/>
+    <light name="eggscene_key" pos="0.25 -0.65 2.20" dir="-0.30 0.22 -1" directional="true" castshadow="true"
+           diffuse="0.92 0.84 0.72" specular="0.22 0.20 0.18"/>
+    <light name="eggscene_fill" pos="-1.20 0.80 1.50" dir="0.55 -0.25 -1" directional="true" castshadow="false"
+           diffuse="0.34 0.40 0.48" specular="0.05 0.06 0.08"/>
+    {cam}
     <geom name="play_table" type="box" pos="-0.385 0 -0.03" size="0.335 0.38 0.03" rgba=".93 .93 .91 1"
           friction="1.2 0.01 0.001" solref="0.008 1" solimp="0.96 0.995 0.0005" margin="0.001"/>
     <body name="link7" mocap="true" pos="-0.3 0 0.45">
@@ -350,8 +529,9 @@ class TwinIO:
     """Headless MuJoCo twin of the backend's gripper + cups (see module docstring)."""
     name = "twin"
 
-    def __init__(self, log=None, cup_xy=None, start_tcp=(-0.30, 0.0, 0.40)):
+    def __init__(self, log=None, cup_xy=None, start_tcp=None, pose_mode="truth"):
         import mujoco
+        self._pose_mode = pose_mode
         self.mj = mujoco
         self.m = mujoco.MjModel.from_xml_string(twin_xml(cup_xy))
         self.d = mujoco.MjData(self.m)
@@ -376,10 +556,58 @@ class TwinIO:
         self.hold_t, self.prev_rel, self.vlp = 0.0, None, 0.0
         self.base_hits = 0
         self.max_ang_rate = 0.30          # rad/s, like the slowed backend carry trajectory
-        R0 = pinch_frame(0.0, False, False)
-        self._set_tcp(np.array(start_tcp, float), R0)
+        # V3.63 TWIN ARM KINEMATICS: the twin now carries the 7 joint angles; every motion is executed in joint space
+        # (MoveIt-like: Cartesian moves follow an IK-continuity path that is checked like the backend path) and the
+        # gripper follows the URDF forward kinematics.  Still no arm dynamics / controller.
+        self.arm = FastArm()
+        self.q = [0.0] * 7 if start_tcp is None else None
+        self.safety_latched, self.joint_speed = False, 0.35            # rad/s for joint moves
+        if self.q is None:
+            R0 = pinch_frame(0.0, False, False)
+            self.q = ik_from([0.3, 0.3, 0.0, 1.2, 0.0, 0.4, 0.0], start_tcp, R0) or [0.0] * 7
+        self._apply_q(self.q)
         mujoco.mj_forward(self.m, self.d)
         self.step(400)
+
+    def _apply_q(self, q):
+        T = self.arm.fk(np.asarray(q, float))
+        self._set_tcp(T[:3, 3], T[:3, :3])
+
+    def current_q(self):
+        return list(self.q)
+
+    def _run_q_path(self, qs, dur):
+        """drive the gripper along a joint path (list of q) in `dur` seconds"""
+        n = max(2, int(dur / 0.005))
+        qs = [np.asarray(q, float) for q in qs]
+        seg = len(qs) - 1
+        for i in range(1, n + 1):
+            u = i / n
+            u = u * u * (3 - 2 * u)
+            x = u * seg
+            k = min(seg - 1, int(x))
+            q = qs[k] + (x - k) * (qs[k + 1] - qs[k])
+            self._apply_q(q)
+            self.step(5)
+        self.q = [float(v) for v in qs[-1]]
+        self.step(250)
+
+    def move_joints(self, label, q, slow=None, speed=None):
+        if self.safety_latched:
+            return {"ok": False, "label": label, "error": "SAFETY LATCH HELD", "safety": True}
+        chk = check_joint_path([self.q, list(q)], jump_deg=1e9)
+        if not chk["ok"]:
+            return {"ok": False, "label": label, "error": f"joint goal rejected: {chk['why']}"}
+        dq = max(abs(a - b) for a, b in zip(q, self.q))
+        self._run_q_path([self.q, list(q)], max(0.3, dq / self.joint_speed) * float(slow or 1.0))
+        return {"ok": True, "label": label, "joint_error_deg": 0.0, "tcp_error_mm": 0.0, "kind": "joints"}
+
+    def latch_pending(self):
+        return bool(self.safety_latched)
+
+    def clear_latch(self, label):
+        self.safety_latched = False
+        return True, "ok"
 
     # -- primitives
     def _set_tcp(self, p, R):
@@ -520,34 +748,51 @@ class TwinIO:
         b = self.d.body(CUPS[cup])
         return [float(v) for v in b.xpos], [float(v) for v in b.xquat]
 
-    def _move(self, label, xyz, quat, speed):
-        T0 = self._tcp_T()
+    def _cartesian_q_path(self, xyz, quat, step_m=0.002):
+        """MoveIt-like Cartesian path: IK continuity from the current joints (None if it breaks)"""
+        T0 = self.arm.fk(np.asarray(self.q, float))
         p0, p1 = T0[:3, 3].copy(), np.asarray(xyz, float)
-        q0, q1 = np.zeros(4), np.zeros(4)
-        self.mj.mju_mat2Quat(q0, np.asarray(T0[:3, :3], float).reshape(-1))
-        self.mj.mju_mat2Quat(q1, np.asarray(quat_xyzw_to_R(quat), float).reshape(-1))
-        if np.dot(q0, q1) < 0:
+        q0, q1 = np.array(R_to_quat_xyzw(T0[:3, :3])), np.array(quat, float)
+        if q0 @ q1 < 0:
             q1 = -q1
-        ang = 2 * math.acos(min(1.0, abs(float(np.dot(q0, q1)))))
-        n = max(2, int(max(np.linalg.norm(p1 - p0) / max(speed, 1e-3), ang / self.max_ang_rate) / 0.001))
+        ang = 2 * math.acos(min(1.0, abs(float(q0 @ q1))))
+        n = max(2, int(max(np.linalg.norm(p1 - p0) / step_m, ang / math.radians(1.0))))
+        qs, qp = [list(self.q)], list(self.q)
         for i in range(1, n + 1):
-            s = i / n
-            s = s * s * (3 - 2 * s)
-            q = q0 * (1 - s) + q1 * s
-            q /= np.linalg.norm(q)
-            R = np.zeros(9)
-            self.mj.mju_quat2Mat(R, q)
-            self._set_tcp(p0 + s * (p1 - p0), R.reshape(3, 3))
-            self.step(1)
-        self.step(250)
-        err = float(np.linalg.norm(self._tcp_T()[:3, 3] - p1))
-        return {"ok": err < 0.003, "tcp_error_mm": round(err * 1000, 2), "label": label}
-
-    def move_pose(self, label, xyz, quat, speed=0.10, slow=None):
-        return self._move(label, xyz, quat, speed)
+            u = i / n
+            qq = q0 * (1 - u) + q1 * u
+            qq /= np.linalg.norm(qq)
+            r = self.arm.ik([qp], p0 + u * (p1 - p0), quat_xyzw_to_R(qq), iters=30)
+            if r[0] is None:
+                return None, f"Cartesian corridor only {100.0 * (i - 1) / n:.1f}% (IK continuity broke)"
+            qp = r[0]
+            qs.append(qp)
+        return qs, ""
 
     def move_line(self, label, xyz, quat, speed=0.05, slow=None):
-        return self._move(label, xyz, quat, speed)
+        """V3.63: same contract as BackendIO.move_line - a path that fails check_joint_path is REFUSED (not run)"""
+        if self.safety_latched:
+            return {"ok": False, "label": label, "error": "SAFETY LATCH HELD", "safety": True}
+        qs, why = self._cartesian_q_path(xyz, quat)
+        if qs is None:
+            return {"ok": False, "refused": True, "label": label, "why": why}
+        chk = check_joint_path(qs)
+        if not chk["ok"]:
+            return {"ok": False, "refused": True, "label": label, "why": chk["why"], "path_check": chk}
+        T0 = self.arm.fk(np.asarray(qs[0], float))
+        dist = float(np.linalg.norm(np.asarray(xyz) - T0[:3, 3]))
+        q0, q1 = np.array(R_to_quat_xyzw(T0[:3, :3])), np.array(quat, float)
+        ang = 2 * math.acos(min(1.0, abs(float(q0 @ q1))))
+        self._run_q_path(qs, max(dist / max(speed, 1e-3), ang / self.max_ang_rate, 0.2))
+        err = float(np.linalg.norm(self._tcp_T()[:3, 3] - np.asarray(xyz)))
+        return {"ok": err < 0.003, "tcp_error_mm": round(err * 1000, 2), "label": label, "kind": "line",
+                "path_check": chk}
+
+    def move_pose(self, label, xyz, quat, speed=0.10, slow=None):
+        q = ik_from(self.q, xyz, quat_xyzw_to_R(quat))
+        if q is None:
+            return {"ok": False, "label": label, "error": "no IK"}
+        return self.move_joints(label, q, slow=slow)
 
     def gripper_open(self, mm):
         self.force_mode = False
@@ -578,8 +823,55 @@ class TwinIO:
 
     def go_home(self, label):
         p, q = self.tcp_pose()
-        self._move(label, [p[0], p[1], max(p[2], 0.30)], q, 0.15)
-        return self._move(label, [-0.30, 0.0, 0.40], R_to_quat_xyzw(pinch_frame(0.0, False, False)), 0.15)
+        if p[2] < 0.25:
+            self.move_line(label, [p[0], p[1], 0.30], q, 0.10)
+        r = self.move_joints(label, [0.0] * 7)
+        return {"ok": bool(r.get("ok"))}
+
+    def render_fixed_camera(self, frames=1, rng_seed=363):
+        """V3.63: RGB + z-depth of the fixed stand D435i exactly as the backend camera process makes them (V3.08
+        intrinsics, D435i range / mm quantisation, optional noise k, temporal fusion).  Needs an OpenGL context."""
+        import NERO_V308_Camera_Perception as P8
+        cfg = P8.camera_config()
+        if getattr(self, "_renderer", None) is None:
+            self.m.vis.global_.offwidth = max(int(self.m.vis.global_.offwidth), int(cfg["width"]))
+            self.m.vis.global_.offheight = max(int(self.m.vis.global_.offheight), int(cfg["height"]))
+            self._renderer = self.mj.Renderer(self.m, height=int(cfg["height"]), width=int(cfg["width"]))
+            self._rng = np.random.default_rng(rng_seed)
+        r = self._renderer
+        r.disable_depth_rendering()
+        r.update_scene(self.d, camera=P8.CAMERA_NAME)
+        rgb = r.render().copy()
+        r.enable_depth_rendering()
+        r.update_scene(self.d, camera=P8.CAMERA_NAME)
+        raw = r.render().copy()
+        r.disable_depth_rendering()
+        n = int(cfg["depth_frames"]) if float(cfg["depth_noise_k"]) > 0 else 1
+        depth = P8.temporal_fuse([P8._depth_postprocess(raw, cfg, self._rng) for _ in range(max(n, frames))])
+        return rgb, depth, P8.intrinsics(cfg), P8.extrinsics(cfg)
+
+    def pose_mode(self):
+        return self._pose_mode
+
+    def perceive(self, tag):
+        """V3.63: fixed-camera capture of the twin -> NERO_V363_Cup_Perception.perceive_cups (needs OpenGL)"""
+        import NERO_V363_Cup_Perception as CP
+        rgb, depth, K, T = self.render_fixed_camera()
+        res = CP.perceive_cups(rgb, depth, K, T, robot_boxes=self.gripper_boxes())
+        self.log(f"[V3.63 FIXED CUP PERCEPTION] {tag} | " + " ".join(
+            f"{c['kind']}@({c['base_xyz_m'][0]:+.3f},{c['base_xyz_m'][1]:+.3f}) h={c['height_mm']:.0f}mm" for c in res["cups"]))
+        return res
+
+    def gripper_boxes(self):
+        """oriented boxes of the twin gripper (robot self-filter, like _robot_boxes in the camera process)"""
+        boxes = []
+        for gi in range(self.m.ngeom):
+            if int(self.m.geom_bodyid[gi]) not in (self.l7, self.m.body("gripper_link1").id, self.m.body("gripper_link2").id):
+                continue
+            aabb = np.asarray(self.m.geom_aabb[gi], float)
+            R = np.asarray(self.d.geom_xmat[gi], float).reshape(3, 3)
+            boxes.append((np.asarray(self.d.geom_xpos[gi], float) + R @ aabb[:3], R, aabb[3:]))
+        return boxes
 
     def snapshot(self, path, lookat=None, azimuth=135, elevation=-25, distance=0.75):
         """PNG of the twin (needs an OpenGL context, e.g. MUJOCO_GL=glfw with a DISPLAY)"""
@@ -631,7 +923,7 @@ class BackendIO:
             self._sleep(0.12)
         trips = int(self.sh["safety_trip_count"].value) - s0
         return {"ok": best <= 0.010 and trips == 0, "tcp_error_mm": round(best * 1000, 1), "safety_trips": trips,
-                "label": label}
+                "safety": trips > 0, "label": label}
 
     def move_pose(self, label, xyz, quat, speed=0.10, slow=None):
         self.c["require_arm"]()
@@ -645,26 +937,101 @@ class BackendIO:
             return {"ok": False, "label": label, "error": str(exc)[:300], "tcp_error_mm": None}
         return self._post(label, xyz, s0)
 
-    def move_line(self, label, xyz, quat, speed=0.05, fallback=True, slow=None):
+    def pose_mode(self):
+        f = self.c.get("pose_source_mode")
+        mode = f() if f else "truth"
+        return "camera" if mode == "camera" and not self.c.get("wrist_selected", lambda: False)() else "truth"
+
+    def perceive(self, tag):
+        """V3.63: one capture of the fixed stand D435i (camera process, V3.31 protocol) -> its "cups" result"""
+        payload = self.c["capture"](f"cups:{tag}")
+        if not isinstance(payload, dict) or "cups" not in payload:
+            raise RuntimeError("PERCEPTION_NO_CUP_RESULT: the camera process did not return cups (is it the V3.63 "
+                               "NERO_V331_Fixed_Camera.py?)")
+        return payload["cups"]
+
+    # -- V3.63 JOINT-SPACE SAFE MOTION
+    def current_q(self):
+        return [float(v) for v in self.core._arm_positions_from_joint_state(self.core._current_joint_state_copy())]
+
+    @staticmethod
+    def traj_q(traj):
+        jt = traj.joint_trajectory
+        names = [str(n) for n in jt.joint_names]
+        idx = [names.index(f"joint{i}") for i in range(1, 8)]
+        return [[float(pt.positions[i]) for i in idx] for pt in jt.points]
+
+    def _exec(self, label, traj, slow, s0):
+        try:
+            if slow and self.c.get("slow") is not None:
+                self.c["slow"](traj, factor=float(slow))
+            self.core._execute_trajectory(traj)
+            return None
+        except Exception as exc:
+            m = str(exc)
+            return {"ok": False, "label": label, "error": m[:300], "tcp_error_mm": None,
+                    "safety": int(self.sh["safety_trip_count"].value) != s0 or any(
+                        k in m for k in ("PHYSICAL", "SAFETY", "RUNAWAY", "TRACKING")),
+                    "safety_trips": int(self.sh["safety_trip_count"].value) - s0}
+
+    def move_line(self, label, xyz, quat, speed=0.05, slow=None):
+        """Cartesian path from MoveIt; every point is checked (all joints >= PATH_MARGIN_DEG inside the MuJoCo limits,
+        <= PATH_JUMP_DEG per point) BEFORE it runs.  A failing path is REFUSED and not executed - the skill then moves
+        in joint space to its own IK solution (V3.62 run: a 4-point centring path pushed J7 past its limit)."""
         self.c["require_arm"]()
         s0 = int(self.sh["safety_trip_count"].value)
         try:
+            q0 = self.current_q()
             traj = self.core._cartesian_waypoint_plan([list(xyz)], list(quat), label=label, max_step=0.004,
                                                       max_speed=float(speed))
-            if traj is not None:
-                if (slow or float(speed) <= 0.02) and self.c.get("slow") is not None:
-                    # V3.62: max_cartesian_speed is not in every MoveIt release -> also stretch the gentle moves in time
-                    self.c["slow"](traj, factor=float(slow or 2.5))
-                self.core._execute_trajectory(traj)
         except Exception as exc:
-            if not fallback or "PHYSICAL" in str(exc) or "SAFETY" in str(exc):
-                return {"ok": False, "label": label, "error": str(exc)[:300], "tcp_error_mm": None}
-            self.emit(f"[WARN] [V3.62 CUP] {label}: straight Cartesian path refused ({str(exc)[:120]}); "
-                      "using the collision-checked pose planner instead")
-            r = self.move_pose(label, xyz, quat, speed, slow=slow)
-            r["cartesian_fallback"] = True
-            return r
-        return self._post(label, xyz, s0)
+            return {"ok": False, "refused": True, "label": label, "why": str(exc)[:200]}
+        if traj is None:
+            return self._post(label, xyz, s0)
+        chk = check_joint_path([q0] + self.traj_q(traj))
+        if not chk["ok"]:
+            return {"ok": False, "refused": True, "label": label, "why": chk["why"], "path_check": chk}
+        err = self._exec(label, traj, slow if slow else (2.5 if float(speed) <= 0.02 else None), s0)
+        if err:
+            return err
+        r = self._post(label, xyz, s0)
+        r["path_check"] = chk
+        return r
+
+    def move_joints(self, label, q, slow=None):
+        """MoveIt joint goal to an IK solution that the skill checked (margins); the planned path is checked too"""
+        self.c["require_arm"]()
+        s0 = int(self.sh["safety_trip_count"].value)
+        try:
+            q0 = self.current_q()
+            traj = self.core._plan_joint_solution([float(v) for v in q], velocity_scale=0.10, accel_scale=0.08,
+                                                  planning_attempts=6, planning_time=5.0)
+        except Exception as exc:
+            return {"ok": False, "label": label, "error": f"joint plan failed: {str(exc)[:200]}"}
+        if traj is None:
+            return {"ok": False, "label": label, "error": "joint plan returned no trajectory"}
+        chk = check_joint_path([q0] + self.traj_q(traj), jump_deg=30.0)
+        if not chk["ok"]:
+            return {"ok": False, "label": label, "error": f"joint path rejected: {chk['why']}", "path_check": chk}
+        err = self._exec(label, traj, slow, s0)
+        if err:
+            return err
+        self._sleep(0.15)
+        qe = self.current_q()
+        jerr = max(abs(math.degrees(a - b)) for a, b in zip(qe, q))
+        trips = int(self.sh["safety_trip_count"].value) - s0
+        return {"ok": jerr <= 3.0 and trips == 0, "label": label, "joint_error_deg": round(jerr, 2),
+                "safety_trips": trips, "safety": trips > 0, "kind": "joints"}
+
+    def latch_pending(self):
+        f = self.c.get("latch_pending")
+        return bool(f()) if f else False
+
+    def clear_latch(self, label):
+        f = self.c.get("clear_latch")
+        if not f:
+            return False, "backend recovery hook not available"
+        return f(label)
 
     def gripper_open(self, mm):
         sh = self.sh
@@ -734,13 +1101,95 @@ class CupSkills:
         self.held = None
         self.urdf_check = urdf_check
         self.retries = {"pick": 0, "place": 0}
+        self.safety_stops = {}
+        self.motions = []
+        self.grip_offset = None
+        # V3.63 FIXED D435i CUP PERCEPTION: pose source "camera" = the fixed stand D435i (no simulator truth)
+        self.camera = getattr(io, "pose_mode", lambda: "truth")() == "camera"
+        self.cam = {}                  # name -> perceived cup entry
+        self.cam_stack = None          # {"upper", "lower", "height_mm", "base_dz_mm", "nested_full"} when nested
+        self.cam_single_h = None       # measured height of a single cup (rim bead included) for the nested check
+        self.placed = None             # (upper, lower) of the last release
 
     # -- helpers
+    def _entry(self, base_xyz, tilt_deg, extra=None):
+        g = geom()
+        q = [1.0, 0.0, 0.0, 0.0] if tilt_deg < 0.5 else quat_from_tilt_wxyz(tilt_deg)
+        base = np.asarray(base_xyz, float)
+        ax = quat_wxyz_to_R(q)[:, 2]
+        e = {"rim": base + g["h"] * ax, "base": base, "axis": ax, "quat": q, "tilt_deg": round(float(tilt_deg), 2),
+             "source": "camera"}
+        e.update(extra or {})
+        return e
+
+    def _perceive(self, tag):
+        """V3.63: one fixed-camera capture -> cup entries named cup_1 / cup_2 (first sight: by y, like the scene; then
+        nearest-neighbour tracking); a nested pair is one cluster ("stack") -> upper / lower from what was placed"""
+        try:
+            res = self.io.perceive(tag)
+        except Exception as exc:
+            raise self._Abort("PERCEPTION_UNAVAILABLE", {"detail": str(exc)[:300]})
+        g = geom()
+        ndz = float(self.k["cup_nested_height_mm"]) / 1000.0
+        found = [c for c in res.get("cups", []) if c.get("kind") in ("cup", "stack")]
+        singles = [c for c in found if c["kind"] == "cup"]
+        if singles and self.cam_single_h is None:
+            self.cam_single_h = float(np.median([c["height_mm"] for c in singles]))
+        new, stack = {}, None
+        prev = {n: e for n, e in self.cam.items() if n != self.held}
+        free_names = [n for n in CUPS if n != self.held]
+        for c in sorted(found, key=lambda c_: c_["base_xyz_m"][1]):
+            b = np.asarray(c["base_xyz_m"], float)
+            if c["kind"] == "stack":
+                if self.placed:
+                    upper, lower = self.placed
+                elif prev:
+                    lower = min(prev, key=lambda n: np.linalg.norm(prev[n]["base"][:2] - b[:2]))
+                    upper = next(n for n in CUPS if n != lower)
+                else:
+                    upper, lower = "cup_1", "cup_2"
+                h_ref = self.cam_single_h or (g["h"] * 1000.0 + 3.3)
+                dz = float(c["height_mm"]) - h_ref
+                stack = {"upper": upper, "lower": lower, "height_mm": c["height_mm"], "base_dz_mm": round(dz, 1),
+                         "nested_full": bool(dz <= ndz * 1000.0 + 5.0), "xy": [float(b[0]), float(b[1])]}
+                new[lower] = self._entry(b, c["tilt_deg"], {"in_stack": "lower"})
+                new[upper] = self._entry(b + [0, 0, ndz], c["tilt_deg"], {"in_stack": "upper"})
+                continue
+            cand = [n for n in free_names if n not in new]
+            if not cand:
+                continue
+            if prev:
+                name = min(cand, key=lambda n: np.linalg.norm(prev[n]["base"][:2] - b[:2]) if n in prev else 9.0)
+            else:
+                name = cand[0]
+            new[name] = self._entry(b, c["tilt_deg"], {"height_mm": c["height_mm"], "fit_rms_mm": c.get("fit_rms_mm")})
+        for n, e in prev.items():                   # not seen now (occluded by the arm): keep the last estimate
+            if n not in new:
+                new[n] = dict(e, stale=True)
+        if self.held and self.held in self.cam:
+            new[self.held] = self.cam[self.held]
+        self.cam, self.cam_stack = new, stack
+        self.cam_raw = res
+        return res
+
     def _cup(self, name):
-        rim, q = self.io.cup_pose(name)
-        r, b, ax = cup_axis_points(rim, q)
-        return {"rim": r, "base": b, "axis": ax, "quat": q,
-                "tilt_deg": round(SC.cup_axis_tilt_deg(q), 2)}
+        if not self.camera:
+            rim, q = self.io.cup_pose(name)
+            r, b, ax = cup_axis_points(rim, q)
+            return {"rim": r, "base": b, "axis": ax, "quat": q,
+                    "tilt_deg": round(SC.cup_axis_tilt_deg(q), 2)}
+        if name == self.held and self.grip_offset is not None:
+            # the held cup: TCP + the offset measured at the grasp (the backend hold is a rigid CONNECT point)
+            tcp, qt = self.io.tcp_pose()
+            rim = np.asarray(tcp, float) + quat_xyzw_to_R(qt) @ self.grip_offset
+            g = geom()
+            return {"rim": rim, "base": rim - [0, 0, g["h"]], "axis": np.array([0, 0, 1.0]), "quat": [1.0, 0, 0, 0],
+                    "tilt_deg": 0.0, "source": "tcp + grasp offset"}
+        if name not in self.cam:
+            self._perceive(f"locate {name}")
+        if name not in self.cam:
+            raise self._Abort("CUP_NOT_PERCEIVED", {"cup": name, "detail": "the fixed camera does not see this cup"})
+        return self.cam[name]
 
     def _res(self, tool, ok, verification=None, reason=None, nxt=None, warnings=None, **extra):
         v = dict(verification or {})
@@ -757,6 +1206,8 @@ class CupSkills:
         return out
 
     def scene(self):
+        if self.camera:
+            self._perceive("observe_scene")
         cups = {n: self._cup(n) for n in CUPS}
         st = SC.cup_task_state(cups["cup_1"]["rim"], cups["cup_1"]["quat"], cups["cup_2"]["rim"], cups["cup_2"]["quat"],
                                origin="rim")
@@ -771,11 +1222,17 @@ class CupSkills:
                        "upright": bool(c["tilt_deg"] <= 10.0), "on_table": bool(abs(c["base"][2]) < 0.006),
                        "held": self.held == n}
         stacked = None
-        if st["stacked"]:
+        if self.camera:
+            if self.cam_stack:
+                stacked = {"upper": self.cam_stack["upper"], "lower": self.cam_stack["lower"],
+                           "fully_nested": self.cam_stack["nested_full"]}
+        elif st["stacked"]:
             stacked = {"upper": "cup_1", "lower": "cup_2", "fully_nested": st["nested_full"]}
         elif st21["stacked"]:
             stacked = {"upper": "cup_2", "lower": "cup_1", "fully_nested": st21["nested_full"]}
-        return {"scene": "stack_cups", "pose_source": "simulator ground truth (TF)", "objects": objs,
+        src = ("fixed stand D435i RGB-D perception (V3.63, no simulator truth)" if self.camera
+               else "simulator ground truth (TF)")
+        return {"scene": "stack_cups", "pose_source": src, "objects": objs,
                 "stacked": stacked, "tcp_xyz_m": [round(v, 4) for v in tcp], "gripper": g,
                 "cup_model": {"height_mm": 121, "rim_diameter_mm": 95, "base_diameter_mm": 60,
                               "nested_base_to_base_mm": float(self.k["cup_nested_height_mm"])},
@@ -803,7 +1260,11 @@ class CupSkills:
         st = SC.cup_task_state(s["rim"], s["quat"], t["rim"], t["quat"], origin="rim")
         if st["stacked"]:
             return self._res("plan_cup_stack", True, st, reason="ALREADY_STACKED", nxt=["verify_stack"])
-        plan = plan_cup_stack(self.k, s["rim"], s["quat"], t["rim"], t["quat"], log=self.io.emit)
+        try:
+            q_now = self.io.current_q()               # V3.63: plan from the robot's real joints (its IK branch)
+        except Exception:
+            q_now = None
+        plan = plan_cup_stack(self.k, s["rim"], s["quat"], t["rim"], t["quat"], q_start=q_now, log=self.io.emit)
         if not plan["ok"]:
             return self._res("plan_cup_stack", False, {"detail": plan.get("detail")}, reason=plan["reason"],
                              nxt=["stop_and_report"])
@@ -820,64 +1281,179 @@ class CupSkills:
         return self._res("plan_cup_stack", True, {"min_joint_margin_deg": plan["min_joint_margin_deg"]},
                          nxt=["pick_cup"], warnings=warn, plan=pub)
 
+    # ------------------------------------------------------------------ V3.63 JOINT-SPACE SAFE MOTION
+    class _Abort(Exception):
+        def __init__(self, reason, info):
+            super().__init__(reason)
+            self.reason, self.info = reason, dict(info or {})
+
+    def _unlatched(self, label):
+        if self.io.latch_pending():
+            ok, why = self.io.clear_latch(f"V3.63 {label}")
+            if not ok:
+                raise self._Abort("SAFETY_LATCH_NOT_CLEARED", {"during": label, "detail": why})
+
+    def _check(self, label, r):
+        if r.get("safety") or r.get("safety_trips"):
+            raise self._Abort("SAFETY_STOP", {"during": label, "error": r.get("error"),
+                                              "safety_trips": r.get("safety_trips")})
+        if not r.get("ok"):
+            raise self._Abort("MOTION_FAILED", {"during": label, "error": r.get("error"),
+                                                "tcp_error_mm": r.get("tcp_error_mm"),
+                                                "joint_error_deg": r.get("joint_error_deg")})
+        return r
+
+    def _go_joints(self, label, q, slow=None):
+        self._unlatched(label)
+        self.motions.append((label, "joints"))
+        return self._check(label, self.io.move_joints(f"V3.63 {label}", q, slow=slow))
+
+    def _go_line(self, label, xyz, R, speed, slow=None, q_hint=None):
+        """straight move if the checked Cartesian path is safe, else joint space to an IK solution with margins"""
+        self._unlatched(label)
+        q_now = self.io.current_q()
+        r = self.io.move_line(f"V3.63 {label}", xyz, R_to_quat_xyzw(R), speed, slow=slow)
+        if r.get("refused"):
+            q_t = q_hint if q_hint is not None else ik_from(q_now, xyz, R)
+            if q_t is not None and q_hint is not None:
+                T = FastArm.fk(self._arm(), np.asarray(q_t, float))
+                if np.linalg.norm(T[:3, 3] - np.asarray(xyz, float)) > 0.002:
+                    q_t = ik_from(q_now, xyz, R)
+            if q_t is None or min(joint_margins_deg(q_t)) < PATH_MARGIN_DEG:
+                raise self._Abort("TARGET_UNREACHABLE", {"during": label, "why": r.get("why"),
+                                                         "detail": "no IK solution with joint margins for this pose"})
+            self.io.emit(f"[WARN] [V3.63 CUP] {label}: Cartesian path refused ({r.get('why')}) -> joint-space move to "
+                         f"a checked IK solution (min margin {min(joint_margins_deg(q_t)):.1f} deg)")
+            self.motions.append((label, "joints (line refused)"))
+            # a joint-space path is not straight in Cartesian space: while a cup is held the TCP must not dip more than
+            # 10 mm below the lower end of the requested segment (split at the line midpoint if it would)
+            path = [q_now, q_t]
+            if self.held:
+                z_floor = min(float(xyz[2]), float(self.io.tcp_pose()[0][2])) - 0.010
+                if self._dip_z(q_now, q_t) < z_floor:
+                    p0 = np.asarray(self.io.tcp_pose()[0], float)
+                    q_mid = ik_from(q_now, 0.5 * (p0 + np.asarray(xyz, float)), R)
+                    if q_mid is None or self._dip_z(q_now, q_mid) < z_floor or self._dip_z(q_mid, q_t) < z_floor:
+                        raise self._Abort("TARGET_UNREACHABLE", {"during": label, "why": r.get("why"),
+                                                                 "detail": "joint-space path would dip the held cup"})
+                    path = [q_now, q_mid, q_t]
+            for k_, qk in enumerate(path[1:]):
+                r = self.io.move_joints(f"V3.63 {label} (joint space{'' if len(path) == 2 else f' {k_ + 1}/2'})", qk,
+                                        slow=slow or 2.5)
+                if not r.get("ok"):
+                    break
+        else:
+            self.motions.append((label, "line"))
+        return self._check(label, r)
+
+    def _dip_z(self, qa, qb, n=21):
+        arm = self._arm()
+        qa, qb = np.asarray(qa, float), np.asarray(qb, float)
+        return min(float(arm.fk(qa + u * (qb - qa))[2, 3]) for u in np.linspace(0.0, 1.0, n))
+
+    def _arm(self):
+        if "t" not in _IK:
+            _IK["t"] = _ik_tools()
+        return _IK["t"][0]
+
+    def _abort_result(self, tool, e, v):
+        """V3.63: a motion failure / safety stop ends the tool at once; after a safety stop the latch is cleared
+        (backend STOP + RECOVER, hold kept) so that the Agent may retry the same tool ONCE from the current posture"""
+        v = dict(v, **e.info)
+        nxt = ["observe_scene", tool]
+        if e.reason == "SAFETY_STOP":
+            ok, why = self.io.clear_latch(f"V3.63 {tool} after safety stop")
+            v.update({"latch_recovered": bool(ok), "recover_detail": why,
+                      "hold_active": self.io.gripper_state().get("hold_active")})
+            self.safety_stops[tool] = self.safety_stops.get(tool, 0) + 1
+            if not ok or self.safety_stops[tool] >= 2:
+                nxt = ["stop_and_report"]
+        elif e.reason in ("SAFETY_LATCH_NOT_CLEARED", "TARGET_UNREACHABLE"):
+            nxt = ["stop_and_report"]
+        return self._res(tool, False, v, reason=e.reason, nxt=nxt)
+
     def pick_cup(self, source_cup="cup_1", **_):
         tool = "pick_cup"
         if self.held:
             return self._res(tool, False, reason="ALREADY_HOLDING", nxt=["place_cup_into"])
         if not self.plan or self.plan["source"] != source_cup or self.stage != "PLANNED":
             return self._res(tool, False, reason="PLAN_REQUIRED", nxt=["plan_cup_stack"])
-        W = self.plan["_wps"]
-        s0 = self._cup(source_cup)
-        o = self.io.gripper_open(60.0)
-        v = {"opening_before_mm": o["opening_mm"]}
-        for name, fn, spd in (("pregrasp", self.io.move_pose, 0.12), ("grasp", self.io.move_line, 0.03)):
-            p, R = W[name]
-            r = fn(f"V3.62 {name} {source_cup}", p, R_to_quat_xyzw(R), spd)
-            v[f"{name}_tcp_error_mm"] = r.get("tcp_error_mm")
-            if not r.get("ok"):
+        W, Q = self.plan["_wps"], self.plan["_q"]
+        v = {}
+        try:
+            if self.camera:
+                self._perceive(f"pick {source_cup}")
+            s0 = self._cup(source_cup)
+            v["opening_before_mm"] = self.io.gripper_open(60.0)["opening_mm"]
+            # joint goal to the planned (margin-checked) IK branch - not a free pose goal
+            self._go_joints(f"pregrasp {source_cup}", Q["pregrasp"])
+            p, R = W["grasp"]
+            self._go_line(f"grasp {source_cup}", p, R, 0.03, q_hint=Q["grasp"])
+            if self.camera:
+                # the cup is still on the table here: its rim centre in the TCP frame = the grasp offset (V3.63)
+                tcp_g, qg = self.io.tcp_pose()
+                self.cam_grip_offset = quat_xyzw_to_R(qg).T @ (np.asarray(s0["rim"], float) - np.asarray(tcp_g, float))
+                self._perceive(f"check {source_cup} after the descent")
+            s1 = self._cup(source_cup)
+            moved = 0.0 if s1.get("stale") else float(np.linalg.norm(s1["base"][:2] - s0["base"][:2])) * 1000
+            v["cup_moved_by_descent_mm"] = round(moved, 1)
+            if s1.get("stale"):
+                v["descent_check"] = "cup hidden by the gripper in the fixed camera view - not checked"
+            if moved > 8.0 or s1["tilt_deg"] > 6.0:
                 self._retreat_up()
-                return self._res(tool, False, dict(v, error=r.get("error")), reason=f"{name.upper()}_MOTION_FAILED",
-                                 nxt=["observe_scene", "plan_cup_stack"])
-        s1 = self._cup(source_cup)
-        moved = float(np.linalg.norm(s1["base"][:2] - s0["base"][:2])) * 1000
-        v["cup_moved_by_descent_mm"] = round(moved, 1)
-        if moved > 8.0 or s1["tilt_deg"] > 6.0:
-            self._retreat_up()
-            return self._res(tool, False, v, reason="CUP_PUSHED_DURING_DESCENT", nxt=["observe_scene", "plan_cup_stack"])
-        c = self.io.gripper_clamp(float(self.k["cup_clamp_force_n"]))
-        v.update({"clamp": c})
-        if not (c["contact_left"] and c["contact_right"]) and not c["hold_active"]:
-            self.io.gripper_open(60.0)
-            self._retreat_up()
-            return self._res(tool, False, v, reason="NO_TWO_FINGER_CONTACT", nxt=["observe_scene", "plan_cup_stack"])
-        p, R = W["lift"]
-        tcp0, _ = self.io.tcp_pose()
-        r = self.io.move_line(f"V3.62 lift {source_cup}", p, R_to_quat_xyzw(R), 0.05)
-        tcp1, _ = self.io.tcp_pose()
-        s2 = self._cup(source_cup)
+                return self._res(tool, False, v, reason="CUP_PUSHED_DURING_DESCENT", nxt=["observe_scene", "plan_cup_stack"])
+            c = self.io.gripper_clamp(float(self.k["cup_clamp_force_n"]))
+            v["clamp"] = c
+            if not (c["contact_left"] and c["contact_right"]) and not c["hold_active"]:
+                self.io.gripper_open(60.0)
+                self._retreat_up()
+                return self._res(tool, False, v, reason="NO_TWO_FINGER_CONTACT", nxt=["observe_scene", "plan_cup_stack"])
+            tcp0, _ = self.io.tcp_pose()
+            self.grip_offset = None
+            p, R = W["lift"]
+            self._go_line(f"lift {source_cup}", p, R, 0.05, q_hint=Q["lift"])
+        except self._Abort as e:
+            return self._abort_result(tool, e, v)
+        tcp1, q1 = self.io.tcp_pose()
         rise_tcp = tcp1[2] - tcp0[2]
-        rise_cup = float(s2["base"][2] - s1["base"][2])
+        if self.camera:
+            try:
+                self._perceive(f"check {source_cup} lifted")
+            except self._Abort as e:
+                return self._abort_result(tool, e, v)
+            still = self.cam.get(source_cup)
+            on_table = bool(still and not still.get("stale")
+                            and np.linalg.norm(still["base"][:2] - s0["base"][:2]) < 0.02)
+            rise_cup = 0.0 if on_table else rise_tcp
+            s2 = {"rim": np.asarray(tcp1, float) + quat_xyzw_to_R(q1) @ self.cam_grip_offset, "tilt_deg": 0.0}
+            v["lift_check"] = "fixed camera: cup no longer at its table position" if not on_table else \
+                "fixed camera: the cup is still standing at its table position"
+        else:
+            s2 = self._cup(source_cup)
+            rise_cup = float(s2["base"][2] - s1["base"][2])
         v.update({"lift_tcp_rise_mm": round(rise_tcp * 1000, 1), "cup_rise_mm": round(rise_cup * 1000, 1),
                   "cup_tilt_after_lift_deg": s2["tilt_deg"], "hold_active": self.io.gripper_state()["hold_active"]})
         if rise_cup < 0.7 * max(rise_tcp, 0.01):
             self.io.gripper_open(60.0)
             self._retreat_up()
             return self._res(tool, False, v, reason="CUP_DID_NOT_FOLLOW_LIFT", nxt=["observe_scene", "plan_cup_stack"])
+        # held cup rim centre in the TCP frame (the backend hold is a CONNECT at this point -> rigid while held)
+        Rt = quat_xyzw_to_R(q1)
+        self.grip_offset = (self.cam_grip_offset if self.camera else
+                            Rt.T @ (np.asarray(s2["rim"], float) - np.asarray(tcp1, float)))
         self.held = source_cup
         self.stage = "CUP_LIFTED"
         warn = []
         if s2["tilt_deg"] > float(self.k["cup_release_tilt_tol_deg"]):
             warn.append(f"held cup tilted {s2['tilt_deg']} deg (> {self.k['cup_release_tilt_tol_deg']} deg tolerance)")
-        if not r.get("ok"):
-            warn.append(f"lift ended {r.get('tcp_error_mm')} mm from its target")
         return self._res(tool, True, v, nxt=["place_cup_into"], warnings=warn)
 
     def _retreat_up(self, dz=0.08):
         try:
             p, q = self.io.tcp_pose()
-            self.io.move_line("V3.62 retreat", [p[0], p[1], p[2] + dz], q, 0.05)
-        except Exception:
-            pass
+            self._go_line("retreat", [p[0], p[1], p[2] + dz], quat_xyzw_to_R(q), 0.05)
+        except Exception as exc:
+            self.io.emit(f"[WARN] [V3.63 CUP] retreat failed: {exc}")
 
     def _centre_error(self, src, dst):
         s, t = self._cup(src), self._cup(dst)
@@ -894,33 +1470,39 @@ class CupSkills:
         W = self.plan["_wps"]
         tol = float(self.k["cup_release_xy_tol_mm"]) / 1000.0
         v = {}
-        p, R = W["above_target"]
-        q = R_to_quat_xyzw(R)
-        # level straight carry first (the cups are not in the MoveIt world, a free joint-space path could dip and
-        # drag the held cup over the target rim); BackendIO falls back to the pose planner if it is refused
-        r = self.io.move_line(f"V3.62 carry {src} over {target_cup}", p, q, CARRY_SPEED, slow=CARRY_SLOW_FACTOR)
-        if not r.get("ok"):
-            return self._res(tool, False, dict(v, error=r.get("error"), tcp_error_mm=r.get("tcp_error_mm")),
-                             reason="CARRY_MOTION_FAILED", nxt=["observe_scene"])
-        # closed-loop centring on the measured cup poses (ground truth)
-        for it in range(3):
+        try:
+            if self.camera:
+                self._perceive(f"place {src} into {target_cup}")      # fresh target pose (held cup: TCP + offset)
+            R_p = W["above_target"][1]
+            q_now = self.io.current_q()
+            tcp, _q = self.io.tcp_pose()
+            # 1. rotate in place (joint space, slow): lift position, place orientation; re-solved from the CURRENT
+            #    joints so a retry after a safety stop starts from where the arm really is
+            q_rot = ik_from(q_now, tcp, R_p)
+            if q_rot is None or min(joint_margins_deg(q_rot)) < MIN_MARGIN_RELAXED_DEG:
+                q_rot = self.plan["_q"]["rotate"]
+            self._go_joints(f"rotate {src} to the place orientation", q_rot, slow=CARRY_SLOW_FACTOR)
+            # 2. level translation; the measured held-cup offset is folded into the target (no separate centring)
             d, s, t = self._centre_error(src, target_cup)
-            if float(np.linalg.norm(d)) <= 0.0015:
-                break
-            tcp, q = self.io.tcp_pose()
-            self.io.move_line(f"V3.62 centre #{it + 1}", [tcp[0] + d[0], tcp[1] + d[1], tcp[2]], q, PLACE_SPEED)
-        d, s, t = self._centre_error(src, target_cup)
-        v["centre_error_high_mm"] = round(float(np.linalg.norm(d)) * 1000, 1)
-        # lower until the base is at release height
-        _, base_rel = stack_heights(self.k, s["base"][2], t["base"][2])
-        tcp, q = self.io.tcp_pose()
-        dz = float(s["base"][2] - base_rel)
-        r = self.io.move_line(f"V3.62 lower {src} into {target_cup}", [tcp[0] + d[0], tcp[1] + d[1], tcp[2] - dz], q, PLACE_SPEED)
-        d, s, t = self._centre_error(src, target_cup)
-        if float(np.linalg.norm(d)) > tol:
-            tcp, q = self.io.tcp_pose()
-            self.io.move_line("V3.62 centre at release height", [tcp[0] + d[0], tcp[1] + d[1], tcp[2]], q, PLACE_SPEED)
+            tcp, _q = self.io.tcp_pose()
+            above = np.array([tcp[0] + d[0], tcp[1] + d[1], tcp[2]])
+            self._go_line(f"carry {src} over {target_cup}", above, R_p, CARRY_SPEED, slow=CARRY_SLOW_FACTOR)
+            # 3. lower to the release height; the remaining error (if >= 3 mm) is folded into the same move
             d, s, t = self._centre_error(src, target_cup)
+            v["centre_error_high_mm"] = round(float(np.linalg.norm(d)) * 1000, 1)
+            if float(np.linalg.norm(d)) < SMALL_CORRECTION_M:
+                d = np.zeros(2)
+            _, base_rel = stack_heights(self.k, s["base"][2], t["base"][2])
+            tcp, _q = self.io.tcp_pose()
+            dz = float(s["base"][2] - base_rel)
+            self._go_line(f"lower {src} into {target_cup}", [tcp[0] + d[0], tcp[1] + d[1], tcp[2] - dz], R_p, PLACE_SPEED)
+            d, s, t = self._centre_error(src, target_cup)
+            if float(np.linalg.norm(d)) > tol:            # at most one correction at the release height
+                tcp, _q = self.io.tcp_pose()
+                self._go_line("centre at release height", [tcp[0] + d[0], tcp[1] + d[1], tcp[2]], R_p, PLACE_SPEED)
+                d, s, t = self._centre_error(src, target_cup)
+        except self._Abort as e:
+            return self._abort_result(tool, e, v)
         v.update({"centre_error_mm": round(float(np.linalg.norm(d)) * 1000, 1),
                   "held_cup_tilt_deg": s["tilt_deg"], "target_cup_tilt_deg": t["tilt_deg"],
                   "base_above_target_base_mm": round(float(s["base"][2] - t["base"][2]) * 1000, 1)})
@@ -935,15 +1517,25 @@ class CupSkills:
         self.io.gripper_open(60.0)
         self.io.sleep(1.5)
         self.held = None
+        self.grip_offset = None
+        self.placed = (src, target_cup)
         self.stage = "RELEASED"
-        p2, R2 = W["retreat"]
-        tcp, q = self.io.tcp_pose()
-        self.io.move_line("V3.62 retreat after release", [tcp[0], tcp[1], tcp[2] + 0.08], q, 0.05)
+        self._retreat_up()
         st = self._state(src, target_cup)
         v["after_release"] = st
         return self._res(tool, True, v, nxt=["verify_stack"], warnings=warn)
 
     def _state(self, upper, lower):
+        if self.camera:
+            self._perceive(f"check {upper} in {lower}")
+            st = self.cam_stack
+            if st and st["upper"] == upper and st["lower"] == lower:
+                return {"xy_offset_mm": 0.0, "base_dz_mm": st["base_dz_mm"], "tilt_cup1_deg": self.cam[upper]["tilt_deg"],
+                        "tilt_cup2_deg": self.cam[lower]["tilt_deg"], "stacked": True, "nested_full": st["nested_full"],
+                        "nested": True, "success": True, "source": "fixed camera (one nested cluster)"}
+            return {"stacked": False, "nested_full": False, "nested": False, "success": False,
+                    "source": "fixed camera", "clusters": [(c["kind"], c["height_mm"]) for c in
+                                                          (getattr(self, "cam_raw", {}) or {}).get("cups", [])]}
         a, b = self._cup(upper), self._cup(lower)
         return SC.cup_task_state(a["rim"], a["quat"], b["rim"], b["quat"], origin="rim")
 
@@ -963,6 +1555,11 @@ class CupSkills:
     def return_to_safe_pose(self, **_):
         if self.held:
             return self._res("return_to_safe_pose", False, reason="CUP_HELD_PLACE_FIRST", nxt=["place_cup_into"])
+        if self.io.latch_pending():
+            ok, why = self.io.clear_latch("V3.63 return_to_safe_pose")
+            if not ok:
+                return self._res("return_to_safe_pose", False, {"detail": why}, reason="SAFETY_LATCH_NOT_CLEARED",
+                                 nxt=["stop_and_report"])
         self.io.gripper_open(60.0)
         r = self.io.go_home("V3.62 cup task")
         if self.stage not in ("VERIFIED",):
@@ -970,6 +1567,12 @@ class CupSkills:
         return self._res("return_to_safe_pose", bool(r.get("ok", True)), {"detail": r.get("error")})
 
     def run_tool(self, name, args):
+        try:
+            return self._run_tool(name, args)
+        except self._Abort as e:                     # perception problems outside the motion wrappers
+            return self._res(name, False, dict(e.info), reason=e.reason, nxt=["observe_scene", "stop_and_report"])
+
+    def _run_tool(self, name, args):
         fn = {"observe_scene": self.observe_scene, "plan_cup_stack": self.plan_cup_stack, "pick_cup": self.pick_cup,
               "place_cup_into": self.place_cup_into, "verify_stack": self.verify_stack,
               "return_to_safe_pose": self.return_to_safe_pose}.get(name)
@@ -1045,8 +1648,12 @@ Rules:
 4. If place_cup_into fails with NOT_CENTRED_OVER_TARGET the cup is still held: call place_cup_into once more. Any other
    place failure or a second failure: stop and report.
 5. Success only when verify_stack returns ok=true. Report fully_nested (nested_full) as well.
-6. GRASP_UNREACHABLE / PLACE_UNREACHABLE / JOINT_MARGIN_TOO_SMALL / CUP_NOT_UPRIGHT: stop and report; do not try other
-   motions.
+6. GRASP_UNREACHABLE / PLACE_UNREACHABLE / JOINT_MARGIN_TOO_SMALL / CUP_NOT_UPRIGHT / TARGET_UNREACHABLE /
+   SAFETY_LATCH_NOT_CLEARED: stop and report; do not try other motions.
+6b. SAFETY_STOP: the simulator stopped the arm (e.g. a joint limit); the skill already ran STOP + RECOVER
+   (physical_verification.latch_recovered) and a held cup stays in the gripper. If latch_recovered=true and the
+   recommended actions contain the same tool: call observe_scene, then that tool ONCE more (it re-plans from the current
+   posture). A second SAFETY_STOP of the same tool or latch_recovered=false: stop and report.
 7. Keep the final message short and factual (which cup into which, verified or not, the reason of any failure).
 """
 
@@ -1179,10 +1786,18 @@ def gui_run_task(ctx):
         log("[LLM UI] Task is empty")
         return
     if ctx.get("pose_source_mode", lambda: "truth")() == "camera":
-        log("[FAIL] [V3.62 CUP] stack_cups has no camera perception yet: select 'JSON ground truth' as the pose source")
-        if mb:
-            mb.showerror("NERO V3.62", "叠杯子场景目前只支持 JSON ground truth 位姿源（还没有杯子的相机感知）。")
-        return
+        if ctx.get("wrist_selected", lambda: False)():
+            log("[FAIL] [V3.63 CUP] stack_cups: wrist-camera cup perception is not available - select the fixed stand "
+                "camera (D435i) or 'JSON ground truth' as the pose source")
+            if mb:
+                mb.showerror("NERO V3.63", "叠杯子场景支持：固定主相机 D435i 或 JSON ground truth；腕部相机还不支持。")
+            return
+        if ctx.get("camera_available") is not None and not ctx["camera_available"]():
+            log("[FAIL] [V3.63 CUP] the fixed camera process is not running - no fallback to simulator truth")
+            if mb:
+                mb.showerror("NERO V3.63", "固定主相机进程没有运行（不会退回仿真真值）。")
+            return
+        log("[INFO] [V3.63 CUP] pose source: fixed stand D435i RGB-D cup perception (no simulator truth)")
     if ctx["agent"] is None:
         log("[FAIL] [V3.62 CUP] the LLM agent module is not loaded")
         return
@@ -1205,13 +1820,16 @@ def gui_run_task(ctx):
     ctx["background"]("RUN TASK (stack_cups)", _run, lock_motion=True)
 
 
-def twin_episode(knobs=None, source="cup_1", target="cup_2", log=print, snapshot_dir=None, cup_xy=None):
-    """offline: the scripted CS episode in the headless twin -> (results, final cup state, io)"""
+def twin_episode(knobs=None, source="cup_1", target="cup_2", log=print, snapshot_dir=None, cup_xy=None,
+                 pose_mode="truth"):
+    """offline: the scripted CS episode in the headless twin -> (results, final cup state from simulator truth, io)"""
     k = dict(CUP_KNOB_DEFAULTS, **(knobs or {}))
-    io = TwinIO(log=log, cup_xy=cup_xy)
+    io = TwinIO(log=log, cup_xy=cup_xy, pose_mode=pose_mode)
     sk = CupSkills(io, k, {"code": "CS", "short_name": "Cup Stack", "skill_id": "cup_stack_rim_pinch"})
     res = sk.scripted_episode(source, target)
-    st = sk._state(source, target)
+    io.skills = sk
+    a, b = io.cup_pose(source), io.cup_pose(target)              # judged with simulator truth (also in camera mode)
+    st = SC.cup_task_state(a[0], a[1], b[0], b[1], origin="rim")
     if snapshot_dir:
         try:
             io.snapshot(os.path.join(snapshot_dir, "v362_twin_final.png"))
@@ -1222,7 +1840,12 @@ def twin_episode(knobs=None, source="cup_1", target="cup_2", log=print, snapshot
 
 def _study_job(job):
     import random
-    k, src, dst, seed, solref = job
+    k, src, dst, seed, solref = job[:5]
+    pose_mode = job[5] if len(job) > 5 else "truth"
+    if pose_mode == "camera":
+        os.environ["NERO_V308_DEPTH_NOISE_K"] = "0.002"      # D435i-like depth noise sigma = k z^2 + temporal fusion
+    else:
+        os.environ.pop("NERO_V308_DEPTH_NOISE_K", None)
     if solref:
         os.environ["NERO_V362_CUP_SOLREF"] = solref
     else:
@@ -1230,16 +1853,18 @@ def _study_job(job):
     rnd = random.Random(seed)
     xy = ({n: (x + rnd.uniform(-0.01, 0.01), y + rnd.uniform(-0.01, 0.01)) for n, (x, y) in SC.CUP_XY.items()}
           if seed else None)
-    res, st, io = twin_episode(k, src, dst, log=lambda s_: None, cup_xy=xy)
+    res, st, io = twin_episode(k, src, dst, log=lambda s_: None, cup_xy=xy, pose_mode=pose_mode)
     pick = next((r for r in res if r["tool"] == "pick_cup"), {})
     return {"knobs": k, "source": src, "target": dst, "position_noise_seed": seed, "cup_solref": solref or "scene default",
+            "pose_mode": pose_mode,
+            "line_refused_to_joint_space": [lab for lab, kind in io.skills.motions if "refused" in kind],
             "stacked": st["stacked"], "nested_full": st["nested_full"], "base_dz_mm": st["base_dz_mm"],
             "tilt_after_lift_deg": (pick.get("physical_verification") or {}).get("cup_tilt_after_lift_deg"),
             "failed_at": next((f"{r['tool']}:{r.get('reason')}" for r in res if not r["ok"]), None),
             "sim_time_s": round(io.t, 1)}
 
 
-def twin_study(processes=4, log=print, out_path=None):
+def twin_study(processes=4, log=print, out_path=None, camera=False):
     """V3.62 twin study (about 5 min on 4 cores): defaults both directions, +-10 mm cup position noise over pinch
     depth x clamp force, two cup contact stiffnesses, and the V3.61-style controls (25 mm / vertical approach)."""
     from multiprocessing import Pool
@@ -1249,22 +1874,28 @@ def twin_study(processes=4, log=print, out_path=None):
     jobs += [({}, "cup_1", "cup_2", 3, sr) for sr in ("-5000 -30", "-50000 -100")]
     jobs += [({"cup_rim_pinch_depth_mm": 25.0}, "cup_1", "cup_2", 0, None), ({"cup_wall_tilt_follow": False}, "cup_1", "cup_2", 0, None),
              ({"cup_rim_pinch_depth_mm": 25.0, "cup_wall_tilt_follow": False}, "cup_1", "cup_2", 0, None)]
+    if camera:            # V3.63: fixed D435i perception instead of simulator truth (needs OpenGL in the workers)
+        jobs += [({}, "cup_1", "cup_2", 0, None, "camera"), ({}, "cup_2", "cup_1", 0, None, "camera"),
+                 ({}, "cup_1", "cup_2", 4, None, "camera"), ({}, "cup_2", "cup_1", 5, None, "camera")]
     with Pool(processes) as pool:
         rows = []
         for r in pool.imap(_study_job, jobs):
             rows.append(r)
-            log(f"[V3.62 twin study] {r['source']}->{r['target']} {r['knobs']} seed {r['position_noise_seed']} "
+            log(f"[V3.63 twin study] {r['pose_mode']} {r['source']}->{r['target']} {r['knobs']} seed {r['position_noise_seed']} "
                 f"{r['cup_solref']}: stacked={r['stacked']} nested_full={r['nested_full']} lift tilt {r['tilt_after_lift_deg']}"
                 + (f" FAILED {r['failed_at']}" if r["failed_at"] else ""))
     knobs, _sk = cup_knobs()
     study = {"version": VERSION, "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
-             "what": ("headless MuJoCo twin: official AgileX finger pads on a mocap link7 + backend gripper logic "
-                      "(force clamp, penetration guard, auto CONNECT hold) + the two scene cups; scripted CS episode "
-                      "observe -> plan -> pick -> place -> verify. The arm is not simulated (reachability: strict 6-DoF "
-                      "URDF IK in plan_cup_stack). Not measured on hardware."),
+             "what": ("headless MuJoCo twin: official AgileX finger pads driven by the URDF arm kinematics (V3.63: joint "
+                      "space, Cartesian moves as checked IK-continuity paths) + backend gripper logic (force clamp, "
+                      "penetration guard, auto CONNECT hold) + the two scene cups; scripted CS episode observe -> plan -> "
+                      "pick -> place -> verify; camera rows: fixed stand D435i perception instead of simulator truth. No "
+                      "arm dynamics / ros2_control. Not measured on hardware."),
              "layout": {k_: list(v) for k_, v in SC.CUP_XY.items()}, "cup_origin": SC.CUP_ORIGIN,
              "defaults": knobs, "rows": rows,
-             "summary": {"default_like_runs": sum(1 for r in rows if not ({"cup_wall_tilt_follow"} & set(r["knobs"]))
+             "summary": {"camera_runs": sum(1 for r in rows if r["pose_mode"] == "camera"),
+                         "camera_success": sum(1 for r in rows if r["pose_mode"] == "camera" and r["nested_full"]),
+                         "default_like_runs": sum(1 for r in rows if not ({"cup_wall_tilt_follow"} & set(r["knobs"]))
                                                   and r["knobs"].get("cup_rim_pinch_depth_mm", 35.0) >= 30.0),
                          "default_like_success": sum(1 for r in rows if r["nested_full"] and not ({"cup_wall_tilt_follow"} & set(r["knobs"]))
                                                      and r["knobs"].get("cup_rim_pinch_depth_mm", 35.0) >= 30.0)}}
@@ -1276,8 +1907,8 @@ def twin_study(processes=4, log=print, out_path=None):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--study":
-        twin_study(out_path=sys.argv[2] if len(sys.argv) > 2 else None)
+    if len(sys.argv) > 1 and sys.argv[1] in ("--study", "--study-camera"):
+        twin_study(out_path=sys.argv[2] if len(sys.argv) > 2 else None, camera=sys.argv[1] == "--study-camera")
     else:
         r, st, _io = twin_episode(log=print)
         print(json.dumps(st))
