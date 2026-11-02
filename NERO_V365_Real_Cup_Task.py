@@ -28,7 +28,7 @@ import time
 
 import numpy as np
 
-VERSION = "V3.66"
+VERSION = "V3.67"
 MARKER = "V3.65 NERO REAL CUP TASK"
 CALIB_DIR = os.environ.get("NERO_CALIB_DIR") or os.path.expanduser("~/Downloads/cameracalib")
 SETTINGS_NAME = "real_cup_task.json"
@@ -44,7 +44,14 @@ DEFAULT_CFG = {
     "hover_dwell_s": 3.0,
     "clamp_torque_pct": None,       # None = from the skill's clamp force (STS3215 torque limit)
     "lift_settle_s": 0.5,           # real gripper: no CONNECT hold swing -> short settle only
+    # V3.67 REAL GRIPPER GEOMETRY + SAFETY (real arm only; the simulation keeps its SO-101 profile)
+    "clearance_mm": 8.0,            # fixed jaw -> outer cup wall during the descent (simulation: 2 mm)
+    "align_rotate_mm": 60.0,        # arrive this high above the pregrasp, rotate in place to the grasp angle
+    "descent_stop_mm": 10.0,        # two-stage descent: stop with the fingertips this far above the rim
+    "seat_mm": None, "ring_mm": None, "roll_deg": None,      # None = NERO_V364 MOUNT (estimate)
+    "tip_corr_mm": [0.0, 0.0, 0.0],  # fingertip correction in the SO-101 gripper frame (4-pose touch calibration)
 }
+MOUNT_LIMITS = {"seat_mm": (20.0, 60.0), "ring_mm": (0.0, 30.0), "roll_deg": (-180.0, 180.0)}
 EXAMPLES = (("cup_1 → cup_2", "Stack cup_1 into cup_2"), ("cup_2 → cup_1", "Put cup_2 into cup_1"))
 
 
@@ -69,13 +76,64 @@ def save_settings(d, path=None):
         return False
 
 
-def real_profile(CK, lift_settle_s=0.5):
-    """the simulation's SO-101 profile, with the short real settle (the real gripper has no CONNECT hold)"""
+def real_mount(cfg=None):
+    """V3.67 REAL GRIPPER GEOMETRY: (T_l7_gripper, T_tcp_grasp, mount dict) of the real SO-101 - the NERO_V364 model
+    with the measured seat / ring / roll and a fingertip correction (gripper frame) instead of the estimates"""
+    import NERO_V364_SO101_Gripper as G
+    c = dict(DEFAULT_CFG, **(cfg or {}))
+    seat = G.MOUNT["seat_x_m"] * 1000.0 if c.get("seat_mm") is None else float(c["seat_mm"])
+    ring = G.MOUNT["ring_m"] * 1000.0 if c.get("ring_mm") is None else float(c["ring_mm"])
+    roll = G.MOUNT["roll_deg"] if c.get("roll_deg") is None else float(c["roll_deg"])
+    R_nom = G._rx(-G.MOUNT["roll_deg"]) @ G.R_l7_gripper()
+    T_l7g = np.eye(4)
+    T_l7g[:3, :3] = G._rx(roll) @ R_nom
+    T_l7g[:3, 3] = [(seat + ring) / 1000.0, 0.0, G.MOUNT["axis_z_m"]]
+    T_gg = G.T_gripper_grasp().copy()
+    tc = [float(v) for v in (c.get("tip_corr_mm") or [0.0, 0.0, 0.0])]
+    T_gg[:3, 3] = T_gg[:3, 3] + np.asarray(tc) / 1000.0
+    T_tg = np.linalg.inv(G.T_L7_TCP) @ T_l7g @ T_gg
+    return T_l7g, T_tg, {"seat_mm": round(seat, 2), "ring_mm": round(ring, 2), "roll_deg": round(roll, 2),
+                         "tip_corr_mm": [round(v, 2) for v in tc]}
+
+
+def model_fixed_tip_l7(cfg=None, tip_corr=True):
+    """fixed-jaw fingertip (pad end-face centre) in link7 for the current mount (for the 4-pose touch calibration)"""
+    import NERO_V364_SO101_Gripper as G
+    c = dict(DEFAULT_CFG, **(cfg or {}))
+    if not tip_corr:
+        c["tip_corr_mm"] = [0.0, 0.0, 0.0]
+    T_l7g, _T, _m = real_mount(c)
+    tip = np.array([G.PAD_FIXED_CENTRE[0], 0.0, G.PAD_FIXED_CENTRE[2] - G.PAD_HALF[2]])
+    tip = tip + np.asarray(c.get("tip_corr_mm") or [0, 0, 0], float) / 1000.0
+    return (T_l7g[:3, :3] @ tip + T_l7g[:3, 3]), T_l7g
+
+
+def tip_corr_from_touch(tcp_in_flange_m, cfg=None, max_mm=25.0):
+    """V3.67: the 4-pose touch calibration (Camera tab, done with the FIXED-jaw fingertip) gives the real tip in link7;
+    the difference to the model tip (without correction), in the gripper frame = the fingertip correction"""
+    p_model, T_l7g = model_fixed_tip_l7(cfg, tip_corr=False)
+    d = T_l7g[:3, :3].T @ (np.asarray(tcp_in_flange_m, float) - p_model) * 1000.0
+    if float(np.linalg.norm(d)) > max_mm:
+        return None, [round(float(v), 1) for v in d]
+    return [round(float(v), 2) for v in d], [round(float(v), 1) for v in d]
+
+
+def real_profile(CK, lift_settle_s=0.5, cfg=None):
+    """the simulation's SO-101 profile on the real gripper: short settle (no CONNECT hold), and V3.67 real geometry /
+    safety: measured mount, clearance (default 8 mm), align-rotate-descend, two-stage descent, wide plan search"""
+    c = dict(DEFAULT_CFG, **{k: v for k, v in (cfg or {}).items() if v is not None})
     p = CK.so101_profile()
-    return CK.GripperProfile("so101", p.T_tcp_grasp, p.open_mm, p.label + " · real STS3215",
-                             approach_clearance_m=p.approach_clearance_m, approach_along_wall=p.approach_along_wall,
-                             flips=p.flips, release_gap_max_mm=p.release_gap_max_mm, lift_settle_s=lift_settle_s,
-                             release_tilt_max_deg=p.release_tilt_max_deg)
+    _T_l7g, T_tg, m = real_mount(c)
+    return CK.GripperProfile("so101", T_tg, p.open_mm,
+                             f"SO-101 gripper on a {m['ring_mm']:.0f} mm ring, roll {m['roll_deg']:+.0f} deg · real STS3215",
+                             approach_clearance_m=float(c["clearance_mm"]) / 1000.0,
+                             approach_along_wall=p.approach_along_wall, flips=p.flips,
+                             release_gap_max_mm=p.release_gap_max_mm, lift_settle_s=lift_settle_s,
+                             release_tilt_max_deg=p.release_tilt_max_deg,
+                             align_rotate_m=float(c["align_rotate_mm"]) / 1000.0,
+                             descent_stop_above_rim_m=(None if c.get("descent_stop_mm") in (None, "")
+                                                       else float(c["descent_stop_mm"]) / 1000.0),
+                             wide_search_below_deg=8.0)
 
 
 def time_joint_path(path, vmax_joint_rad, tcp_pts=None, vmax_lin=None, ramp_frac=0.2, ramp_gain=1.5):
@@ -120,7 +178,8 @@ class RealIO:
         self.stop_ev = threading.Event()
         self.motion_allowed = bool(motion_allowed)
         self.home_q = None
-        self.prof = real_profile(CK, float(self.cfg["lift_settle_s"]))
+        self.prof = real_profile(CK, float(self.cfg["lift_settle_s"]), self.cfg)
+        self.T_l7g = real_mount(self.cfg)[0]
         self.motion_log = []
 
     # -- basics
@@ -313,16 +372,34 @@ class RealIO:
                 "gap_mm": st["gap_mm"] if st else None, "hold_active": held, "contact_left": held,
                 "contact_right": held, "force_mode": held, "connected": st is not None}
 
+    def save_snapshot(self, tag, res=None):
+        """V3.67 FAILURE SNAPSHOT of the last camera capture (NERO_CALIB_DIR/real_cup_logs) -> path or None"""
+        import NERO_V366_Real_Cup_Yolo as YC
+        cam = getattr(self, "last_cam", None)
+        if not cam:
+            return None
+        try:
+            path = YC.save_snapshot(cam, res if res is not None else getattr(self, "last_perception", None), tag)
+            self.emit(f"[INFO] [V3.67 REAL CUP] 识别快照已保存：{path}")
+            return path
+        except Exception as exc:
+            self.emit(f"[WARN] [V3.67 REAL CUP] 快照没保存：{exc}")
+            return None
+
     # -- eyes
-    def gripper_boxes(self, z_shift=0.0):
-        """oriented box around the SO-101 + ring (robot self-filter of the cup perception)"""
+    def gripper_boxes(self, z_shift=0.0, tight=False):
+        """oriented box around the SO-101 + ring (robot self-filter of the cup perception); V3.67 tight=True: the
+        jaw outline only (down to the fingertips) for the image occlusion test"""
         import NERO_V364_SO101_Gripper as G
         try:
             T_tcp = self.fast.fk(np.asarray(self.current_q(), float))
         except Exception:
             return []
         T_l7 = T_tcp @ np.linalg.inv(self.CK.T_L7_TCP)
-        Tg = T_l7 @ G.T_l7_gripper()
+        Tg = T_l7 @ self.T_l7g                         # V3.67: the measured mount
+        if tight:
+            c = Tg[:3, :3] @ np.array([0.005, 0.0, -0.045]) + Tg[:3, 3]
+            return [(c, Tg[:3, :3], np.array([0.040, 0.030, 0.060]))]
         c = Tg[:3, :3] @ np.array([0.012, 0.0, -0.05]) + Tg[:3, 3] - np.array([0.0, 0.0, z_shift])
         return [(c, Tg[:3, :3], np.array([0.055, 0.04, 0.075]))]
 
@@ -333,11 +410,14 @@ class RealIO:
         import NERO_V366_Real_Cup_Yolo as YC
         cam = self.camera_fn()
         try:
-            res = YC.perceive_cups_yolo(cam, robot_boxes=self.gripper_boxes())
+            res = YC.perceive_cups_yolo(cam, robot_boxes=self.gripper_boxes(),
+                                        hull_boxes=self.gripper_boxes(tight=True))
         except YC.YoloCupUnavailable as exc:
             self.emit(f"[FAIL] [V3.66 REAL CUP YOLOE] YOLOE 不可用：{exc} → 任务终止（不改用颜色法）")
             raise
-        self.last_perception = res
+        self.last_perception, self.last_cam = res, cam
+        if YC.needs_snapshot(res):                     # V3.67 FAILURE SNAPSHOT
+            self.save_snapshot(tag, res)
         self.emit(f"[V3.66 REAL CUP YOLOE] {tag} | table z {res['table_z_m'] * 1000:+.0f} mm | YOLOE {res['n_2d']} 个 | "
                   + YC.summary(res))
         return res
@@ -362,6 +442,20 @@ def run_plan_preview(io, source, target, knobs=None, skill=None):
     return {"ok": all(r.get("ok") for r in out), "results": out, "skills": sk}
 
 
+def _hover_pregrasp(sk, io, source, W, Q):
+    """V3.67 ALIGN-ROTATE-DESCEND in the hover dry run too (the same CupSkills step as pick_cup): above the cup with
+    the current wrist yaw -> rotate in place to the grasp angle -> down to the pregrasp"""
+    if sk.prof.align_rotate_m <= 0:
+        return io.move_joints(f"V3.65 hover {source}", Q["pregrasp"])
+    try:
+        info = sk._align_rotate(source, W["pregrasp"], Q["pregrasp"])
+    except sk._Abort as e:
+        return {"ok": False, "error": f"{e.reason}: {json.dumps(e.info, ensure_ascii=False)[:200]}"}
+    p = np.asarray(io.tcp_pose()[0], float)
+    return {"ok": True, "tcp_error_mm": round(float(np.linalg.norm(p - W["pregrasp"][0])) * 1000.0, 1),
+            "align": info}
+
+
 def run_hover(io, source, target, knobs=None, skill=None):
     """mode 2: pregrasp hover above the source rim (jaws ~5 cm above the rim, gripper only opens) -> straight up to
     the lift height -> rotate -> above the target (the carry pose, without a cup) -> back to the start posture"""
@@ -380,7 +474,7 @@ def run_hover(io, source, target, knobs=None, skill=None):
         if io.grip is not None:
             io.gripper_open(sk.prof.open_mm)
         for label, fn in (
-                (f"hover above {source} (pregrasp)", lambda: io.move_joints(f"V3.65 hover {source}", Q["pregrasp"])),
+                (f"hover above {source} (pregrasp)", lambda: _hover_pregrasp(sk, io, source, W, Q)),
                 ("dwell", lambda: (io.sleep(float(io.cfg["hover_dwell_s"])), {"ok": True})[1]),
                 ("check", lambda: (io.perceive(f"hover {source}"), {"ok": True})[1]),
                 ("up to the lift height", lambda: io.move_line("V3.65 hover up", W["lift"][0],
@@ -511,7 +605,7 @@ def camera_from_tab(cam_tab, yolo=None, n_frames=None, timeout_s=3.0):
             "calib_note": note, "yolo": yolo}
 
 
-KIND_TEXT = {"cup": ("单杯", "#00e676"), "stack": ("已叠好", "#00e5ff"), "unknown": ("不像杯子", "#ff9100"),
+KIND_TEXT = {"occluded": ("被夹爪挡住", "#b0bec5"), "cup": ("单杯", "#00e676"), "stack": ("已叠好", "#00e5ff"), "unknown": ("不像杯子", "#ff9100"),
              "lifted": ("在夹爪里", "#b0bec5"), "outside": ("围栏外", "#ff5252"), "edge": ("被画面切掉", "#ff9100"),
              "no_depth": ("没有深度", "#ff9100"), "rejected": ("剔除", "#9e9e9e")}
 
@@ -645,6 +739,7 @@ class RealCupTaskTabUI:
         ttk.Button(r1, text="张开 32 mm（预抓取）", command=lambda: self.on_grip("gap", 32.0)).pack(side="left", padx=2)
         ttk.Button(r1, text="夹紧测试", command=lambda: self.on_grip("clamp", None)).pack(side="left", padx=2)
         ttk.Button(r1, text="卸力", command=lambda: self.on_grip("relax", None)).pack(side="left", padx=2)
+        ttk.Button(r1, text="空夹标定（夹爪里不要有东西）", command=lambda: self.on_grip("touch", None)).pack(side="left", padx=2)
         self.v_grip = tk.StringVar(value="夹爪未连接")
         JC.fixed_label(tk, gf, 2, width=640, textvariable=self.v_grip, font=("TkFixedFont", 9), wraplength=630,
                        pack={"fill": "x", "padx": 4})
@@ -666,6 +761,35 @@ class RealCupTaskTabUI:
             ttk.Label(r2, text=t_).pack(side="left")
             ttk.Entry(r2, textvariable=v_, width=w_).pack(side="left")
         ttk.Button(r2, text="重新读取技能", command=self.refresh_skill).pack(side="right")
+
+        # -- V3.67 REAL GRIPPER GEOMETRY + SAFETY
+        gf2 = ttk.LabelFrame(right, text="实机夹爪几何与下探安全（只影响实机；仿真不变）")
+        gf2.pack(fill="x", pady=(6, 0))
+        geo = dict(DEFAULT_CFG, **(self.st.get("geometry") or {}))
+        import NERO_V364_SO101_Gripper as G_
+        self.v_clear = tk.StringVar(value=str(geo["clearance_mm"]))
+        self.v_align = tk.StringVar(value=str(geo["align_rotate_mm"]))
+        self.v_stop = tk.StringVar(value="" if geo.get("descent_stop_mm") in (None, "") else str(geo["descent_stop_mm"]))
+        self.v_seat = tk.StringVar(value=str(geo["seat_mm"] if geo.get("seat_mm") is not None else round(G_.MOUNT["seat_x_m"] * 1000, 1)))
+        self.v_ring = tk.StringVar(value=str(geo["ring_mm"] if geo.get("ring_mm") is not None else round(G_.MOUNT["ring_m"] * 1000, 1)))
+        self.v_roll = tk.StringVar(value=str(geo["roll_deg"] if geo.get("roll_deg") is not None else G_.MOUNT["roll_deg"]))
+        self.tip_corr = [float(v) for v in (geo.get("tip_corr_mm") or [0.0, 0.0, 0.0])]
+        g0 = ttk.Frame(gf2)
+        g0.pack(fill="x", padx=4, pady=2)
+        for t_, v_ in (("固定指离杯壁 mm", self.v_clear), (" 对准高度 mm", self.v_align),
+                       (" 两段下探：指尖停在杯口上方 mm（空 = 不停）", self.v_stop)):
+            ttk.Label(g0, text=t_).pack(side="left")
+            ttk.Entry(g0, textvariable=v_, width=5).pack(side="left")
+        g1 = ttk.Frame(gf2)
+        g1.pack(fill="x", padx=4, pady=2)
+        for t_, v_ in (("安装座面 mm", self.v_seat), (" 转接环 mm", self.v_ring), (" 偏转 °", self.v_roll)):
+            ttk.Label(g1, text=t_).pack(side="left")
+            ttk.Entry(g1, textvariable=v_, width=6).pack(side="left")
+        ttk.Button(g1, text="读取碰点标定（固定指尖）", command=self.on_tip_from_touch).pack(side="left", padx=(8, 2))
+        ttk.Button(g1, text="清除指尖修正", command=self.on_tip_clear).pack(side="left")
+        self.v_geo = tk.StringVar(value="")
+        JC.fixed_label(tk, gf2, 2, width=640, textvariable=self.v_geo, font=("TkFixedFont", 9), wraplength=630,
+                       pack={"fill": "x", "padx": 4})
 
         # -- agent
         af = ttk.LabelFrame(right, text="Agent（与仿真 NERO SimAgent 同一套叠杯子工具契约）")
@@ -743,15 +867,27 @@ class RealCupTaskTabUI:
             self.v_skill.set(f"技能读取失败：{exc}")
             return
         self.knobs, self.skill = knobs, skill
-        p = real_profile(CK)
-        import NERO_V364_SO101_Gripper as G
+        try:
+            geo = self.geometry_cfg() if hasattr(self, "v_clear") else {}
+            geo_err = None
+        except ValueError as exc:
+            geo, geo_err = {}, str(exc)
+        p = real_profile(CK, cfg=geo)
+        _T, _Tg, m = real_mount(geo)
         tq = self.GR.clamp_torque_pct(knobs["cup_clamp_force_n"], self.grip.cfg)
+        if hasattr(self, "v_geo"):
+            self.v_geo.set(geo_err or (
+                f"安装：座面 {m['seat_mm']:.1f} mm + 转接环 {m['ring_mm']:.1f} mm · 偏转 {m['roll_deg']:+.1f}° · 指尖修正 "
+                f"{m['tip_corr_mm']} mm（夹爪坐标系）\n抓取前：先到预抓取点上方 {p.align_rotate_m * 1000:.0f} mm → 原地转腕到抓取角度"
+                f"（两指连线沿杯子半径）→ 竖直降到预抓取点 → 沿杯壁下探"
+                + (f"，指尖到杯口上方 {p.descent_stop_above_rim_m * 1000:.0f} mm 停一下复查杯子" if p.descent_stop_above_rim_m
+                   else "") + f" · 固定指离杯壁 {p.approach_clearance_m * 1000:.0f} mm"))
         self.v_skill.set(
             f"技能 [{skill.get('code')}] {skill.get('short_name')}（{skill.get('source')}）· 捏深 "
             f"{knobs['cup_rim_pinch_depth_mm']:.0f} mm · 预抓取高 {knobs['cup_pregrasp_height_mm']:.0f} mm · 松手间隙 "
             f"{min(knobs['cup_release_gap_mm'], p.release_gap_max_mm or 1e9):.0f} mm · 对中容差 "
             f"{knobs['cup_release_xy_tol_mm']} mm · 夹紧力 {knobs['cup_clamp_force_n']} N（≈ 扭矩 {tq:.0f} %）\n"
-            f"夹爪档案 SO-101：转接环 {G.MOUNT['ring_m'] * 1000:.0f} mm · 偏转 {G.MOUNT['roll_deg']:+.0f}° · "
+            f"夹爪档案 SO-101：转接环 {m['ring_mm']:.0f} mm · 偏转 {m['roll_deg']:+.0f}° · "
             f"固定指在杯外 · 固定指离杯壁 {p.approach_clearance_m * 1000:.1f} mm · 沿杯壁下探 · 松手后外移 8 mm · "
             f"预抓取指尖缝 32 mm（舵机张开 {self.GR.open_deg_for_virtual_mm(p.open_mm):.1f}°）")
 
@@ -939,7 +1075,9 @@ class RealCupTaskTabUI:
         t = (f"张开 {st['open_deg']:+.1f}°（舵机 {st['servo_deg']:.1f}°）· 指尖缝 {st['gap_mm']:.1f} mm · 负载 "
              f"{st['load_pct']:.0f}% · 电流 {st['current_ma']:.0f} mA · {st['voltage_v']:.1f} V · {st['temp_c']} °C · "
              f"扭矩上限 {st['torque_limit_pct']:.0f}%" + (f" · ⚠ {'/'.join(st['errors'])}" if st["errors"] else "")
-             + (" · 夹持中" if self.grip.held else ""))
+             + (" · 夹持中" if self.grip.held else "")
+             + (f" · 碰合角 {self.grip.cfg['touch_deg']:+.2f}°（已空夹标定）" if self.grip.cfg.get("touch_calibrated")
+                else " · 未做空夹标定"))
         self._ui(lambda: self.v_grip.set(t))
 
     def on_grip(self, what, val):
@@ -960,6 +1098,12 @@ class RealCupTaskTabUI:
             elif what == "clamp":
                 pct = float(tq) if tq else self.GR.clamp_torque_pct(knobs["cup_clamp_force_n"], self.grip.cfg)
                 r = self.grip.clamp(pct)
+            elif what == "touch":                     # V3.67 EMPTY-CLAMP CALIBRATION
+                r = self.grip.calibrate_touch()
+                if r.get("ok"):
+                    self.st = dict(self.st, gripper=dict(self.st.get("gripper") or {},
+                                                        touch_deg=self.grip.cfg["touch_deg"], touch_calibrated=True))
+                    save_settings(self.st, self.settings_path)
             else:
                 r = {"ok": bool(self.grip.relax()[0])}
             self._log(f"{'[OK]' if r.get('ok') else '[WARN]'} [V3.65 GRIPPER] {what}: "
@@ -975,7 +1119,12 @@ class RealCupTaskTabUI:
 
     def _collect_settings(self):
         d = dict(self.st)
-        d["gripper"] = {k: self.grip.cfg[k] for k in ("port", "baud", "servo_id", "open_sign")}
+        d["gripper"] = {k: self.grip.cfg[k] for k in ("port", "baud", "servo_id", "open_sign", "touch_deg",
+                                                      "touch_calibrated")}
+        try:
+            d["geometry"] = self.geometry_cfg()                       # V3.67
+        except ValueError:
+            pass
         try:
             d["motion"] = {"joint_vmax_deg_s": float(self.v_jv.get()), "line_vmax_mm_s": float(self.v_lv.get()),
                            "clamp_torque_pct": float(self.v_tq.get()) if self.v_tq.get().strip() else None}
@@ -1014,7 +1163,51 @@ class RealCupTaskTabUI:
             raise ValueError("速度 / 扭矩请填数字")
         if not (1.0 <= jv <= 30.0) or not (5.0 <= lv <= 50.0) or (tq is not None and not (5.0 <= tq <= 80.0)):
             raise ValueError("关节速度 1–30 °/s，直线速度 5–50 mm/s，扭矩 5–80 %")
-        return {"joint_vmax_deg_s": jv, "line_vmax_mm_s": lv, "clamp_torque_pct": tq}
+        return dict({"joint_vmax_deg_s": jv, "line_vmax_mm_s": lv, "clamp_torque_pct": tq}, **self.geometry_cfg())
+
+    def geometry_cfg(self):
+        """V3.67 REAL GRIPPER GEOMETRY + SAFETY from the fields (Tk thread) -> dict, ValueError when out of range"""
+        try:
+            c = {"clearance_mm": float(self.v_clear.get()), "align_rotate_mm": float(self.v_align.get()),
+                 "descent_stop_mm": float(self.v_stop.get()) if self.v_stop.get().strip() else None,
+                 "seat_mm": float(self.v_seat.get()), "ring_mm": float(self.v_ring.get()),
+                 "roll_deg": float(self.v_roll.get()), "tip_corr_mm": list(self.tip_corr)}
+        except ValueError:
+            raise ValueError("夹爪几何 / 安全参数请填数字")
+        if not (2.0 <= c["clearance_mm"] <= 15.0):
+            raise ValueError("固定指离杯壁 2–15 mm")
+        if not (0.0 <= c["align_rotate_mm"] <= 120.0):
+            raise ValueError("对准高度 0–120 mm（0 = 不单独转腕）")
+        if c["descent_stop_mm"] is not None and not (3.0 <= c["descent_stop_mm"] <= 40.0):
+            raise ValueError("两段下探停点 3–40 mm（或留空）")
+        for k_, (lo, hi) in MOUNT_LIMITS.items():
+            if not (lo <= c[k_] <= hi):
+                raise ValueError(f"{k_} 超出 {lo}–{hi}")
+        return c
+
+    def on_tip_from_touch(self):
+        """V3.67: Camera tab 4-pose touch calibration done with the FIXED-jaw fingertip -> fingertip correction"""
+        tc = getattr(self.cam_tab, "tcp_calib", None)
+        p = (tc or {}).get("tcp_in_flange")
+        if not p or len(p) != 3:
+            self._log("[WARN] [V3.67 REAL] 没有碰点标定结果：Camera调试 → TCP 碰点标定，用 SO-101 固定指的指尖去碰同一个点（≥ 4 个姿态）")
+            return
+        try:
+            cfg = self.geometry_cfg()
+        except ValueError as exc:
+            self._log(f"[FAIL] [V3.67 REAL] {exc}")
+            return
+        corr, raw = tip_corr_from_touch(p, cfg)
+        if corr is None:
+            self._log(f"[FAIL] [V3.67 REAL] 碰点结果与模型指尖差 {raw} mm（> 25 mm）：标定时碰的不是固定指尖？或安装参数填错")
+            return
+        self.tip_corr = corr
+        self._log(f"[OK] [V3.67 REAL] 指尖修正（夹爪坐标系）= {corr} mm，来自碰点标定 {[round(v * 1000, 1) for v in p]} mm")
+        self.refresh_skill()
+
+    def on_tip_clear(self):
+        self.tip_corr = [0.0, 0.0, 0.0]
+        self.refresh_skill()
 
     def yolo_cfg(self):
         """V3.66 REAL CUP YOLOE PERCEPTION: the Camera tab's YOLOE settings (Tk thread)"""
@@ -1138,11 +1331,15 @@ class RealCupTaskTabUI:
                         agent.provider = llm["provider"]
                         self.agent = agent
                     out = run_execute(io, source, target, knobs, skill, agent=agent, llm_cfg=llm)
+            failed = None
             for r in out.get("results") or []:
                 if not r.get("ok") and r.get("reason") != "ALREADY_STACKED":
+                    failed = r
                     self._log(f"[FAIL] [V3.65 REAL CUP TASK] {r.get('tool')}: {r.get('reason')} "
                               f"{(r.get('error') or json.dumps(r.get('physical_verification') or {}, ensure_ascii=False))[:300]}")
                     break
+            if not out.get("ok"):                     # V3.67 FAILURE SNAPSHOT
+                io.save_snapshot(f"failed_{(failed or {}).get('tool') or mode}_{(failed or {}).get('reason') or ''}")
             sk = out.get("skills")
             self.skills = sk
             if sk is not None:

@@ -61,6 +61,11 @@ MIN_MARGIN_DEG = 8.0                                         # V3.41 rule: every
 # limit -> 'invalid arm state' emergency restore; MoveIt / cuRobo may use wider joint limits than the MuJoCo model
 # and pick another IK branch of the 7-DoF arm than the one the plan checked)
 PLACE_J7_PREF_DEG = 15.0       # place poses: prefer J7 >= 15 deg from its limit (J7 turns the carried cup)
+ALIGN_MAX_DEG = 90.0           # V3.67 ALIGN-ROTATE-DESCEND: largest in-place wrist rotation above the cup
+ALIGN_MIN_DEG = 5.0            # smaller differences: arrive with the grasp angle directly
+ALIGN_MAX_TCP_DEV_M = 0.05     # the joint-space rotation may move the TCP at most this much
+TIP_BEYOND_GRASP_M = 0.010     # SO-101 pad: fingertip 10 mm beyond the grasp-frame origin along the approach
+PRE_CONTACT_MOVE_MM = 6.0      # V3.67 TWO-STAGE DESCENT: cup estimate moved more than this -> abort before contact
 PATH_MARGIN_DEG = 4.0          # every point of an executed path keeps all joints >= 4 deg inside the MuJoCo limits
 PATH_JUMP_DEG = 5.0            # max joint change between two consecutive path points (more = IK branch flip)
 SMALL_CORRECTION_M = 0.003     # centring errors below this are not corrected (no tiny moves)
@@ -175,7 +180,8 @@ class GripperProfile:
 
     def __init__(self, name, T_tcp_grasp, open_mm, label, approach_clearance_m=0.0, approach_along_wall=False,
                  flips=(False, True), release_gap_max_mm=None, lift_settle_s=0.0,
-                 release_tilt_max_deg=0.0):
+                 release_tilt_max_deg=0.0, align_rotate_m=0.0, descent_stop_above_rim_m=None,
+                 wide_search_below_deg=None):
         self.name, self.T_tcp_grasp, self.open_mm, self.label = name, np.asarray(T_tcp_grasp, float), float(open_mm), label
         # V3.64: a gripper with a FIXED jaw (SO-101) descends with this clearance between the fixed pad and the wall
         # (grasp frame moved along -y); clamping then slides the 10 g cup onto the fixed jaw
@@ -199,6 +205,15 @@ class GripperProfile:
         # V3.64 LOW RELEASE: a cup released only 35 mm above its nested height still nests when it leans a little more
         # (one-side pinch: pad friction keeps a carry lean of 6-9 deg); 0 = the knob rule (2 x cup_release_tilt_tol_deg)
         self.release_tilt_max_deg = float(release_tilt_max_deg)
+        # V3.67 ALIGN-ROTATE-DESCEND (real arm; 0 / None = simulation behaviour, unchanged): arrive this high above the
+        # pregrasp with the wrist yaw the arm already has, rotate in place to the grasp angle (jaw line along the cup
+        # radius), then go straight down to the pregrasp
+        self.align_rotate_m = float(align_rotate_m or 0.0)
+        # V3.67 TWO-STAGE DESCENT: stop when the fingertips are this far above the rim, re-check the cup with the fixed
+        # camera, then continue to the pinch
+        self.descent_stop_above_rim_m = None if descent_stop_above_rim_m is None else float(descent_stop_above_rim_m)
+        # V3.67 PLAN MARGIN: also run the wide rim-angle search when the best chain is below this margin
+        self.wide_search_below_deg = None if wide_search_below_deg is None else float(wide_search_below_deg)
 
         Rg = self.T_tcp_grasp[:3, :3]
         if abs(np.linalg.det(Rg) - 1.0) > 1e-6 or np.abs(Rg.T @ Rg - np.eye(3)).max() > 1e-6:
@@ -524,7 +539,8 @@ def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, lo
     flip = best_g["flip"] if best_g else False
     lift_tcp = best_g["tcp"] + [0, 0, dz_lift] if best_g else None
     # V3.64: also search wide when the best chain would be refused anyway (margin < 4 deg; plans >= 4 deg unchanged)
-    if (best_p is None or best["key"][2] < MIN_MARGIN_RELAXED_DEG) and not _wide:
+    wide_below = max(MIN_MARGIN_RELAXED_DEG, float(getattr(profile, "wide_search_below_deg", None) or 0.0))
+    if (best_p is None or best["key"][2] < wide_below) and not _wide:
         # V3.63: nothing in the usual window -> one wide search (all rim angles), slower but only on failure
         if log:
             log("[INFO] [V3.63 CUP PLAN] no reachable chain within +-45 / +-90 deg of the knob angles -> wide search")
@@ -1409,9 +1425,13 @@ class CupSkills:
                              reason="JOINT_MARGIN_TOO_SMALL", nxt=["stop_and_report"])
         self.plan = dict(plan, source=source_cup, target=target_cup)
         self.stage = "PLANNED"
-        warn = [] if plan["margin_ok"] else [f"min joint margin {plan['min_joint_margin_deg']} deg < 8 deg (V3.41 rule): "
-                                             "the motion may hit a joint limit"]
+        # V3.67 PLAN MARGIN: 4-8 deg is executable (every path is checked point by point before it runs) - say so,
+        # an LLM read the old wording as a reason to stop
+        warn = [] if plan["margin_ok"] else [f"min joint margin {plan['min_joint_margin_deg']} deg (preferred >= 8 deg, "
+                                             f"hard minimum {MIN_MARGIN_RELAXED_DEG:.0f} deg): EXECUTABLE - every trajectory "
+                                             "is checked point by point before it runs; continue with pick_cup"]
         pub = {k: v for k, v in plan.items() if not k.startswith("_")}
+        pub["executable"] = True
         return self._res("plan_cup_stack", True, {"min_joint_margin_deg": plan["min_joint_margin_deg"]},
                          nxt=["pick_cup"], warnings=warn, plan=pub)
 
@@ -1561,9 +1581,20 @@ class CupSkills:
                 self._perceive(f"pick {source_cup}")
             s0 = self._cup(source_cup)
             v["opening_before_mm"] = self.io.gripper_open(self.prof.open_mm)["opening_mm"]
-            # joint goal to the planned (margin-checked) IK branch - not a free pose goal
-            self._go_joints(f"pregrasp {source_cup}", Q["pregrasp"])
+            if self.prof.align_rotate_m > 0:
+                v["align_rotate"] = self._align_rotate(source_cup, W["pregrasp"], Q["pregrasp"])
+            else:
+                # joint goal to the planned (margin-checked) IK branch - not a free pose goal
+                self._go_joints(f"pregrasp {source_cup}", Q["pregrasp"])
             p, R = W["grasp"]
+            if self.prof.descent_stop_above_rim_m is not None:
+                stop = self._descent_stop(source_cup, s0, W)
+                if stop is not None:
+                    v["pre_contact_check"] = stop
+                    if stop.get("abort"):
+                        self._retreat_up()
+                        return self._res(tool, False, v, reason="CUP_MOVED_BEFORE_CONTACT",
+                                         nxt=["observe_scene", "plan_cup_stack"])
             self._go_line(f"grasp {source_cup}", p, R, 0.03, q_hint=Q["grasp"], q_path=self.plan["_qpath"]["grasp"])
             if self.camera:
                 # the cup is still on the table here: its rim centre in the TCP frame = the grasp offset (V3.63)
@@ -1628,6 +1659,97 @@ class CupSkills:
         if s2["tilt_deg"] > float(self.k["cup_release_tilt_tol_deg"]):
             warn.append(f"held cup tilted {s2['tilt_deg']} deg (> {self.k['cup_release_tilt_tol_deg']} deg tolerance)")
         return self._res(tool, True, v, nxt=["place_cup_into"], warnings=warn)
+
+    # ------------------------------------------------------------------ V3.67 ALIGN-ROTATE-DESCEND
+    def _align_rotate(self, cup, wp_pre, q_pre):
+        """arrive above the pregrasp keeping the arm's current wrist yaw, rotate in place to the grasp angle (jaw line
+        along the cup radius), go straight down to the pregrasp.  Falls back to a smaller / no rotation when the
+        rotated pose has no IK solution with margins.  -> dict"""
+        p_pre, R_g = np.asarray(wp_pre[0], float), np.asarray(wp_pre[1], float)
+        p_al = p_pre + np.array([0.0, 0.0, self.prof.align_rotate_m])
+        _p, qx = self.io.tcp_pose()
+        M = quat_xyzw_to_R(qx) @ R_g.T
+        d = math.atan2(M[1, 0] - M[0, 1], M[0, 0] + M[1, 1])            # best rotation about the vertical
+        d = max(-math.radians(ALIGN_MAX_DEG), min(math.radians(ALIGN_MAX_DEG), d))
+        tries = [d, 0.5 * d, 0.0] if abs(math.degrees(d)) >= ALIGN_MIN_DEG else [0.0]
+        q_now = self.io.current_q()
+        chosen = None
+        for dd in tries:
+            c, s_ = math.cos(dd), math.sin(dd)
+            R_al = np.array([[c, -s_, 0.0], [s_, c, 0.0], [0.0, 0.0, 1.0]]) @ R_g
+            q_al = None
+            for seed in (q_pre, q_now):
+                cand = ik_from(seed, p_al, R_al)
+                if cand is not None and min(joint_margins_deg(cand)) >= PATH_MARGIN_DEG:
+                    q_al = cand
+                    break
+            if q_al is None:
+                continue
+            q_rot = q_al if dd == 0.0 else ik_from(q_al, p_al, R_g)
+            if q_rot is None:
+                continue
+            n = 12
+            path = [list(np.asarray(q_al) + (np.asarray(q_rot) - np.asarray(q_al)) * i / n) for i in range(n + 1)]
+            chk = check_joint_path(path, jump_deg=12.0)
+            dev = max(float(np.linalg.norm(self._arm().fk(np.asarray(q, float))[:3, 3] - p_al)) for q in path)
+            if chk["ok"] and dev <= ALIGN_MAX_TCP_DEV_M:
+                chosen = (dd, q_al, q_rot, dev)
+                break
+        if chosen is None:
+            self.io.emit(f"[WARN] [V3.67 CUP] align above {cup}: no IK with margins for the rotated arrival -> straight to "
+                         "the pregrasp")
+            self._go_joints(f"pregrasp {cup}", q_pre)
+            return {"rotated_deg": 0.0, "fallback": True}
+        dd, q_al, q_rot, dev = chosen
+        self._go_joints(f"align above {cup}", q_al)
+        if dd != 0.0:
+            self.io.emit(f"[INFO] [V3.67 CUP] rotate in place to the grasp angle: {math.degrees(dd):+.0f} deg about the "
+                         f"vertical (TCP stays within {dev * 1000:.0f} mm)")
+            self._go_joints(f"rotate to the grasp angle above {cup}", q_rot, slow=2.0)
+        self._go_line(f"down to the pregrasp above {cup}", p_pre, R_g, 0.03, q_hint=q_pre)
+        return {"rotated_deg": round(math.degrees(dd), 1), "align_height_mm": round(self.prof.align_rotate_m * 1000)}
+
+    def _tip_z(self, tcp, R):
+        """lowest fingertip height for a TCP pose: grasp-frame origin + 10 mm along the approach axis"""
+        Tg = self.prof.T_tcp_grasp
+        Rg = np.asarray(R, float) @ Tg[:3, :3]
+        return float((np.asarray(tcp, float) + np.asarray(R, float) @ Tg[:3, 3] + Rg[:, 2] * TIP_BEYOND_GRASP_M)[2])
+
+    def _descent_stop(self, cup, s0, W):
+        """V3.67 TWO-STAGE DESCENT: stop with the fingertips descent_stop_above_rim_m above the rim, re-check the cup
+        (fixed camera): unchanged -> continue; moved -> abort before any contact.  -> dict or None"""
+        p_pre, R = np.asarray(W["pregrasp"][0], float), np.asarray(W["pregrasp"][1], float)
+        p_g = np.asarray(W["grasp"][0], float)
+        z_pre, z_g = self._tip_z(p_pre, R), self._tip_z(p_g, R)
+        z_stop = float(np.asarray(s0["rim"], float)[2]) + self.prof.descent_stop_above_rim_m
+        if not (z_g < z_stop < z_pre):
+            return None
+        f = (z_stop - z_g) / (z_pre - z_g)
+        p_stop = p_g + f * (p_pre - p_g)
+        self._go_line(f"stop above the rim of {cup}", p_stop, R, 0.03)
+        out = {"tips_above_rim_mm": round(self.prof.descent_stop_above_rim_m * 1000)}
+        if not self.camera:
+            return out
+        self._perceive(f"check {cup} before contact")
+        s_ = self.cam.get(cup)
+        base = None if (not s_ or s_.get("stale")) else np.asarray(s_["base"][:2], float)
+        if base is None:
+            # partly hidden by the gripper: a camera that reports the cup's position only (kind "occluded") still counts
+            near = [np.asarray(c["base_xyz_m"][:2], float) for c in (getattr(self, "cam_raw", None) or {}).get("cups", [])
+                    if c.get("kind") == "occluded" and c.get("base_xyz_m")
+                    and np.linalg.norm(np.asarray(c["base_xyz_m"][:2]) - np.asarray(s0["base"][:2])) < 0.03]
+            if not near:
+                out["check"] = "cup hidden by the gripper in the fixed camera view - not checked"
+                return out
+            base = near[0]
+            out["check"] = "cup partly hidden by the gripper: position from the lower wall"
+        off = float(np.linalg.norm(base - np.asarray(s0["base"][:2]))) * 1000.0
+        out["cup_offset_mm"] = round(off, 1)
+        if off > PRE_CONTACT_MOVE_MM:
+            out["abort"] = True
+            self.io.emit(f"[WARN] [V3.67 CUP] {cup} is {off:.1f} mm away from where the grasp was planned -> no descent "
+                         "(re-observe and re-plan)")
+        return out
 
     def _retreat_up(self, dz=0.08):
         try:
@@ -1857,6 +1979,8 @@ Rules:
    (physical_verification.latch_recovered) and a held cup stays in the gripper. If latch_recovered=true and the
    recommended actions contain the same tool: call observe_scene, then that tool ONCE more (it re-plans from the current
    posture). A second SAFETY_STOP of the same tool or latch_recovered=false: stop and report.
+6c. plan_cup_stack ok=true is executable (executable=true): a joint-margin warning there is informational - continue
+   with pick_cup.
 7. Keep the final message short and factual (which cup into which, verified or not, the reason of any failure).
 """
 

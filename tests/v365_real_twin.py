@@ -39,7 +39,7 @@ class TwinArm:
                 assert lo - 1e-9 <= v <= hi + 1e-9, (label, "joint limit")
         fa = getattr(self, "_fa", None) or CK.FastArm()
         self._fa = fa
-        self.calls.append({"label": label, "n": len(path), "T": times[-1],
+        self.calls.append({"label": label, "n": len(path), "T": times[-1], "q_end": [float(v) for v in path[-1]],
                            "min_z": min(float(fa.fk(__import__("numpy").asarray(p, float))[2, 3]) for p in path),
                            "max_step_deg": max(max(abs(math.degrees(a - b)) for a, b in zip(p, q))
                                                for p, q in zip(path[1:], path[:-1]))})

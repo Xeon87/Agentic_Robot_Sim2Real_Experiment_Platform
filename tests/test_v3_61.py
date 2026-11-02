@@ -69,10 +69,10 @@ HAVE_MJ = CUP.mujoco_available()
 # ------------------------------------------------------------------ M1
 V362 = ST.VERSION >= "V3.62"           # V3.62 intentionally changed: backend A2 block, cup origin, cup knobs (CHANGELOG)
 for m in (CON, RR, YP, W49, ST):
-    assert m.VERSION in ("V3.61", "V3.62", "V3.63", "V3.64", "V3.65", "V3.66"), (m.__name__, m.VERSION)
+    assert m.VERSION in ("V3.61", "V3.62", "V3.63", "V3.64", "V3.65", "V3.66", "V3.67"), (m.__name__, m.VERSION)
 assert CUP.VERSION == "V3.61"
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.61", "V3.62", "V3.63", "V3.64", "V3.65", "V3.66")
-assert SC.VERSION == "V3.44" and SC.SCENES_REV in ("V3.61", "V3.62", "V3.63", "V3.64", "V3.65", "V3.66")
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.61", "V3.62", "V3.63", "V3.64", "V3.65", "V3.66", "V3.67")
+assert SC.VERSION == "V3.44" and SC.SCENES_REV in ("V3.61", "V3.62", "V3.63", "V3.64", "V3.65", "V3.66", "V3.67")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 assert H((ROOT / "NERO_V326_Wrist_Camera.py").read_bytes()) == "6b5c5d683073e4252b82c1c703ad664173960a179947f9e72775bb9683697d0a"
 FROZEN_V360 = {"NERO_V2_7_1_Unified_Backend.py": "ffbd630d70edf57a49929363134ceaae3b95fe4675e0887509d3dc5d7b08f1ed",

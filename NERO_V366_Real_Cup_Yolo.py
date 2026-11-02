@@ -28,8 +28,9 @@ import math
 import os
 import sys
 
-VERSION = "V3.66"
+VERSION = "V3.67"
 MARKER = "V3.66 REAL CUP YOLOE PERCEPTION"
+MARKER_V367 = "V3.67 PERCEPTION ROBUSTNESS"
 HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
@@ -42,6 +43,13 @@ LIFT_M = 0.025                  # lowest mask points (1st percentile) this far a
 TOL_LOW_MM = 18.0               # single cup: silhouette height >= H_top - 18 mm
 TOL_HIGH_MM = 18.0              # nested pair: <= H_top + nested + 18 mm
 MIN_PTS = 80
+# V3.67 PERCEPTION ROBUSTNESS
+OCCL_TOP_FRAC = 0.30            # >= this share of the mask's top-edge columns border the gripper -> top hidden
+OCCL_PAD_PX = 10
+TILT_SPLIT_MAX_DEG = 4.0        # two half-sample tilt fits must agree within this, else the tilt is not trusted
+TILT_RMS_MAX_M = 0.005
+TILT_MIN_BAND_PTS = 150
+SNAP_KEEP = 40                  # failure snapshots kept in NERO_CALIB_DIR/real_cup_logs
 
 
 class YoloCupUnavailable(RuntimeError):
@@ -160,13 +168,77 @@ def _contour(mask, eps_px=2.0, max_pts=80):
     return [[int(u), int(v)] for u, v in c]
 
 
-def cup_from_mask(mask, depth, K, T, z0, g, ndz_m, robot_boxes=None, fence_poly=None):
+def gripper_hull_mask(robot_boxes, K, T_base_cam, shape, pad_px=OCCL_PAD_PX):
+    """V3.67 PERCEPTION ROBUSTNESS: image region covered by the gripper boxes (projected corners, convex hull, padded)"""
+    if not robot_boxes:
+        return None
+    YP = _yp()
+    cv2 = YP._cv2()
+    Tcb = np.linalg.inv(np.asarray(T_base_cam, float))
+    m = np.zeros(shape[:2], np.uint8)
+    for c, R, half in robot_boxes:
+        cs = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)], float) * np.asarray(half)
+        P = cs @ np.asarray(R, float).T + np.asarray(c, float)
+        pc = P @ Tcb[:3, :3].T + Tcb[:3, 3]
+        if np.any(pc[:, 2] <= 0.05):
+            continue
+        u, v = _proj(Tcb, K, P)
+        hull = cv2.convexHull(np.stack([u, v], axis=1).astype(np.float32)).astype(np.int32)
+        cv2.fillConvexPoly(m, hull, 1)
+    if not m.any():
+        return None
+    if pad_px:
+        m = cv2.dilate(m, np.ones((2 * pad_px + 1, 2 * pad_px + 1), np.uint8))
+    return m.astype(bool)
+
+
+def _tilt(wall, z0, cam_xy, g, top_d):
+    """tilt from a low and a high band (NERO_V363); V3.67: also from two half samples -> (tilt, reliable, why)"""
+    import NERO_V363_Cup_Perception as CP
+    zl, zh = z0 + 0.015, z0 + min(top_d, g["h"]) - 0.020
+
+    def one(W):
+        bl, bh = W[W[:, 2] < zl + 0.025], W[W[:, 2] > zh - 0.025]
+        if len(bl) <= 40 or len(bh) <= 40 or zh - zl <= 0.05:
+            return None, 0, 1e9
+        cl, rl = CP.fit_axis(bl, z0, cam_xy, g)
+        ch, rh = CP.fit_axis(bh, z0, cam_xy, g)
+        t = math.degrees(math.atan2(float(np.linalg.norm(np.asarray(ch) - np.asarray(cl))),
+                                    float(np.mean(bh[:, 2]) - np.mean(bl[:, 2]))))
+        return t, min(len(bl), len(bh)), max(rl, rh)
+    t, n, rms = one(wall)
+    if t is None:
+        return 0.0, False, "上下两段杯壁点太少"
+    ta, _na, _ra = one(wall[0::2])
+    tb, _nb, _rb = one(wall[1::2])
+    if n < TILT_MIN_BAND_PTS:
+        return t, False, f"杯壁点太少（{n}）"
+    if rms > TILT_RMS_MAX_M:
+        return t, False, f"拟合残差 {rms * 1000:.1f} mm"
+    if ta is None or tb is None or abs(ta - tb) > TILT_SPLIT_MAX_DEG:
+        return t, False, f"两半样本结果不一致（{ta if ta is None else round(ta, 1)}° / {tb if tb is None else round(tb, 1)}°）"
+    return t, True, None
+
+
+def cup_from_mask(mask, depth, K, T, z0, g, ndz_m, robot_boxes=None, fence_poly=None, hull=None):
     """cup geometry of one YOLOE instance mask -> dict (kind, base / rim, heights, tilt, reason)"""
     import NERO_V363_Cup_Perception as CP
     YP = _yp()
     cv2 = YP._cv2()
     T = np.asarray(T, float)
     out = {"kind": "unknown", "reason": None, "warnings": []}
+    occ, top_hidden = 0.0, 0.0
+    mask_full = mask
+    if hull is not None and mask.any():
+        occ = float((mask & hull).sum()) / float(mask.sum())
+        cols = np.flatnonzero(mask.any(axis=0))
+        tops = np.argmax(mask[:, cols], axis=0)
+        # the silhouette top is hidden when the gripper borders it (the mask stops where the jaw starts)
+        hid = [bool(hull[max(0, t - 6):t + 1, c].any()) for t, c in zip(tops, cols)]
+        top_hidden = float(np.mean(hid)) if hid else 0.0
+        out["occluded_frac"], out["top_hidden_frac"] = round(occ, 2), round(top_hidden, 2)
+        if occ > 0:
+            mask = mask & ~hull                    # V3.67: no gripper pixels in the cup's points
     er = cv2.erode(mask.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)   # no edge / flying pixels
     if er.sum() < MIN_PTS:
         er = mask
@@ -191,22 +263,30 @@ def cup_from_mask(mask, depth, K, T, z0, g, ndz_m, robot_boxes=None, fence_poly=
     if len(wall) < MIN_PTS:
         wall = P
     cam_xy = T[:2, 3]
+    if top_hidden >= OCCL_TOP_FRAC:                # gripper at the top of the cup: low wall points only
+        low = wall[wall[:, 2] < z0 + g["h"] - 0.030]
+        wall = low if len(low) >= MIN_PTS else wall
     c, rms = CP.fit_axis(wall, z0, cam_xy, g)
     c = np.asarray(c, float)
     out["fit_rms_mm"] = round(rms * 1000.0, 2)
     if rms > 0.008:
         out["warnings"].append(f"锥面拟合残差 {rms * 1000:.1f} mm")
-    # tilt: separate fits of a low and a high band (as NERO_V363)
-    tilt = 0.0
     top_d = float(np.percentile(P[:, 2], 98)) - z0
-    zl, zh = z0 + 0.015, z0 + min(top_d, g["h"]) - 0.020
-    bl, bh = wall[wall[:, 2] < zl + 0.025], wall[wall[:, 2] > zh - 0.025]
-    if len(bl) > 40 and len(bh) > 40 and zh - zl > 0.05:
-        cl, _ = CP.fit_axis(bl, z0, cam_xy, g)
-        ch, _ = CP.fit_axis(bh, z0, cam_xy, g)
-        tilt = math.degrees(math.atan2(float(np.linalg.norm(np.asarray(ch) - np.asarray(cl))),
-                                       float(np.mean(bh[:, 2]) - np.mean(bl[:, 2]))))
-    v_obs, v_min = mask_top_v(mask)
+    base = [round(float(c[0]), 4), round(float(c[1]), 4), round(float(z0), 4)]
+    if top_hidden >= OCCL_TOP_FRAC:
+        # V3.67: the top / silhouette are hidden by the gripper -> position only, not a cup the skill may re-classify
+        out.update(kind="occluded", reason=f"杯口被夹爪挡住（只给位置）", base_xyz_m=base,
+                   rim_xyz_m=[base[0], base[1], round(float(z0 + g["h"]), 4)], height_mm=None,
+                   height_depth_mm=round(top_d * 1000.0, 1), tilt_deg=0.0, tilt_reliable=False)
+        return out
+    # tilt: separate fits of a low and a high band (as NERO_V363); V3.67: only when it is reliable
+    tilt, t_ok, t_why = _tilt(wall, z0, cam_xy, g, top_d)
+    out["tilt_measured_deg"] = round(tilt, 1)
+    out["tilt_reliable"] = bool(t_ok)
+    if not t_ok:
+        out["warnings"].append(f"倾斜测不准（{t_why}；测得 {tilt:.1f}°）→ 按直立处理")
+        tilt = 0.0
+    v_obs, v_min = mask_top_v(mask_full)
     h_sil = silhouette_height(c, z0, K, T, v_obs, g) if v_obs is not None else None
     h_mm = None if h_sil is None else h_sil * 1000.0
     kind = classify(h_mm, g, ndz_m)
@@ -227,7 +307,7 @@ def cup_from_mask(mask, depth, K, T, z0, g, ndz_m, robot_boxes=None, fence_poly=
 
 
 # ================================================================================ main entry
-def perceive_cups_yolo(cam, robot_boxes=None, cup=None, nested_dz=None):
+def perceive_cups_yolo(cam, robot_boxes=None, cup=None, nested_dz=None, hull_boxes=None):
     """cam = {"rgb", "depths": [depth frames (m)], "K", "T_base_cam", "z_table", "fence_poly", "calib_note",
     "yolo": yolo_cfg_from_tab(...)} -> {"cups": [...], "dets": [...], "table_z_m", "diag", "yolo": text}"""
     YP = _yp()
@@ -253,6 +333,8 @@ def perceive_cups_yolo(cam, robot_boxes=None, cup=None, nested_dz=None):
     res, diag = YP.locate_objects(d2, depth, K, T, table_z=zt, fence_poly=fence, calib_note=cam.get("calib_note"))
     g = SC.cup_geometry(cup)
     ndz = float(g["nested_dz"] if nested_dz is None else nested_dz)
+    # V3.67 PERCEPTION ROBUSTNESS: image region of the gripper (tight boxes when given, else the filter boxes)
+    hull = gripper_hull_mask(hull_boxes if hull_boxes is not None else robot_boxes, K, T, rgb.shape)
     items = []
     for d in d2:
         if d.get("cls", 0) != 0:
@@ -266,7 +348,7 @@ def perceive_cups_yolo(cam, robot_boxes=None, cup=None, nested_dz=None):
         if z0 is None:
             z0 = float(zt or 0.0)
         it["z0"] = float(z0)
-        it["cup"] = (cup_from_mask(it["d"]["mask"], depth, K, T, it["z0"], g, ndz, robot_boxes, fence)
+        it["cup"] = (cup_from_mask(it["d"]["mask"], depth, K, T, it["z0"], g, ndz, robot_boxes, fence, hull)
                      if r["status"] != "rejected" else {"kind": "rejected", "reason": "；".join(r["reasons"])})
     # merge masks of the same cup / nested pair
     groups = []
@@ -286,7 +368,7 @@ def perceive_cups_yolo(cam, robot_boxes=None, cup=None, nested_dz=None):
         c = best["cup"]
         if len(gr) > 1:
             mask = np.logical_or.reduce([it_["d"]["mask"] for it_ in gr])
-            c = cup_from_mask(mask, depth, K, T, best["z0"], g, ndz, robot_boxes, fence)
+            c = cup_from_mask(mask, depth, K, T, best["z0"], g, ndz, robot_boxes, fence, hull)
             c["warnings"] = list(c.get("warnings") or []) + [f"{len(gr)} 个 YOLOE 框合并为一个"]
         r = best["r"]
         e = dict(c, conf=round(float(best["d"]["conf"]), 3), name=best["d"].get("name"),
@@ -301,9 +383,55 @@ def perceive_cups_yolo(cam, robot_boxes=None, cup=None, nested_dz=None):
     for i, e in enumerate(dets):
         e["det_id"] = f"#{i + 1}"
     gz = diag.get("ground_z_m")
-    return {"cups": cups, "dets": dets, "table_z_m": round(float(gz if gz is not None else (zt or 0.0)), 4),
+    return {"hull": hull, "cups": cups, "dets": dets, "table_z_m": round(float(gz if gz is not None else (zt or 0.0)), 4),
             "n_2d": len(d2), "diag": diag, "yolo": describe_cfg(ycfg),
             "device": (getattr(det, "info", {}) or {}).get("device")}
+
+
+def needs_snapshot(res):
+    """V3.67: a perception worth keeping for offline analysis (something was not understood)"""
+    for e in (res or {}).get("dets") or []:
+        if e.get("kind") in ("unknown", "edge", "no_depth") or any("倾斜测不准" in w for w in e.get("warnings") or []):
+            return True
+    return not (res or {}).get("dets")
+
+
+def save_snapshot(cam, res, tag, folder=None, keep=SNAP_KEEP):
+    """V3.67 FAILURE SNAPSHOT: colour (png), depth (uint16 mm png), YOLOE masks (npz), result + camera (json) into
+    NERO_CALIB_DIR/real_cup_logs/<time>_<tag>/ (never into the release folder); keeps the newest `keep` -> path"""
+    import json
+    import shutil
+    import time as _t
+    YP = _yp()
+    cv2 = YP._cv2()
+    root = folder or os.path.join(os.environ.get("NERO_CALIB_DIR") or os.path.expanduser("~/Downloads/cameracalib"),
+                                  "real_cup_logs")
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(tag))[:40]
+    d = os.path.join(root, f"{_t.strftime('%Y%m%d_%H%M%S')}_{int(_t.time() * 1000) % 1000:03d}_{safe}")
+    os.makedirs(d, exist_ok=True)
+    rgb = np.asarray(cam.get("rgb")) if cam and cam.get("rgb") is not None else None
+    if rgb is not None:
+        cv2.imwrite(os.path.join(d, "color.png"), np.ascontiguousarray(rgb[..., ::-1]))
+    deps = (cam or {}).get("depths") or []
+    if deps:
+        dm = np.clip(np.asarray(deps[-1], float) * 1000.0, 0, 65535).astype(np.uint16)
+        cv2.imwrite(os.path.join(d, "depth_mm.png"), dm)
+    masks = [e for e in (res or {}).get("dets") or [] if e.get("contour")]
+    meta = {"tag": tag, "time": _t.strftime("%Y-%m-%d %H:%M:%S"), "K": (cam or {}).get("K"),
+            "T_base_cam": np.asarray((cam or {}).get("T_base_cam")).tolist() if cam and cam.get("T_base_cam") is not None else None,
+            "z_table": (cam or {}).get("z_table"), "fence_poly": (cam or {}).get("fence_poly"),
+            "summary": summary(res) if res else None,
+            "dets": [{k: v for k, v in e.items() if k != "contour"} | {"contour": e.get("contour")} for e in masks],
+            "table_z_m": (res or {}).get("table_z_m")}
+    with open(os.path.join(d, "result.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=1, default=str)
+    try:
+        subs = sorted(x for x in os.listdir(root) if os.path.isdir(os.path.join(root, x)))
+        for x in subs[:-keep] if len(subs) > keep else []:
+            shutil.rmtree(os.path.join(root, x), ignore_errors=True)
+    except OSError:
+        pass
+    return d
 
 
 def summary(res):

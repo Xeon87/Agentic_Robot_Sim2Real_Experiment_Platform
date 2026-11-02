@@ -25,7 +25,7 @@ import os
 import threading
 import time
 
-VERSION = "V3.65"
+VERSION = "V3.67"
 MARKER = "V3.65 REAL SO-101 GRIPPER"
 
 # ------------------------------------------------------------------------------------------------ registers (STS3215)
@@ -58,6 +58,12 @@ DEFAULTS = {
     "acc": 30,
     "squeeze_deg": 8.0,               # clamp goal: this far past "closed" (the wall stops the jaw before)
     "min_held_gap_mm": 0.8,           # stopped with a tip gap >= this = something is held
+    # V3.67 EMPTY-CLAMP CALIBRATION: servo angle (deg from closed_steps, opening positive) where the real tips / pads
+    # actually touch (an empty clamp stalls there; first real test: +1.85 deg = 2.4 mm "gap" read as held).  All jaw angles
+    # a are counted from this touch point once it is calibrated.
+    "touch_deg": 0.0,
+    "touch_calibrated": False,
+    "min_held_gap_cal_mm": 0.3,       # held threshold once the touch point is calibrated (party-cup wall ~0.5 mm)
     "stall_torque_nm": 1.91,          # STS3215 19 kg.cm @ 7.4 V
     "min_clamp_pct": 15.0, "max_clamp_pct": 60.0,
 }
@@ -345,10 +351,15 @@ class SO101RealGripper:
 
     # -- conversions
     def steps_for_deg(self, a):
-        return int(round(self.cfg["closed_steps"] + self.cfg["open_sign"] * float(a) * STEPS_PER_REV / 360.0))
+        a_servo = float(a) + float(self.cfg.get("touch_deg") or 0.0)          # V3.67: a counted from the touch point
+        return int(round(self.cfg["closed_steps"] + self.cfg["open_sign"] * a_servo * STEPS_PER_REV / 360.0))
 
     def deg_for_steps(self, steps):
-        return self.cfg["open_sign"] * (float(steps) - self.cfg["closed_steps"]) * 360.0 / STEPS_PER_REV
+        return (self.cfg["open_sign"] * (float(steps) - self.cfg["closed_steps"]) * 360.0 / STEPS_PER_REV
+                - float(self.cfg.get("touch_deg") or 0.0))
+
+    def held_threshold_mm(self):
+        return float(self.cfg["min_held_gap_cal_mm"] if self.cfg.get("touch_calibrated") else self.cfg["min_held_gap_mm"])
 
     # -- connection
     def connect(self, port=None, baud=None, servo_id=None, sim_servo=None):
@@ -461,12 +472,43 @@ class SO101RealGripper:
             return {"ok": False, "held": False, "error": "no telemetry"}
         time.sleep(0.15)
         st = self.status() or st
-        held = bool(st["gap_mm"] >= float(self.cfg["min_held_gap_mm"]))
+        held = bool(how != "reached" and st["gap_mm"] >= self.held_threshold_mm())
         self.held = held
         self.last_clamp = {"ok": True, "held": held, "how": how, "open_deg": st["open_deg"], "gap_mm": st["gap_mm"],
                            "load_pct": st["load_pct"], "current_ma": st["current_ma"], "torque_limit_pct": torque_pct,
                            "errors": st["errors"]}
         return dict(self.last_clamp)
+
+    def calibrate_touch(self, torque_pct=20.0, timeout_s=4.0):
+        """V3.67 EMPTY-CLAMP CALIBRATION: with NOTHING between the jaws, clamp and record where the tips stall
+        (= the real "closed" angle); the jaw then reopens to 10 deg.  -> dict(ok, touch_deg, ...)"""
+        old = float(self.cfg.get("touch_deg") or 0.0)
+        r0 = self.open_deg(10.0)
+        if not r0.get("ok"):
+            return {"ok": False, "error": f"先张开 10° 失败：{r0.get('error') or r0.get('how')}"}
+        self.set_torque_limit(torque_pct)
+        sq = float(self.cfg["squeeze_deg"])
+        ok, msg = self._goto(-sq, speed=min(self.cfg["speed_steps"], 300))
+        if not ok:
+            return {"ok": False, "error": f"写目标失败：{msg}"}
+        st, how = self._wait(-sq, timeout_s, tol_deg=0.3, stall_s=0.35)
+        time.sleep(0.15)
+        st = self.status() or st
+        if st is None:
+            return {"ok": False, "error": "no telemetry"}
+        new = old + float(st["open_deg"])
+        res = {"how": how, "touch_deg": round(new, 2), "previous_touch_deg": round(old, 2),
+               "load_pct": st["load_pct"], "current_ma": st["current_ma"]}
+        if how == "reached":
+            res.update(ok=False, error=f"夹爪一直合到了 {-sq:.0f}°（没有停住）：指尖没碰到？检查指垫，或加大扭矩")
+        elif not (-4.0 <= new <= 6.0):
+            res.update(ok=False, error=f"停在 {new:+.2f}°，超出合理范围 −4…+6°：夹爪里有东西？先拿走再标定")
+        else:
+            self.cfg["touch_deg"], self.cfg["touch_calibrated"] = round(new, 2), True
+            res["ok"] = True
+        self.held = False
+        self.open_deg(10.0)
+        return res
 
     def relax(self):
         """torque off (manual handling); the jaw may open under the cup's elasticity"""
