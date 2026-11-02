@@ -30,7 +30,7 @@ import sys
 import threading
 import time
 
-VERSION = "V3.64"
+VERSION = "V3.65"
 # V3.54 FIRMWARE V1.2.1 (NeroFW.V121) + FOLLOWER MODE TEACH EXIT + STEP 3 PUSH RECOVERY
 DEFAULT_FW_VERSION = "v121"
 SUPPORTED_FW_VERSIONS = ("v121", "v120", "v112", "v111", "default")
@@ -1359,6 +1359,106 @@ def cmd_monitor(period_s=1.0):
             gh.get_result_async().add_done_callback(on_result)
         cli.send_goal_async(goal, feedback_callback=on_fb).add_done_callback(on_goal)
 
+    def do_path(mv):
+        """V3.65 JOINT PATH EXECUTION: execute a joint path computed by the console (cup skills: straight Cartesian
+        segments as strict-continuity IK points, joint moves as linear joint interpolation) through MoveIt's
+        /execute_trajectory - no OMPL re-planning, so the arm follows exactly the path that was checked.  The path
+        is fence-checked here like a planned MoveIt path (do_move) before anything is sent."""
+        mid = mv.get("id")
+        if st["move"] and st["move"].get("phase") not in ("done",):
+            _emit(event="move_result", id=mid, ok=False, error="another motion is in progress")
+            return
+        try:
+            from rclpy.action import ActionClient
+            from moveit_msgs.action import ExecuteTrajectory
+            from moveit_msgs.msg import RobotTrajectory
+            from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+            from builtin_interfaces.msg import Duration
+        except Exception as exc:
+            _emit(event="move_result", id=mid, ok=False, error=f"joint path: ROS messages unavailable: {exc}"[:300])
+            return
+        names = [str(n) for n in mv["joints"]]
+        pts = [[float(v) for v in p] for p in mv["path"]]
+        ts = [float(t) for t in mv["times"]]
+        if len(pts) < 2 or len(ts) != len(pts) or any(len(p) != len(names) for p in pts) or \
+                any(b <= a for a, b in zip(ts, ts[1:])) or ts[0] != 0.0:
+            _emit(event="move_result", id=mid, ok=False, error="joint path: malformed path / times (not sent)")
+            return
+        st["move"] = {"id": mid, "phase": "sending", "t0": time.time()}
+        info = {"joint_path": True, "n_points": len(pts), "trajectory_s": round(ts[-1], 2), "planning_time": 0.0}
+
+        def finish(**kw):
+            _emit(event="move_result", id=mid, elapsed_s=round(time.time() - st["move"]["t0"], 2), **kw)
+            st["move"]["phase"] = "done"
+            st["goal"] = None
+
+        fence = mv.get("fence")
+        if fence:
+            try:
+                import NERO_V315_Consistency_Safety as CS
+                urdf = st.get("urdf_parsed")
+                if urdf is None:
+                    finish(ok=False, error="FENCE: robot URDF not available -> path not checked, not executed", **info)
+                    return
+                viol = CS.path_fence_check(urdf, mv.get("arm_joints") or names, names, pts,
+                                           mv.get("base") or "base_link", fence, mv.get("tool_T"))
+            except Exception as exc:
+                finish(ok=False, error=f"FENCE: check failed ({exc}) -> not executed"[:300], **info)
+                return
+            info["fence_checked"] = True
+            if viol:
+                finish(ok=False, error_code=0, fence_violation=viol,
+                       error=f"FENCE: 关节路径第 {viol['waypoint'] + 1}/{viol['of']} 点越界 -> 未执行: "
+                             + CS.violation_text(viol["violations"]), **info)
+                return
+        tj = JointTrajectory()
+        tj.joint_names = names
+        n = len(pts)
+        for i, (p, t) in enumerate(zip(pts, ts)):
+            pt = JointTrajectoryPoint()
+            pt.positions = list(p)
+            if i == 0 or i == n - 1:
+                pt.velocities = [0.0] * len(names)
+            else:                                                       # central difference
+                dt = ts[i + 1] - ts[i - 1]
+                pt.velocities = [(b - a) / dt for a, b in zip(pts[i - 1], pts[i + 1])]
+            pt.time_from_start = Duration(sec=int(t), nanosec=int(round((t - int(t)) * 1e9)) % 1000000000)
+            tj.points.append(pt)
+        rt = RobotTrajectory()
+        rt.joint_trajectory = tj
+        if st.get("exec") is None:
+            st["exec"] = ActionClient(node, ExecuteTrajectory, "/execute_trajectory")
+        if not st["exec"].wait_for_server(timeout_sec=2.0):
+            finish(ok=False, error="/execute_trajectory action not available (move_group capability missing?)", **info)
+            return
+        eg = ExecuteTrajectory.Goal()
+        eg.trajectory = rt
+        st["move"]["phase"] = "执行关节路径"
+        _emit(event="move_feedback", id=mid, phase="执行关节路径")
+
+        def on_exec_result(fut):
+            try:
+                wr = fut.result()
+                code = int(wr.result.error_code.val)
+                finish(ok=(code == 1), error_code=code, error=None if code == 1 else JC.moveit_error_text(code),
+                       status=int(getattr(wr, "status", 0)), **info)
+            except Exception as exc:
+                finish(ok=False, error=f"execute result error: {exc}"[:300], **info)
+
+        def on_exec_goal(f2):
+            try:
+                gh2 = f2.result()
+            except Exception as exc:
+                finish(ok=False, error=f"execute send failed: {exc}"[:300], **info)
+                return
+            if not gh2.accepted:
+                finish(ok=False, error="joint path rejected by move_group", **info)
+                return
+            st["goal"] = gh2
+            _emit(event="move_accepted", id=mid, action="/execute_trajectory")
+            gh2.get_result_async().add_done_callback(on_exec_result)
+        st["exec"].send_goal_async(eg).add_done_callback(on_exec_goal)
+
     def _svc(stype_mod, stype_name, name, fill, timeout=5.0):
         mod = __import__(stype_mod, fromlist=[stype_name])
         T = getattr(mod, stype_name)
@@ -1561,6 +1661,13 @@ def cmd_monitor(period_s=1.0):
                     r = do_call(c)
                     if r is not None:
                         _emit(event="call_result", id=c.get("id"), call=c.get("call"), value=c.get("value"), **r)
+                elif c.get("move") and c["move"].get("path"):          # V3.65 JOINT PATH EXECUTION
+                    try:
+                        do_path(c["move"])
+                    except Exception as exc:
+                        if st.get("move"):
+                            st["move"]["phase"] = "done"
+                        _emit(event="move_result", id=c["move"].get("id"), ok=False, error=f"path error: {exc}"[:300])
                 elif c.get("move"):
                     try:
                         do_move(c["move"])
@@ -1631,7 +1738,7 @@ def cmd_monitor(period_s=1.0):
                   tcp=(tcp_pose() if JC is not None and st.get("model") else None),
                   tf_links=(tf_links() if JC is not None and st.get("model") else None),
                   model_known=bool(st.get("model")), has_urdf=bool(st["urdf"]), has_srdf=bool(st["srdf"]),
-                  move=(st["move"] or {}).get("phase"))
+                  move=(st["move"] or {}).get("phase"), caps=["joint_path"])      # V3.65 JOINT PATH EXECUTION
     except KeyboardInterrupt:
         pass
     finally:
@@ -2443,6 +2550,44 @@ class RealPipeline:
         except Exception as exc:
             self.log(f"[WARN] [V3.15] motion log: {exc}")
         return res
+
+    # ---------------------------------------------------------------- V3.65 JOINT PATH EXECUTION
+    def supports_joint_path(self):
+        return "joint_path" in ((self.mon_status or {}).get("caps") or [])
+
+    def move_joint_path(self, model, path_rad, times_s, label="path", timeout_s=None):
+        """execute a joint path (list of 7-joint points, the first = the current joints, times from 0) without
+        re-planning: same gates as move_joints (sim / MoveIt / teach mode / every point inside the joint limits /
+        goal fence) + the path fence check in the ROS monitor.  -> result dict like move_joints"""
+        if self.sim_active_fn():
+            return {"ok": False, "error": "simulation is running"}
+        if self.lamp("moveit") != GREEN:
+            return {"ok": False, "error": "step 6 MoveIt / RViz is not green"}
+        if getattr(self, "teach_mode", False):
+            return {"ok": False, "error": "NERO 在示教模式（零力拖动）：先「退出示教模式」再运动"}
+        if not self.supports_joint_path():
+            return {"ok": False, "error": "ROS monitor without joint-path support (restart step 5/6)", "unsupported": True}
+        pts = [[float(v) for v in p] for p in path_rad]
+        ts = [float(t) for t in times_s]
+        if len(pts) < 2 or len(ts) != len(pts) or ts[0] != 0.0 or any(b <= a for a, b in zip(ts, ts[1:])):
+            return {"ok": False, "error": "joint path: malformed path / times"}
+        lims = model["limits"]
+        for k, p in enumerate(pts):
+            if len(p) != len(lims):
+                return {"ok": False, "error": f"joint path point {k}: {len(p)} values for {len(lims)} joints"}
+            for i, (q, (lo, hi)) in enumerate(zip(p, lims)):
+                if not (lo - 1e-6 <= q <= hi + 1e-6):
+                    return {"ok": False, "error": f"joint path point {k}: J{i + 1} {math.degrees(q):.1f} deg outside limit"}
+        ok, txt, v = self.fence_goal_check(model, pts[-1])
+        if not ok:
+            return {"ok": False, "error": txt, "fence_violation": {"waypoint": "goal", "violations": v}}
+        extra = {"path": pts, "times": ts}
+        sf = self.safety()
+        if sf and sf.get("fence") and sf.get("path_check"):
+            extra.update(fence=sf["fence"], tool_T=sf.get("tool_T"), base=model.get("base_link") or "base_link",
+                         arm_joints=list(model["joints"]))
+        return self._send_move(label, model["arm_group"], model["joints"], pts[-1], 1.0,
+                               timeout_s or (ts[-1] + 30.0), extra)
 
     def apply_scene(self, objects, frame="base_link", prefix="v315_", timeout_s=15.0):
         if not self.monitor.running():

@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V3.64"
+VERSION = "V3.65"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -674,6 +674,20 @@ def run_console(initial_tab="sim"):
     nb.bind("<<NotebookTabChanged>>",
             lambda _e: strat_tab.reload_active_if_changed() if nb.select() == str(strat_outer) else None, add="+")
 
+    # ---- V3.65 NERO REAL CUP TASK TAB: the stack_cups_so101 simulation skills + parameters on the real NERO
+    #      (SO-101 gripper on an STS3215 servo, fixed D435i + wrist camera monitors, LLM agent, run modes 1-3)
+    rct_tab = None
+    try:
+        import NERO_V365_Real_Cup_Task as RCT
+        rct_outer = ttk.Frame(nb, padding=6)
+        nb.add(rct_outer, text="NERO实机任务")
+        rct_tab = RCT.RealCupTaskTabUI(tk, ttk, rct_outer, pipe, jpanel, cam_tab, log=pipe.log, ask=confirm_from_worker,
+                                       visible_fn=lambda: nb.select() == str(rct_outer))
+        nb.bind("<<NotebookTabChanged>>",
+                lambda _e: rct_tab.refresh_skill() if nb.select() == str(rct_outer) else None, add="+")
+    except Exception as exc:
+        log_append(real_log, f"[FAIL] [V3.65 REAL CUP TASK] NERO实机任务 tab not available: {exc}")
+
     def start_job(name, fn, force=False):
         if not force and real_job["t"] is not None and real_job["t"].is_alive():
             log_append(real_log, f"[WARN] busy: {real_job['name']} still running")
@@ -879,6 +893,11 @@ def run_console(initial_tab="sim"):
     def on_close():
         try:
             cam_tab.shutdown()
+        except Exception:
+            pass
+        try:
+            if rct_tab is not None:
+                rct_tab.shutdown()              # V3.65: stop a running real task, close the gripper serial port
         except Exception:
             pass
         if pipe.active():

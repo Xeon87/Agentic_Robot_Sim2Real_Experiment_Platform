@@ -70,8 +70,8 @@ except Exception:
 
 # ------------------------------------------------------------------ S1
 for m in (CON, RR, YP, W49, ST, CK, CP):
-    assert m.VERSION in ("V3.63", "V3.64"), (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.63", "V3.64")
+    assert m.VERSION in ("V3.63", "V3.64", "V3.65"), (m.__name__, m.VERSION)
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.63", "V3.64", "V3.65")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 assert H((ROOT / "NERO_V326_Wrist_Camera.py").read_bytes()) == "6b5c5d683073e4252b82c1c703ad664173960a179947f9e72775bb9683697d0a"
 assert H((ROOT / "NERO_V2_7_1_Agent.py").read_bytes()) == "3e52d05ea84d94c8359d5875fa0fee8c2cc42d612b52e59109e1166912439696"

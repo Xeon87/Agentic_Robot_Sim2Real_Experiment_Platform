@@ -1,7 +1,7 @@
-# NERO 项目开发与交接文档（V3.64 · Sim2Real 与自动寻优路线版）
+# NERO 项目开发与交接文档（V3.65 · Sim2Real 与自动寻优路线版）
 
 > 放在仓库根目录，命名为 `AGENTS.md`（Codex / 后续开发 Agent 会自动读取）。
-> 更新时间：2026-11-02。当前已交付最新版本：**V3.64**（仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`）。
+> 更新时间：2026-11-02。当前已交付最新版本：**V3.65**（仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`）。
 > 接手者请在做任何修改前通读本文件。本文件里“用户”指项目所有者 Jimmy。
 
 ## 0. 一句话现状
@@ -13,7 +13,8 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 - **V3.62（已交付）**：叠杯子 Agent 技能 `NERO_V362_Cup_Skills.py`（6 个工具的技能契约 + 复用 `NeroLLMAgent` 通信层的 Agent 循环 + 后端适配 `BackendIO` + 无界面 MuJoCo 替身 `TwinIO`）；后端只在 RUN TASK 的已有 A2 块里加了 `stack_cups` 分支；杯子原点改到杯口中心（CONNECT 抓持锁定点在重心上方）；第 ⑥ 组 11 个旋钮由仿真技能读取。**只在替身里验证过，完整仿真链路和真机都还没跑过**。
 - **V3.63（已交付）**：修复 V3.62 实测放置时 J7 越限急停——联合规划整条关节链路（`FastArm` 解析雅可比，从真实关节出发，J7 优先 ≥ 15°）、执行前逐点检查轨迹（不合格改关节空间）、先转腕再平移、急停即停 + `_v337_clear_latch` 解锁重试一次；新增固定主相机 D435i 杯子感知 `NERO_V363_Cup_Perception.py`（相机进程 `NERO_V331` 在 stack_cups 场景改跑杯子感知）。替身带 URDF 运动学 + 固定相机渲染。**完整仿真链路待用户复测，真机未验证**。
 - **V3.64（已交付）**：新仿真场景 `stack_cups_so101`（叠杯子 · SO-101 夹爪，7 mm 转接环，绕法向偏转 45°），是 `stack_cups` 的变体：`active_scene()` 仍为 `stack_cups`（后端 / 相机进程 / 感知 / Agent 字节级不变），夹爪由 `NERO_V343_Scenes.gripper_variant()` 决定；新模块 `NERO_V364_SO101_Gripper.py` + `assets/so101/`（官方网格 Apache-2.0）；杯子技能加夹爪档案 `GripperProfile`（原夹爪 = V3.63 行为）。替身试验见 `config/cup_stack_study_v364_so101.json`。**安装尺寸是估计值（座面 37.5 mm、环 7 mm、−45°），完整仿真链路待用户复测，真机未验证；实物需加指垫**。
-- **接下来的核心路线（V3.65 → V3.67，再顺延一版；先请用户复测叠杯子）**：遵循**“一套大脑、两套身体（仿真与实机除眼睛和手脚外 100% 通用）”**原则，将算法拆分为**“铁打的底层骨架 + 可拨动的控制旋钮（Control Knobs / Strategy Profile）”**，通过**带噪仿真自动寻优试验（DOE / 贝叶斯优化）**自动搜索各场景鲁棒最优参数包，并按 `纯视觉干跑 → 5 cm 悬停预演 → 实机柔顺抓放` 稳步完成真机迁移。
+- **V3.65（已交付）**：控制台新 TAB「NERO实机任务」（`NERO_V365_Real_Cup_Task.py`）：叠杯子 · SO-101 的仿真技能 / 参数 / 夹爪档案 / LLM 工具契约原样用于实机（`RealIO` 只换眼睛、手臂、手）；SO-101 动指舵机 STS3215 驱动 `NERO_V365_STS3215_Gripper.py`（180° = 夹紧，位置控制 + 扭矩上限夹紧，无力闭环）；`NERO_V313` 新增关节路径执行（MoveIt `/execute_trajectory`，路径围栏检查）。运行档位 ① 规划预览 ② 悬停预演 ③ 实机执行。**只在替身和模拟舵机上验证过，真机未验证**。
+- **接下来的核心路线（V3.66 → V3.68，再顺延一版；先请用户在实机上按 ①→②→③ 复测叠杯子）**：遵循**“一套大脑、两套身体（仿真与实机除眼睛和手脚外 100% 通用）”**原则，将算法拆分为**“铁打的底层骨架 + 可拨动的控制旋钮（Control Knobs / Strategy Profile）”**，通过**带噪仿真自动寻优试验（DOE / 贝叶斯优化）**自动搜索各场景鲁棒最优参数包，并按 `纯视觉干跑 → 5 cm 悬停预演 → 实机柔顺抓放` 稳步完成真机迁移。
 
 ## 1. 用户的沟通规则（必须遵守，原话优先）
 
@@ -89,6 +90,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 8. **叠杯子（V3.62）**：后端对叠杯子只允许在 RUN TASK 的已有 A2 块里调用 `NERO_V362_Cup_Skills.gui_run_task()`（`test_v3_62` P1：去掉这段后与 V3.60 后端字节级一致）；杯子技能逻辑只写在 `NERO_V362_Cup_Skills.py`，`BackendIO` 与 `TwinIO` 共用同一套 `CupSkills`。场景杯子的原点是杯口中心（`SC.CUP_ORIGIN="rim"`），判断套叠用 `cup_task_state(..., origin="rim")`。
 9. **叠杯子运动安全（V3.63）**：持杯运动只朝规划时检查过余量的关节解执行；任何直线插补轨迹先经 `check_joint_path`（≥ 4°、≤ 5°/点）才执行；技能遇急停必须停下并经后端 `_v337_clear_latch` 解锁，不能在锁住时继续发运动。固定相机杯子感知只在 `NERO_V331_Fixed_Camera.py` 的 stack_cups 分支里，鸡蛋场景路径不变（`test_v3_31`）。
 10. **夹爪变体（V3.64）**：新夹爪只能作为场景变体（`SCENES[...]['base']` + `'gripper'`）接入，`active_scene()` 返回基础场景；变体夹爪的 MJCF 必须保留后端用到的名字（`gripper_joint1` 开口 = 2000·q1、`gripper_joint2` = −q1、`gripper_link1/2`、`finger1/2_rubber_pad`、`gripper`/`gripper_force` 执行器、`gripper_coupling`）。原夹爪档案 `OFFICIAL_PROFILE` 的参数不能改（等于 V3.63 行为）。
+11. **实机叠杯子（V3.65）**：实机只能复用仿真的 `CupSkills` / 旋钮 / 夹爪档案（不在实机模块里另写一套技能逻辑）；实机运动只走 `RealPipeline.move_joint_path`（或 `move_and_settle`），必须经过关节限位 + 目标围栏 + 路径围栏检查；运行档位 ② ③ 必须先弹窗确认；`NERO_V365` 运行时只写 `NERO_CALIB_DIR/real_cup_task.json`。
 
 ## 5. 代码地图（截至 V3.60）
 
@@ -108,6 +110,8 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 | `NERO_V362_Cup_Skills.py` | **叠杯子 Agent 技能（V3.62）**：`CupSkills`（observe_scene / plan_cup_stack / pick_cup / place_cup_into / verify_stack / return_to_safe_pose）、`plan_cup_stack`（捏杯沿方位 + 同一翻转 + 严格 IK，余量 < 4° 拒绝）、`pinch_frame/pinch_tcp`（沿杯壁倾斜 8.2°、夹紧中心 TCP y +2 mm）、`BackendIO`（后端 skill_core + 共享变量）、`TwinIO`（官方指垫 + 后端夹爪逻辑的 MuJoCo 替身，不含机械臂）、`run_cup_task`（Agent 循环 + `[V3.62 SKILL SCORE]`）、`gui_run_task`（后端 A2 块入口）、`twin_study`（`--study`） |
 | `NERO_V363_Cup_Perception.py` | **固定主相机杯子感知（V3.63）**：`perceive_cups`（红色色调分割 → 深度反投影 → 机械臂自滤 → xy 聚类 → 锥面拟合杯轴 / 高度 / 倾斜，单杯 / 已套叠 / 未知）；由 `NERO_V331_Fixed_Camera.py` 在 stack_cups 场景调用 |
 | `NERO_V364_SO101_Gripper.py` | **SO-101 夹爪（V3.64）**：安装（`MOUNT`，环境变量可改）、动指开口映射（`jaw_angle_deg` / `opening_mm_for_tip_gap`）、`T_tcp_grasp`（官方 TCP → SO-101 抓取系）、`gripper_parts` / `insert_into_model_xml`（场景与替身共用同一份 MJCF）；网格在 `assets/so101/` |
+| `NERO_V365_Real_Cup_Task.py` | **NERO实机任务（V3.65）**：`RealIO`（CupSkills 的实机 IO：FastArm TCP、连续 IK 直线段 / 关节线性插值 → 关节路径执行、D435i 杯子感知（桌面 z 平移 + 围栏工作区）、STS3215 夹爪换算）、`run_plan_preview` / `run_hover` / `run_execute`、`PipelineArm`、`camera_from_tab`、`RealCupTaskTabUI` |
+| `NERO_V365_STS3215_Gripper.py` | **SO-101 实机夹爪（V3.65）**：Feetech STS 协议（取自用户工具）、`SO101RealGripper`（open_deg / open_gap / clamp / status）、角度↔指尖缝↔仿真虚拟开口换算、夹紧扭矩换算、`SimServo` 模拟舵机 |
 | `NERO_V361_Cup_Stack.py` | **叠杯子离线试验（V3.61）**：`release_trial` / `release_sweep`（只有杯子的 MuJoCo 松手试验）、`choose_release_params`、严格 6-DoF `pose_ik`（`CS.ik_tool` 会丢姿态，别用它算姿态）、`rim_pinch_pose`、`grasp_reachability`、`plan_cup_stack`（5 个航点）、`run_study`；结果存 `config/cup_stack_study_v361.json`（静态文件，运行时不写） |
 | `config/strategies/` | 内置技能 JSON（只读，与 `builtin_strategy_presets()` 完全一致）：`egg_grasp_v345_baseline`（EB，`default.json` 是它的副本）、`dense_cluster_anti_poke`（DP）、`hover_dry_run_safe`（HD）、`quick_hover_verify`（QH） |
 | `NERO_V308_Camera_Perception.py` | V3.08–V3.11 几何鸡蛋感知（仿真和“几何法”在用）——**字节级冻结** |
@@ -130,7 +134,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
    - **痛点 B（画面下沿黑色夹爪阴影与塑封膜反光拉偏角点）**：**V3.58 方案**：开启 `CORNER_REFINE_SUBPIX` + `tryRefineMarkers`，并通过**干净子集去畸变 + 平面 RANSAC 单应性检验（`_clean_outlier_corners`）**自动剥离每张图里偏离 `> 1.15 px` 的 1–3 个孤立反光/夹爪遮挡坏角点（保留其余干净角点），而对 `>= 4` 个坏角点的运动模糊帧则整张剔除。
    - **痛点 C（起点偏左导致采样集中在左侧 + 纸面微翘）**：**V3.58 方案**：`plan_intr_auto_targets` 读取起点标定板实际位置 `s0_board["center_frac"]` 作为最远点采样种子，将四向及对角倾视基线提升至 `18°–28°`；`calibrate_eye_in_hand` 将 2D 深度比例因子 `alpha_z` 拓宽至 `[0.12, 1.85]`（以 `axy=1.0` 起算），并在自动采集达标后**一键同步保存 `wrist_intrinsics.json` 与 `wrist_handeye_calib.json`**。
 
-## 7. 版本简史（V3.43 – V3.64）
+## 7. 版本简史（V3.43 – V3.65）
 
 | 版本 | 核心改动内容 |
 | :--- | :--- |
@@ -154,8 +158,9 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 | **V3.62** | 叠杯子 Agent 技能（填 API key + 输入任务即可在仿真里叠杯子）；后端 RUN TASK A2 块加 `stack_cups` 分支；杯子原点改杯口中心 + 卷边硬接触 + 与质量无关的杯子接触；第 ⑥ 组 11 旋钮 `[仿真技能✓]`；修正 V3.61 抓放翻转不一致；替身试验 16/16 |
 | **V3.63** | 修复叠杯子放置 J7 越限急停（联合规划 + 逐点轨迹检查 + 先转腕再平移 + 急停即停解锁重试 + 不做小修正）；固定主相机 D435i 杯子感知（相机进程分支）；替身带 URDF 运动学与相机渲染；试验 20/20（相机 4/4） |
 | **V3.64** | 新场景 `stack_cups_so101`（SO-101 夹爪 + 7 mm 转接环 + 偏转 45°，后端不变）；夹爪档案（抓取坐标系、固定指在外、沿杯壁下探、抬起 / 搬运后摆正等待、低位松手 + 松手后外移）；通用：全角度回退、搬运优先规划关节解、关节停稳等待；SO-101 替身试验 |
+| **V3.65** | 控制台「NERO实机任务」TAB：叠杯子 · SO-101 仿真技能和参数原样上实机（RealIO）；STS3215 夹爪驱动（位置 + 扭矩上限夹紧）；V313 关节路径执行（`/execute_trajectory` + 路径围栏）；运行档位 ①②③；替身当实机身体全流程测试 |
 
-## 8. 后续开发计划（V3.59–V3.64 已交付；V3.65 → V3.67：带噪仿真寻优与真机迁移，原编号顺延一版）
+## 8. 后续开发计划（V3.59–V3.65 已交付；V3.66 → V3.68：带噪仿真寻优与真机迁移，原编号顺延一版）
 
 ### 8.0 核心设计哲学（已与用户对齐确认）
 1. **一套大脑，两套身体（仿真与实机 100% 逻辑通用）**：
@@ -194,7 +199,7 @@ ightarrow$ `跨点安全抬升 (+40 mm)` $
 ightarrow$ `下一目标 / 蛋托孔位 / 手动坐标 B 悬停` $
 ightarrow$ `回起点姿态`，方便在夹爪未就绪时完整验证视觉定位与跨点搬运动线。
 
-### 8.2 阶段 2（V3.65 起，原 V3.60；因叠杯子场景顺延）：带噪仿真自动最优化试验台（Sim-in-the-Loop Auto-Optimizer）
+### 8.2 阶段 2（V3.66 起，原 V3.60；因叠杯子场景顺延）：带噪仿真自动最优化试验台（Sim-in-the-Loop Auto-Optimizer）
 
 - **核心目标**：在仿真中引入真实物理噪声（防止仿真过拟合），用科学试验设计（DOE/LHS）与贝叶斯/进化寻优算法自动跑批试验，为不同场景自动找出最优控制旋钮组合。
 - **新增与修改模块**：
@@ -212,7 +217,7 @@ ightarrow$ `回起点姿态`，方便在夹爪未就绪时完整验证视觉定�
 - **阶段 2 验收标准**：
   - 给定带 `±2 mm` 视觉噪声的测试场景，寻优器在 30–40 轮内收敛，产出的 `<scene>_optimal.json` 在带噪测试集上的成功率与安全净空显著优于初始默认参数；`tests/test_v3_60.py` 全部通过。
 
-### 8.3 阶段 3（V3.65，原 V3.61）：实机「主从视觉 + 5 cm 悬停预演（Hover Dry-Run）」安全闭环
+### 8.3 阶段 3（V3.67，原 V3.61；叠杯子实机部分已在 V3.65 先做）：实机「主从视觉 + 5 cm 悬停预演（Hover Dry-Run）」安全闭环
 
 - **核心目标**：建立虚实统一技能桥接器（`RealSkillBridge`），加载阶段 2 算出的最优策略包，在不触碰真实鸡蛋的前提下，完成“主相机粗定位 → 5 cm 悬停 → 腕部相机精修对齐 → 蛋托孔位 5 cm 悬停复核”的全自动预演闭环。
 - **新增与修改模块**：
@@ -226,7 +231,7 @@ ightarrow$ `回起点姿态`，方便在夹爪未就绪时完整验证视觉定�
 - **阶段 3 验收标准**：
   - 实机桌面随意摆放鸡蛋（或假蛋/乒乓球）与 6 孔蛋托，运行「档位 2（5 cm 悬停预演）」，机械臂平顺完成粗定位接近与腕部精修，腕部实时画面中 TCP 准星与真实鸡蛋中心、蛋槽中心偏差 `≤ 2.0 mm`，全程零越界、零碰撞；`tests/test_v3_61.py` 全部通过。
 
-### 8.4 阶段 4（V3.66，原 V3.62）：实机柔顺抓放全流程 + Agent 智能策略调度
+### 8.4 阶段 4（V3.68，原 V3.62）：实机柔顺抓放全流程 + Agent 智能策略调度
 
 - **核心目标**：打通最后 5 cm 慢速垂直下探、真实夹爪柔顺闭合、双重抓持状态校验与失败自动补抓，实现真机连续抓鸡蛋入托，并支持 VLM Agent 根据桌面场景自动调度/微调策略包。
 - **新增与修改模块**：
