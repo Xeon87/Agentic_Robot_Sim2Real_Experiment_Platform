@@ -79,8 +79,8 @@ BTREE = ast.parse(BSRC)
 
 # ------------------------------------------------------------------ F1 versions / frozen files
 for m in (CON, RR, YP, W49, ST):
-    assert m.VERSION in ("V3.60", "V3.61"), (m.__name__, m.VERSION)          # V3.61: version bump
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.60", "V3.61")
+    assert m.VERSION in ("V3.60", "V3.61", "V3.62"), (m.__name__, m.VERSION)          # V3.61: version bump
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.60", "V3.61", "V3.62")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 assert H((ROOT / "NERO_V326_Wrist_Camera.py").read_bytes()) == \
     "6b5c5d683073e4252b82c1c703ad664173960a179947f9e72775bb9683697d0a", "sim wrist camera changed"

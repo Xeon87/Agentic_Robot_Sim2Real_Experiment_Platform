@@ -67,16 +67,20 @@ CAM.CALIB_DIR = str(TMP / "cameracalib")
 HAVE_MJ = CUP.mujoco_available()
 
 # ------------------------------------------------------------------ M1
-for m in (CON, RR, YP, W49, ST, CUP):
-    assert m.VERSION == "V3.61", (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "V3.61"
-assert SC.VERSION == "V3.44" and SC.SCENES_REV == "V3.61"
+V362 = ST.VERSION >= "V3.62"           # V3.62 intentionally changed: backend A2 block, cup origin, cup knobs (CHANGELOG)
+for m in (CON, RR, YP, W49, ST):
+    assert m.VERSION in ("V3.61", "V3.62"), (m.__name__, m.VERSION)
+assert CUP.VERSION == "V3.61"
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.61", "V3.62")
+assert SC.VERSION == "V3.44" and SC.SCENES_REV in ("V3.61", "V3.62")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 assert H((ROOT / "NERO_V326_Wrist_Camera.py").read_bytes()) == "6b5c5d683073e4252b82c1c703ad664173960a179947f9e72775bb9683697d0a"
 FROZEN_V360 = {"NERO_V2_7_1_Unified_Backend.py": "ffbd630d70edf57a49929363134ceaae3b95fe4675e0887509d3dc5d7b08f1ed",
                "NERO_V2_7_1_Agent.py": "3e52d05ea84d94c8359d5875fa0fee8c2cc42d612b52e59109e1166912439696",
                "NERO_V325_Camera.py": "5f41c189ea742fc4c3b4d4b33b7190c5a456ba6e6eb6adf39bde92bf1ed82688"}
 for fn, h in FROZEN_V360.items():
+    if V362 and fn == "NERO_V2_7_1_Unified_Backend.py":
+        continue                         # V3.62: one A2 block gained the stack_cups RUN TASK hook (test_v3_62 pins it)
     assert H((ROOT / fn).read_bytes()) == h, f"{fn} changed in V3.61"
 w49 = re.sub(r'VERSION = "V3\.\d+"', 'VERSION = "V3.58"', (ROOT / "NERO_V349_Real_Wrist_Camera.py").read_text(encoding="utf-8"), count=1)
 assert H(w49.encode()) == "d5955ce5c9c8acf8d654faa163da49e1b54ad21775a5ec060ac353a13c76a622"
@@ -150,7 +154,8 @@ if HAVE_MJ:
         mujoco.mj_step(m, d)
     for c in SC.CUP_NAMES:
         b = d.body(c)
-        assert SC.cup_axis_tilt_deg(b.xquat) < 0.5 and abs(b.xpos[0] - SC.CUP_XY[c][0]) < 0.002 and 0 < b.xpos[2] < 0.004
+        bz = SC.cup_base_point(b.xpos, b.xquat, getattr(SC, "CUP_ORIGIN", "base"))[2]       # V3.62: rim-centre origin
+        assert SC.cup_axis_tilt_deg(b.xquat) < 0.5 and abs(b.xpos[0] - SC.CUP_XY[c][0]) < 0.002 and 0 < bz < 0.004
     print(f"[M4] stack_cups XML: 2 cups x ({len(walls)} walls + bottom + rim), hold CONNECTs, compiles and both cups stand")
 else:
     print("[M4] stack_cups XML structure OK (MuJoCo not installed here: compile/settle check skipped)")
@@ -179,7 +184,7 @@ par = study["release_params"]
 assert par["release_gap_mm"] == K["cup_release_gap_mm"] == 85.0 and par["release_xy_tol_mm"] == K["cup_release_xy_tol_mm"]
 assert abs(par["z_nested_mm"] - K["cup_nested_height_mm"]) < 0.05
 assert round(study["grasp_rim_angle_rel_base_deg"]) == K["cup_grasp_rim_angle_deg"] == 40.0
-assert round(study["place_rim_angle_rel_base_deg"]) == K["cup_place_rim_angle_deg"] == -55.0
+assert round(study["place_rim_angle_rel_base_deg"]) == -55.0 and K["cup_place_rim_angle_deg"] == (35.0 if V362 else -55.0)
 assert study["layout"] == {k: list(v) for k, v in SC.CUP_XY.items()}
 assert CUP.choose_release_params(study["release_sweep"]) == par
 print("[M6] study file == knob defaults (release 85 mm / tol 7.5 mm / nested 25.3 mm / rim +40, -55 deg)")
@@ -193,23 +198,25 @@ q0 = [0.2, 0.5, 0.1, 1.3, 0.1, 0.6, 0.3]
 P = CS.tool_pose(U, J, q0, "base_link", T)
 q, pe, re_ = CUP.pose_ik(U, J, CUP.JOINT_LIMITS, [[0.0] * 7], T, [P[0][3], P[1][3], P[2][3]], [r_[:3] for r_ in P[:3]])
 assert q is not None and pe < 5e-4 and re_ < 1.0
-plan = CUP.plan_cup_stack(dict(K), urdf=U)
+K61 = dict(K, cup_rim_pinch_depth_mm=25.0, cup_pregrasp_height_mm=60.0, cup_place_rim_angle_deg=-55.0)   # V3.61 values
+plan = CUP.plan_cup_stack(K61, urdf=U)
 assert plan["ok"] and plan["grasp"]["min_margin_deg"] >= 8.0 and plan["place"]["min_margin_deg"] >= 8.0, plan
 assert [w["name"] for w in plan["waypoints"]] == ["pregrasp", "grasp", "lift", "place_above", "release"]
 wz = {w["name"]: w["tcp_xyz_m"][2] for w in plan["waypoints"]}
 g = SC.cup_geometry()
 assert abs(wz["lift"] - (CUP.TABLE_Z0 + g["h"] + 0.020 + g["h"] - 0.025)) < 1e-4
 assert abs(wz["release"] - (CUP.TABLE_Z0 + 0.0253 + 0.085 + g["h"] - 0.025)) < 1e-4
-far = CUP.grasp_reachability(dict(K), cup_from=(-0.55, -0.13), phis=(0, 90, 180, 270), urdf=U)
+far = CUP.grasp_reachability(K61, cup_from=(-0.55, -0.13), phis=(0, 90, 180, 270), urdf=U)
 assert not any(r_["ok"] for r_ in far["grasp"])
 print(f"[M7] CS plan reachable: grasp margin {plan['grasp']['min_margin_deg']} deg, place {plan['place']['min_margin_deg']} "
       f"deg (>= 8); cup at x=-0.55 unreachable")
 
 # ------------------------------------------------------------------ M8
 cup_specs = [s for s in ST.KNOB_SPECS if s["group"] == "cup_stacking"]
-assert [g_ for g_, _ in ST.KNOB_GROUPS][-1] == "cup_stacking" and len(cup_specs) == 9
-assert all(s["wired"] == "study" and s["min"] <= s["default"] <= s["max"] for s in cup_specs)
-assert len(ST.KNOB_SPECS) == 54 and ST.WIRING_LABELS["study"] == "离线试验✓"
+assert [g_ for g_, _ in ST.KNOB_GROUPS][-1] == "cup_stacking" and len(cup_specs) == (11 if V362 else 9)
+assert all(s["wired"] == ("sim_skill" if V362 else "study") and (s["type"] == "bool" or s["min"] <= s["default"] <= s["max"])
+           for s in cup_specs)
+assert len(ST.KNOB_SPECS) == (56 if V362 else 54) and ST.WIRING_LABELS["study"] == "离线试验✓"
 pres = ST.builtin_strategy_presets()
 assert [p.code for p in pres] == ["EB", "DP", "HD", "QH", "CS"] and len({p.code for p in pres}) == 5
 cs = pres[-1]

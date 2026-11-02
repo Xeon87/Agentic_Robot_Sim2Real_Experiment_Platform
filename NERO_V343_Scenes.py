@@ -41,7 +41,7 @@ SCENES = {
     "stack_cups": {"label": "stack_cups - 叠杯子 (RoboDojo)",
                    "summary": "two red party cups upright on the table: put cup_1 into cup_2 (nested stack)"},
 }
-SCENES_REV = "V3.61"       # VERSION above stays "V3.44" (tests pin it); this module gained stack_cups in V3.61
+SCENES_REV = "V3.62"       # VERSION above stays "V3.44" (tests pin it); this module gained stack_cups in V3.61
 HERE = Path(__file__).resolve().parent
 
 # ----------------------------------------------------------------------------- geometry (store_in_safe)
@@ -362,6 +362,7 @@ CUP = {
     "nested_dz": 0.0253,              # base-to-base height of a fully nested pair in this model (measured)
 }
 CUP_NAMES = ("obj_cup_1", "obj_cup_2")
+CUP_ORIGIN = "rim"                   # V3.62 RIM-CENTRE CUP ORIGIN (scene bodies); the V3.61 study uses "base"
 # cup_1 is moved into cup_2.  x = -0.35: carrying a cup (TCP ~96 mm above its base with a 25 mm rim pinch) over
 # the other cup needs a top-down TCP at z ~0.24 m - the NERO reaches that only up to |x| ~0.36 (NERO_V361 study).
 CUP_XY = {"obj_cup_1": (-0.35, -0.13), "obj_cup_2": (-0.35, 0.13)}
@@ -382,10 +383,19 @@ def _quat_mul(a, b):
             w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2, w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2)
 
 
-def cup_body_xml(name, xy, cup=None, z0=0.0005, free=True, quat=None):
-    """MJCF <body> of one cup; body origin = bottom centre on the table."""
+def cup_body_xml(name, xy, cup=None, z0=0.0005, free=True, quat=None, origin="base"):
+    """MJCF <body> of one cup.  origin="base": body origin = bottom centre (V3.61 study);
+    origin="rim" (V3.62 scene): body origin = centre of the rim circle on the cup axis.
+    V3.62 RIM-CENTRE CUP ORIGIN: the backend's grasp hold is a CONNECT point at the object's body origin; with the
+    origin at the base the held cup is an inverted pendulum about its bottom (it swung to ~40 deg in the twin), with
+    the origin on the axis ABOVE the centre of mass it hangs plumb from the gripper like a pendulum."""
     c = cup_geometry(cup)
     n, H, rb, rt, w = int(c["segments"]), c["h"], c["r_bot"], c["r_top"], c["wall"]
+    oz = -H if origin == "rim" else 0.0                         # geom z offset in the body frame
+    # V3.62 MASS-INDEPENDENT CUP CONTACT: MuJoCo scales a positive solref stiffness with the (10 g) cup's effective
+    # mass -> the wall was so soft that the finger studs sank > 0.5 mm at ~1.7 N and the backend's gripper
+    # penetration guard stopped the clamp.  Scene cups use a direct stiffness / damping (negative solref).
+    sref = (os.environ.get("NERO_V362_CUP_SOLREF") or c.get("scene_solref", "-20000 -60")) if origin == "rim" else "0.004 1"
     beta = math.atan2(rt - rb, H)
     slant = math.hypot(H, rt - rb)
     half_t = (rt + w) * math.tan(math.pi / n)                  # wide enough to close the gaps at the rim
@@ -398,29 +408,33 @@ def cup_body_xml(name, xy, cup=None, z0=0.0005, free=True, quat=None):
         qz = (math.cos(a / 2), 0.0, 0.0, math.sin(a / 2))
         q = _quat_mul(qz, qy)
         cx, cy = r_mid * math.cos(a), r_mid * math.sin(a)
-        g.append(f'<geom name="{name}_wall_{k:02d}" type="box" pos="{_f(cx, cy, H / 2)}" quat="{_f(*q)}" '
+        g.append(f'<geom name="{name}_wall_{k:02d}" type="box" pos="{_f(cx, cy, H / 2 + oz)}" quat="{_f(*q)}" '
                  f'size="{_f(w / 2, half_t, slant / 2)}" mass="{m_wall:.6f}" material="v361_cup_red_mat" '
-                 f'friction="{c["friction"]}" condim="4" solref="0.004 1" solimp="0.95 0.99 0.0005" margin="0.0005"/>')
+                 f'friction="{c["friction"]}" condim="4" solref="{sref}" solimp="0.95 0.99 0.0005" margin="0.0005"/>')
         ri = r_mid - 0.6 * w * math.cos(beta)                  # white inside (visual only)
-        g.append(f'<geom name="{name}_inner_{k:02d}" type="box" pos="{_f(ri * math.cos(a), ri * math.sin(a), H / 2 + 0.6 * w * math.sin(beta))}" '
+        g.append(f'<geom name="{name}_inner_{k:02d}" type="box" pos="{_f(ri * math.cos(a), ri * math.sin(a), H / 2 + 0.6 * w * math.sin(beta) + oz)}" '
                  f'quat="{_f(*q)}" size="{_f(w / 4, half_t * 0.99, slant / 2 - 0.002)}" material="v361_cup_white_mat" '
                  f'contype="0" conaffinity="0" density="0"/>')
-    g.append(f'<geom name="{name}_bottom" type="cylinder" pos="0 0 {w / 2:.5f}" size="{rb:.5f} {w / 2:.5f}" '
+    g.append(f'<geom name="{name}_bottom" type="cylinder" pos="0 0 {w / 2 + oz:.5f}" size="{rb:.5f} {w / 2:.5f}" '
              f'mass="{0.15 * c["mass"]:.6f}" material="v361_cup_red_mat" friction="{c["friction"]}" condim="4" '
-             f'solref="0.004 1" solimp="0.95 0.99 0.0005"/>')
-    g.append(f'<geom name="{name}_bottom_inner" type="cylinder" pos="0 0 {w + 0.0002:.5f}" size="{rb - w:.5f} 0.0002" '
+             f'solref="{sref}" solimp="0.95 0.99 0.0005"/>')
+    g.append(f'<geom name="{name}_bottom_inner" type="cylinder" pos="0 0 {w + 0.0002 + oz:.5f}" size="{rb - w:.5f} 0.0002" '
              f'material="v361_cup_white_mat" contype="0" conaffinity="0" density="0"/>')
     rr = rt + 0.5 * w
+    # V3.62 STIFF RIM CONTACT: in V3.61 the rim capsules had MuJoCo's default soft contact (timeconst 0.02 s, 5x
+    # softer than the wall); finger studs sank 0.55 mm into the rim and the backend's gripper penetration guard
+    # (> 0.55 mm -> no closing force) stopped the clamp at ~1 N.  Same stiffness / margin as the wall boxes now.
+    rim_contact = (f' solref="{sref}" solimp="0.95 0.99 0.0005" margin="0.0005"' if origin == "rim" else "")
     for k in range(n):
         a0, a1 = 2 * math.pi * k / n, 2 * math.pi * (k + 1) / n
         g.append(f'<geom name="{name}_rim_{k:02d}" type="capsule" '
-                 f'fromto="{_f(rr * math.cos(a0), rr * math.sin(a0), H, rr * math.cos(a1), rr * math.sin(a1), H)}" '
+                 f'fromto="{_f(rr * math.cos(a0), rr * math.sin(a0), H + oz, rr * math.cos(a1), rr * math.sin(a1), H + oz)}" '
                  f'size="{c["rim_r"]:.5f}" mass="{0.10 * c["mass"] / n:.6f}" material="v361_cup_red_mat" '
-                 f'friction="{c["friction"]}" condim="4"/>')
+                 f'friction="{c["friction"]}" condim="4"{rim_contact}/>')
     q_txt = f' quat="{_f(*quat)}"' if quat is not None else ""
     joint = "<freejoint/>" if free else ""
     body = "\n            ".join(g)
-    return (f'<body name="{name}" pos="{_f(xy[0], xy[1], z0)}"{q_txt}>\n            {joint}\n            {body}\n'
+    return (f'<body name="{name}" pos="{_f(xy[0], xy[1], z0 - oz)}"{q_txt}>\n            {joint}\n            {body}\n'
             f'        </body>')
 
 
@@ -433,7 +447,7 @@ CUP_ASSETS = """
 
 def stack_cups_world_xml(cup_xy=None):
     xy = dict(CUP_XY if cup_xy is None else cup_xy)
-    cups = "\n    ".join(cup_body_xml(n, xy[n]) for n in CUP_NAMES)
+    cups = "\n    ".join(cup_body_xml(n, xy[n], origin=CUP_ORIGIN) for n in CUP_NAMES)   # V3.62 rim origin
     legacy = "\n".join(
         f'    <body name="{n}" pos="{-8 - 0.1 * i:.1f} -8 -8"><freejoint/><geom name="{n}_geom" type="sphere" size="0.001" '
         f'mass="0.001" rgba="0 0 0 0" contype="0" conaffinity="0"/></body>' for i, n in enumerate(LEGACY_HIDDEN))
@@ -517,10 +531,23 @@ def cup_axis_tilt_deg(quat_wxyz):
     return math.degrees(math.acos(max(-1.0, min(1.0, zz))))
 
 
-def cup_task_state(cup1_xyz, cup1_quat_wxyz, cup2_xyz, cup2_quat_wxyz, cup=None):
+def cup_base_point(xyz, quat_wxyz, origin="base", cup=None):
+    """V3.62: centre of a cup's bottom from its body pose (origin "base" or "rim")."""
+    if origin != "rim":
+        return [float(v) for v in xyz]
+    H = cup_geometry(cup)["h"]
+    w, x, y, z = [float(v) for v in quat_wxyz]
+    ax = (2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y))      # body z axis in the world
+    return [float(xyz[i]) - H * ax[i] for i in range(3)]
+
+
+def cup_task_state(cup1_xyz, cup1_quat_wxyz, cup2_xyz, cup2_quat_wxyz, cup=None, origin="base"):
     """stack_cups: stacked = cup_1 upright with its base inside cup_2 (success); nested_full = slid all the way down.
-    A rigid model cup that is released off-centre jams part-way (stacked, not nested_full)."""
+    A rigid model cup that is released off-centre jams part-way (stacked, not nested_full).
+    origin: body-origin convention of the given poses ("base" = V3.61 study, "rim" = V3.62 scene)."""
     g = cup_geometry(cup)
+    cup1_xyz = cup_base_point(cup1_xyz, cup1_quat_wxyz, origin, cup)
+    cup2_xyz = cup_base_point(cup2_xyz, cup2_quat_wxyz, origin, cup)
     dxy = math.hypot(cup1_xyz[0] - cup2_xyz[0], cup1_xyz[1] - cup2_xyz[1])
     dz = cup1_xyz[2] - cup2_xyz[2]
     t1, t2 = cup_axis_tilt_deg(cup1_quat_wxyz), cup_axis_tilt_deg(cup2_quat_wxyz)

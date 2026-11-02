@@ -2,7 +2,7 @@
   "skill_id": "egg_grasp_v345_baseline",
   "short_name": "Egg Baseline",
   "code": "EB",
-  "version": "V3.61",
+  "version": "V3.62",
   "saved": "2026-11-01 00:00:00",
   "is_baseline": true,
   "skill_card": {
@@ -72,14 +72,16 @@
     "dry_run_dwell_s": 1.2,
     "dry_run_wrist_refine": true,
     "dry_run_return_home": true,
-    "cup_rim_pinch_depth_mm": 25.0,
+    "cup_rim_pinch_depth_mm": 35.0,
     "cup_grasp_rim_angle_deg": 40.0,
-    "cup_place_rim_angle_deg": -55.0,
-    "cup_pregrasp_height_mm": 60.0,
+    "cup_place_rim_angle_deg": 35.0,
+    "cup_pregrasp_height_mm": 90.0,
     "cup_transport_clearance_mm": 20.0,
     "cup_release_gap_mm": 85.0,
     "cup_release_xy_tol_mm": 7.5,
     "cup_release_tilt_tol_deg": 3.0,
-    "cup_nested_height_mm": 25.3
+    "cup_nested_height_mm": 25.3,
+    "cup_clamp_force_n": 5.0,
+    "cup_wall_tilt_follow": true
   }
 }

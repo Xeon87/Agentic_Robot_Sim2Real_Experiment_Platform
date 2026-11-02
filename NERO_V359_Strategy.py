@@ -25,8 +25,9 @@ import os
 import re
 import time
 
-VERSION = "V3.61"
+VERSION = "V3.62"
 # V3.61 COLLAPSIBLE SKILL TAB + CODES AFTER SKILL NAMES + STACK CUPS SKILL (CS)
+# V3.62 CUP KNOBS READ BY THE SIM CUP SKILLS (NERO_V362_Cup_Skills): group 6 = 11 knobs, tag [仿真技能✓]
 # V3.60 BASELINE-EXACT DEFAULTS + SKILL CODES + READ-ONLY RELEASE FILES + SIM ENV INJECTION + SIM TAB
 #   * defaults restore V3.58 real behaviour (hover 100 mm, table order + trusted first)
 #   * every skill has short_name (English) + 2-letter code (EB / DP / HD / QH ...)
@@ -51,7 +52,7 @@ KNOB_GROUPS = [
     ("placement_recovery", "④ 蛋托对齐入槽与邻蛋防扰动门限 (V2.9 + V3.40)"),
     ("hover_dry_run", "⑤ 实机悬停复核与无夹爪多点预演 (Dry-Run)"),
     # V3.61 STACK CUPS: rim-pinch cup stacking (values from NERO_V361_Cup_Stack offline study)
-    ("cup_stacking", "⑥ 叠杯子：捏杯沿抓取 · 运送 · 对中松手 (V3.61 离线试验)"),
+    ("cup_stacking", "⑥ 叠杯子：捏杯沿抓取 · 运送 · 对中松手 (V3.62 仿真技能)"),
 ]
 
 SLOT_FILL_ORDERS = ("numeric_1_to_8", "nearest_to_egg", "far_to_near")
@@ -556,27 +557,29 @@ KNOB_SPECS = [
         "unit": "开关",
         "desc": "多点悬停预演全部走完后，自动退回预演开始前的初始关节姿态",
     },
-    # --- Group 6 (V3.61): stack_cups rim-pinch skill; defaults = NERO_V361_Cup_Stack study
-    #     (config/cup_stack_study_v361.json: MuJoCo release sweep + strict 6-DoF URDF IK; not measured on hardware)
+    # --- Group 6 (V3.61, values V3.62): stack_cups rim-pinch skill, read by NERO_V362_Cup_Skills at every cup task.
+    #     Defaults from the V3.62 twin study (config/cup_stack_study_v362.json: official finger pads + backend gripper
+    #     logic + scene cups in MuJoCo, plus strict 6-DoF URDF IK); not measured on hardware.
     {
         "key": "cup_rim_pinch_depth_mm", "group": "cup_stacking", "label": "捏杯沿深度", "type": "float",
-        "default": 25.0, "min": 10.0, "max": 45.0, "unit": "mm",
-        "desc": "指垫从杯口往下捏住杯壁的深度（一指在杯内、一指在杯外）；越深 TCP 越低、可达裕量越大（试验：25 mm 时最小限位裕量 12.6°，35 mm 时 16°），但受手指长度限制",
+        "default": 35.0, "min": 20.0, "max": 50.0, "unit": "mm",
+        "desc": "TCP 沿杯壁在杯口下方多深（一指在杯内、一指在杯外）；指垫长 60 mm，35 mm 时指垫上端在卷边下方，"
+                "两指都夹在平整杯壁上（V3.62：25 mm 时外指碰卷边，抬起后杯倾 3.7°）",
     },
     {
         "key": "cup_grasp_rim_angle_deg", "group": "cup_stacking", "label": "抓取杯沿方位", "type": "float",
         "default": 40.0, "min": -180.0, "max": 180.0, "unit": "deg",
-        "desc": "在被抓杯子上捏哪一点：相对「杯心→机械臂基座」方向逆时针的角度（试验最优 +40°，24 个方位中 21 个可达）",
+        "desc": "在被抓杯子上捏哪一点：相对「杯心→机械臂基座」方向逆时针的角度；规划时先试这个角度，不够 8° 关节裕量再按 ±15° 搜索",
     },
     {
         "key": "cup_place_rim_angle_deg", "group": "cup_stacking", "label": "放置杯沿方位", "type": "float",
-        "default": -55.0, "min": -180.0, "max": 180.0, "unit": "deg",
-        "desc": "放到目标杯上方时被抓点所在方位（杯子轴对称，运送途中可绕杯轴转），相对目标杯「杯心→基座」方向（试验最优 −55°）",
+        "default": 35.0, "min": -180.0, "max": 180.0, "unit": "deg",
+        "desc": "到目标杯上方时被捏点所在方位（相对目标杯「杯心→基座」方向）；必须与抓取同一夹爪翻转（V3.61 规划未保证这一点）",
     },
     {
         "key": "cup_pregrasp_height_mm", "group": "cup_stacking", "label": "抓杯前悬停高度", "type": "float",
-        "default": 60.0, "min": 30.0, "max": 120.0, "unit": "mm",
-        "desc": "TCP 在捏杯点正上方停稳的高度，再竖直下探捏住杯沿",
+        "default": 90.0, "min": 60.0, "max": 150.0, "unit": "mm",
+        "desc": "TCP 在捏杯点上方停稳的高度，再直线下探；需大于 捏杯深度 + 30 mm（指垫下半段长度），否则张开的手指会先碰到杯口",
     },
     {
         "key": "cup_transport_clearance_mm", "group": "cup_stacking", "label": "运送越杯余量", "type": "float",
@@ -586,22 +589,33 @@ KNOB_SPECS = [
     {
         "key": "cup_release_gap_mm", "group": "cup_stacking", "label": "松手高度（相对套好位置）", "type": "float",
         "default": 85.0, "min": 0.0, "max": 100.0, "unit": "mm",
-        "desc": "杯子下降到「完全套好」位置上方多少时松手（85 mm = 杯底刚进杯口约 11 mm）；试验：85 mm 时偏差 ≤15 mm、倾斜 ≤6° 全部套到底，低位松手易卡在半途",
+        "desc": "杯子下降到「完全套好」位置上方多少时松手（85 mm = 杯底刚进杯口约 11 mm）；V3.61 试验：偏差 ≤15 mm、倾斜 ≤6° 全部套到底",
     },
     {
         "key": "cup_release_xy_tol_mm", "group": "cup_stacking", "label": "松手前对中容差", "type": "float",
         "default": 7.5, "min": 2.0, "max": 15.0, "unit": "mm",
-        "desc": "松手前两杯轴心水平偏差的允许上限（试验找到 15 mm，取 0.5 安全系数）；超过则先修正再松手",
+        "desc": "松手前两杯轴心水平偏差的允许上限（按实测杯位闭环修正后再比较）",
     },
     {
         "key": "cup_release_tilt_tol_deg", "group": "cup_stacking", "label": "松手前倾斜容差", "type": "float",
         "default": 3.0, "min": 1.0, "max": 6.0, "unit": "deg",
-        "desc": "被抓杯轴线相对竖直的允许倾斜（试验在 6° 内全部成功，取一半）",
+        "desc": "被抓杯轴线相对竖直的允许倾斜：超过它给出警告，超过 2 倍则不松手",
     },
     {
         "key": "cup_nested_height_mm", "group": "cup_stacking", "label": "套好后杯底高差", "type": "float",
         "default": 25.3, "min": 10.0, "max": 40.0, "unit": "mm",
         "desc": "两杯完全套好时上杯杯底比下杯杯底高多少（仿真模型实测 25.3 mm；真杯子请实测后填写）",
+    },
+    {
+        "key": "cup_clamp_force_n", "group": "cup_stacking", "label": "捏杯夹紧力", "type": "float",
+        "default": 5.0, "min": 1.0, "max": 10.0, "unit": "N",
+        "desc": "每指目标法向力（后端力控夹紧；仿真里 10 g 杯子的接触较软，防穿透保护会把实际力限制在约 0.2–0.6 N，"
+                "抬起后由后端自动锁定保持）；真杯子薄软，实机建议先用 2–3 N",
+    },
+    {
+        "key": "cup_wall_tilt_follow", "group": "cup_stacking", "label": "沿杯壁倾斜下探", "type": "bool",
+        "default": True, "unit": "开关",
+        "desc": "TCP 接近方向向杯内倾斜一个杯壁锥角（8.2°），两指与杯壁平行；关闭则竖直下探（V3.62：默认布局下竖直下探的关节余量 < 4°，规划会拒绝；不限余量时抬起后杯倾 4.4°）",
     },
 ]
 
@@ -619,11 +633,11 @@ SIM_ENV_KNOBS = {   # knob -> (environment variable, backend default string, sca
 }
 REAL_KNOBS = ("target_order_mode", "cam_hover_verify_height_mm", "cam_hover_soft_limit_deg", "cam_hover_max_speed_pct",
               "dry_run_transit_z_lift_mm", "dry_run_dwell_s", "dry_run_wrist_refine", "dry_run_return_home")
-WIRING_LABELS = {"sim_env": "仿真✓", "real": "实机✓", "none": "未接入", "study": "离线试验✓"}
+WIRING_LABELS = {"sim_env": "仿真✓", "real": "实机✓", "none": "未接入", "study": "离线试验✓", "sim_skill": "仿真技能✓"}
 for _s360 in KNOB_SPECS:
     _s360["wired"] = "sim_env" if _s360["key"] in SIM_ENV_KNOBS else ("real" if _s360["key"] in REAL_KNOBS else "none")
-    if _s360["group"] == "cup_stacking":          # V3.61: used by NERO_V361_Cup_Stack (offline study / planner)
-        _s360["wired"] = "study"
+    if _s360["group"] == "cup_stacking":          # V3.62: read by the simulation cup skills (V3.61: "study")
+        _s360["wired"] = "sim_skill"
 
 KNOB_BY_KEY = {s["key"]: s for s in KNOB_SPECS}
 BASELINE_KNOBS = {s["key"]: s["default"] for s in KNOB_SPECS}
@@ -1166,18 +1180,19 @@ def builtin_strategy_presets():
         short_name="Quick Hover",
         code="QH",
     )
-    # V3.61 STACK CUPS: cup skill (rim pinch) - numbers from the offline study, egg knobs unchanged (not used)
+    # V3.61 STACK CUPS: cup skill (rim pinch); V3.62: numbers from the twin study, executed by NERO_V362_Cup_Skills
     cs_card = {
         "name": "叠杯子·捏杯沿技能 (Cup Stack, rim pinch)",
         "when_to_use": "stack_cups 场景：两只直立的一次性派对杯（外红内白），把一只放进另一只里面叠起来。",
         "when_not_to_use": "杯子倒放、已被压扁或杯口朝下；杯子距机械臂太远（|x| > 0.36 m 时竖直向下够不到运送高度）。",
-        "behavior_summary": ("竖直向下捏住杯沿（一指在内、一指在外，深 25 mm）→ 抬到杯底高出另一杯口 20 mm → 运到目标杯上方"
-                             "（途中绕杯轴转到放置方位）→ 对中（≤7.5 mm、≤3°）→ 下降到套好位置上方 85 mm（杯底刚进杯口）松手，"
-                             "让杯子自己滑到底。参数来自 MuJoCo 离线松手试验与 URDF 严格 IK 可达性试验。"),
+        "behavior_summary": ("捏住杯沿（接近方向沿杯壁倾斜 8.2°，一指在内、一指在外，TCP 在杯口下 35 mm，指垫在卷边下方）→ 抬到杯底"
+                             "高出另一杯口 20 mm → 慢速（0.04 m/s）运到目标杯上方 → 按实测杯位闭环对中 → 慢速下降到套好位置上方 85 mm"
+                             "（杯底刚进杯口）松手，杯子自己滑到底 → 上抬退出。抓取与放置的杯沿方位由 URDF 严格 IK 选，夹爪翻转保持一致。"),
         "scene_tags": ["stack_cups", "cup", "rim_pinch", "nesting"],
-        "sim_benchmark": {"trained_scene": "stack_cups", "noise_level": None, "success_rate": None,
+        "sim_benchmark": {"trained_scene": "stack_cups", "noise_level": "cup position +-10 mm", "success_rate": None,
                           "avg_cycle_time_s": None,
-                          "notes": "离线物理试验（只有杯子、刚体模型）+ IK 试验；机械臂完整闭环尚未在仿真里跑过，成功率未测"},
+                          "notes": "V3.62 无界面替身（官方指垫 + 后端夹爪逻辑 + 场景杯子，不含机械臂动力学）16/16 次全部套到底；"
+                                   "完整仿真链路（MoveIt/cuRobo + Agent）和真机尚未运行，成功率未填"},
     }
     cs = StrategyProfile(
         skill_id="cup_stack_rim_pinch",

@@ -1,4 +1,11 @@
-# NERO V3.61 — single-folder release
+# NERO V3.62 — single-folder release
+
+**V3.62**（叠杯子 Agent 技能：仿真里填 API key、输入任务，机械臂自动把一只杯子放进另一只）
+1. 怎么用：`bash start_nero.sh` → 仿真页场景选 `stack_cups - 叠杯子 (RoboDojo)` → ▶ 启动仿真 → NERO SimAgent 页填 API key → 任务输入 `Stack cup_1 into cup_2`（或「把 cup_2 放进 cup_1」）→ ▶ RUN TASK。位姿源保持 JSON ground truth。
+2. 技能 CS（捏杯沿）：沿杯壁斜 8.2° 下探捏住杯沿 → 抬起 → 慢速运到目标杯上方 → 闭环对中 → 降到套好位置上方 85 mm 松手，杯子自己滑到底。参数在「技能参数旋钮」第 ⑥ 组（11 项，`[仿真技能✓]`），每次任务开始读取。
+3. 后端只在一个已有 A2 块里加了调用；Agent 模块未改。
+4. 怎么验证：`bash tests/check_release.sh`（rc=0）；`python3 tests/test_v3_62.py` 会在 MuJoCo 替身里跑一次完整任务（需 `pip install mujoco`）；`python3 NERO_V362_Cup_Skills.py --study out.json` 重跑替身试验。
+5. 只在离线替身（官方指垫 + 后端夹爪逻辑 + 场景杯子，不含机械臂动力学）里验证过，**完整仿真链路和真实硬件都还没跑过**。
 
 **V3.61**（第三个仿真场景「叠杯子」+ 离线杯子技能试验 + 新技能 CS + 技能页分区折叠 + 技能名称后带缩写）
 1. 新场景：启动仿真前在场景下拉框选 `stack_cups - 叠杯子 (RoboDojo)`，桌上出现两只红色 party 杯。

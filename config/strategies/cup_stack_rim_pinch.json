@@ -2,14 +2,14 @@
   "skill_id": "cup_stack_rim_pinch",
   "short_name": "Cup Stack",
   "code": "CS",
-  "version": "V3.61",
+  "version": "V3.62",
   "saved": "2026-11-01 00:00:00",
   "is_baseline": true,
   "skill_card": {
     "name": "叠杯子·捏杯沿技能 (Cup Stack, rim pinch)",
     "when_to_use": "stack_cups 场景：两只直立的一次性派对杯（外红内白），把一只放进另一只里面叠起来。",
     "when_not_to_use": "杯子倒放、已被压扁或杯口朝下；杯子距机械臂太远（|x| > 0.36 m 时竖直向下够不到运送高度）。",
-    "behavior_summary": "竖直向下捏住杯沿（一指在内、一指在外，深 25 mm）→ 抬到杯底高出另一杯口 20 mm → 运到目标杯上方（途中绕杯轴转到放置方位）→ 对中（≤7.5 mm、≤3°）→ 下降到套好位置上方 85 mm（杯底刚进杯口）松手，让杯子自己滑到底。参数来自 MuJoCo 离线松手试验与 URDF 严格 IK 可达性试验。",
+    "behavior_summary": "捏住杯沿（接近方向沿杯壁倾斜 8.2°，一指在内、一指在外，TCP 在杯口下 35 mm，指垫在卷边下方）→ 抬到杯底高出另一杯口 20 mm → 慢速（0.04 m/s）运到目标杯上方 → 按实测杯位闭环对中 → 慢速下降到套好位置上方 85 mm（杯底刚进杯口）松手，杯子自己滑到底 → 上抬退出。抓取与放置的杯沿方位由 URDF 严格 IK 选，夹爪翻转保持一致。",
     "scene_tags": [
       "stack_cups",
       "cup",
@@ -18,10 +18,10 @@
     ],
     "sim_benchmark": {
       "trained_scene": "stack_cups",
-      "noise_level": null,
+      "noise_level": "cup position +-10 mm",
       "success_rate": null,
       "avg_cycle_time_s": null,
-      "notes": "离线物理试验（只有杯子、刚体模型）+ IK 试验；机械臂完整闭环尚未在仿真里跑过，成功率未测"
+      "notes": "V3.62 无界面替身（官方指垫 + 后端夹爪逻辑 + 场景杯子，不含机械臂动力学）16/16 次全部套到底；完整仿真链路（MoveIt/cuRobo + Agent）和真机尚未运行，成功率未填"
     }
   },
   "knobs": {
@@ -70,14 +70,16 @@
     "dry_run_dwell_s": 1.2,
     "dry_run_wrist_refine": true,
     "dry_run_return_home": true,
-    "cup_rim_pinch_depth_mm": 25.0,
+    "cup_rim_pinch_depth_mm": 35.0,
     "cup_grasp_rim_angle_deg": 40.0,
-    "cup_place_rim_angle_deg": -55.0,
-    "cup_pregrasp_height_mm": 60.0,
+    "cup_place_rim_angle_deg": 35.0,
+    "cup_pregrasp_height_mm": 90.0,
     "cup_transport_clearance_mm": 20.0,
     "cup_release_gap_mm": 85.0,
     "cup_release_xy_tol_mm": 7.5,
     "cup_release_tilt_tol_deg": 3.0,
-    "cup_nested_height_mm": 25.3
+    "cup_nested_height_mm": 25.3,
+    "cup_clamp_force_n": 5.0,
+    "cup_wall_tilt_follow": true
   }
 }
