@@ -5,7 +5,9 @@ TwinArm      - arm adapter (q(), model, exec_path(path, times)) that drives the 
                path RealIO would send to MoveIt's /execute_trajectory (no re-planning), and records every call
 TwinGripper  - the SO101RealGripper interface (open_deg / clamp / status / held) acting on the twin's SO-101 jaw,
                with the real angle <-> virtual opening conversion of NERO_V365_STS3215_Gripper
-twin_camera  - camera_fn: the twin's rendered fixed D435i (RGB + depth + K + T_base_cam), like camera_from_tab
+twin_camera  - camera_fn: the twin's rendered fixed D435i (RGB + depth + K + T_base_cam), like camera_from_tab;
+               V3.66: with a YOLOE stand-in (FakeYoloE) whose instance masks come from MuJoCo's segmentation render
+               (one mask per visible cup, a nested pair = one mask, like YOLOE on the real camera)
 """
 import math
 import os
@@ -74,10 +76,60 @@ class TwinGripper:
                 "load_pct": pct if self.held else 3.0, "current_ma": 300.0, "errors": []}
 
 
-def twin_camera(tw):
+class FakeYoloE:
+    """V3.66 test double of NERO_V347 YoloEDetector.detect: returns the instance masks prepared by the camera
+    function for the frame it just rendered (cls 0 = target, name "cup")"""
+    def __init__(self):
+        self.next = []
+        self.calls = 0
+        self.info = {"device": "CPU"}
+
+    def detect(self, rgb, mode, model_path, ref=None, prompts=None, conf=0.25):
+        self.calls += 1
+        return [d for d in self.next if d["conf"] >= conf]
+
+
+def _seg_dets(tw):
+    import mujoco
+    import numpy as np
+    import NERO_V308_Camera_Perception as P8
+    r = tw._renderer
+    r.enable_segmentation_rendering()
+    try:
+        r.update_scene(tw.d, camera=P8.CAMERA_NAME)
+        seg = r.render().copy()
+    finally:
+        r.disable_segmentation_rendering()
+    m = tw.m
+    masks = []
+    for name in ("obj_cup_1", "obj_cup_2"):
+        bid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, name)
+        gids = [g for g in range(m.ngeom) if m.geom_bodyid[g] == bid]
+        mk = (seg[..., 1] == int(mujoco.mjtObj.mjOBJ_GEOM)) & np.isin(seg[..., 0], gids)
+        if mk.sum() >= 300:
+            masks.append(mk)
+
+    def box(mk):
+        ys, xs = np.nonzero(mk)
+        return [float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())]
+    if len(masks) == 2:
+        a, b = box(masks[0]), box(masks[1])
+        ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+        if ix > 0.3 * min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1])):
+            masks = [masks[0] | masks[1]]                   # nested pair: one YOLOE instance
+    return [{"cls": 0, "name": "cup", "conf": 0.9, "box": box(mk), "mask": mk} for mk in masks]
+
+
+def twin_camera(tw, detector=None):
+    det = detector or FakeYoloE()
+
     def fn():
         rgb, depth, K, T = tw.render_fixed_camera()
-        return {"rgb": rgb, "depth": depth, "K": K, "T_base_cam": T, "z_table": 0.0, "workspace": None}
+        det.next = _seg_dets(tw)
+        return {"rgb": rgb, "depths": [depth], "K": K, "T_base_cam": T, "z_table": 0.0, "fence_poly": None,
+                "calib_note": None, "yolo": {"detector": det, "mode": "text", "path": "fake-yoloe.pt",
+                                             "prompts": ["cup"], "conf": 0.25}}
+    fn.detector = det
     return fn
 
 

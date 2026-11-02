@@ -77,8 +77,8 @@ except Exception:
 
 # ------------------------------------------------------------------ W1
 for m in (CON, RR, YP, W49, GR, RT):
-    assert m.VERSION == "V3.65", (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "V3.65"
+    assert m.VERSION in ("V3.65", "V3.66"), (m.__name__, m.VERSION)
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.65", "V3.66")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 for fn, h in (("NERO_V326_Wrist_Camera.py", "6b5c5d683073e4252b82c1c703ad664173960a179947f9e72775bb9683697d0a"),
               ("NERO_V2_7_1_Agent.py", "3e52d05ea84d94c8359d5875fa0fee8c2cc42d612b52e59109e1166912439696"),
@@ -381,7 +381,8 @@ if HAVE_MJ:
         assert max(abs(a - b) for a, b in zip(tw.q, [0.0] * 7)) < 1e-6
         assert grip7.clamps and all(15.0 <= p_ <= 25.0 for p_, _f in grip7.clamps)
         assert max(c_["max_step_deg"] for c_ in arm7.calls) <= 2.0 + 1e-6
-        assert any("V3.65 REAL CUP PERCEPTION" in l for l in log7)
+        # V3.66: the real perception is the Camera tab's YOLOE pipeline (twin camera: YOLOE stand-in)
+        assert any("V3.65 REAL CUP PERCEPTION" in l or "V3.66 REAL CUP YOLOE" in l for l in log7)
         print(f"[W7] twin as the real body: plan = no motion; hover OK (no clamp, back at start); execute nested, "
               f"{len(arm7.calls)} joint paths, back at the start posture")
     else:

@@ -8,7 +8,8 @@ clearance, descent along the wall, low release + sidestep) and the same LLM tool
 
   RealIO (this module)           simulation (BackendIO / TwinIO)
   -----------------------------  -------------------------------------------------------------
-  eyes   fixed D435i (Camera tab stream + hand-eye calibration T_base_cam) -> NERO_V363 perceive_cups
+  eyes   fixed D435i (Camera tab stream + hand-eye calibration T_base_cam) -> V3.66: the Camera tab's YOLOE
+         object pipeline + cup axis / silhouette height (NERO_V366_Real_Cup_Yolo; no colour fallback)
   arm    joint paths through MoveIt /execute_trajectory (NERO_V313 joint path, fence-checked):
          straight segments = strict-continuity IK points (like the twin), joint moves = linear joint interpolation
   hand   SO-101 jaw on an STS3215 bus servo (NERO_V365_STS3215_Gripper): position control + torque limit clamp
@@ -27,7 +28,7 @@ import time
 
 import numpy as np
 
-VERSION = "V3.65"
+VERSION = "V3.66"
 MARKER = "V3.65 NERO REAL CUP TASK"
 CALIB_DIR = os.environ.get("NERO_CALIB_DIR") or os.path.expanduser("~/Downloads/cameracalib")
 SETTINGS_NAME = "real_cup_task.json"
@@ -45,7 +46,6 @@ DEFAULT_CFG = {
     "lift_settle_s": 0.5,           # real gripper: no CONNECT hold swing -> short settle only
 }
 EXAMPLES = (("cup_1 → cup_2", "Stack cup_1 into cup_2"), ("cup_2 → cup_1", "Put cup_2 into cup_1"))
-_CP_LOCK = threading.Lock()
 
 
 def load_settings(path=None):
@@ -327,31 +327,19 @@ class RealIO:
         return [(c, Tg[:3, :3], np.array([0.055, 0.04, 0.075]))]
 
     def perceive(self, tag):
-        """fixed D435i -> NERO_V363 perceive_cups, in a frame with the table at z = 0 (the perception looks for the
-        table around z = 0), results shifted back to base_link"""
-        import NERO_V363_Cup_Perception as CP
+        """V3.66 REAL CUP YOLOE PERCEPTION: fixed D435i -> the Camera tab's YOLOE object pipeline (same detector, model,
+        prompt resolution, depth fusion, locate_objects) + cup axis / silhouette height / kind (NERO_V366).
+        No colour fallback: YOLOE unavailable -> the perception raises, the skill aborts (PERCEPTION_UNAVAILABLE)."""
+        import NERO_V366_Real_Cup_Yolo as YC
         cam = self.camera_fn()
-        zt = float(cam.get("z_table") or 0.0)
-        T = np.array(cam["T_base_cam"], float)
-        T[2, 3] -= zt
-        with _CP_LOCK:
-            ws0 = CP.WORKSPACE
-            if cam.get("workspace"):
-                CP.WORKSPACE = cam["workspace"]
-            try:
-                res = CP.perceive_cups(np.asarray(cam["rgb"]), np.asarray(cam["depth"], float), cam["K"], T,
-                                       robot_boxes=self.gripper_boxes(zt))
-            finally:
-                CP.WORKSPACE = ws0
-        for c in res["cups"]:
-            c["base_xyz_m"][2] = round(c["base_xyz_m"][2] + zt, 4)
-            c["rim_xyz_m"][2] = round(c["rim_xyz_m"][2] + zt, 4)
-        res["table_z_m"] = round(float(res.get("table_z_m", 0.0)) + zt, 4)
+        try:
+            res = YC.perceive_cups_yolo(cam, robot_boxes=self.gripper_boxes())
+        except YC.YoloCupUnavailable as exc:
+            self.emit(f"[FAIL] [V3.66 REAL CUP YOLOE] YOLOE 不可用：{exc} → 任务终止（不改用颜色法）")
+            raise
         self.last_perception = res
-        self.emit(f"[V3.65 REAL CUP PERCEPTION] {tag} | table z {res['table_z_m'] * 1000:+.0f} mm | red px "
-                  f"{res.get('n_red_px')} | " + (" ".join(
-                      f"{c['kind']}@({c['base_xyz_m'][0]:+.3f},{c['base_xyz_m'][1]:+.3f}) h={c['height_mm']:.0f}mm"
-                      for c in res["cups"]) or "no cup"))
+        self.emit(f"[V3.66 REAL CUP YOLOE] {tag} | table z {res['table_z_m'] * 1000:+.0f} mm | YOLOE {res['n_2d']} 个 | "
+                  + YC.summary(res))
         return res
 
 
@@ -488,8 +476,11 @@ class PipelineArm:
         return dict(r, kind="steps")
 
 
-def camera_from_tab(cam_tab, n_frames=3, timeout_s=3.0):
-    """D435i frames (median depth of n new frames) + K + T_base_cam + z_table + workspace from the Camera tab"""
+def camera_from_tab(cam_tab, yolo=None, n_frames=None, timeout_s=3.0):
+    """V3.66 REAL CUP YOLOE PERCEPTION: D435i frames exactly like the Camera tab's object recognition
+    (_grab_frames(YP.FUSE_FRAMES): colour of the last frame + all depth frames) + K + T_base_cam + fence (z_table,
+    polygon) + calibration note + the Camera tab's YOLOE settings (yolo_cfg_from_tab, read in the Tk thread)"""
+    import NERO_V347_Yolo_Perception as YP
     src = getattr(cam_tab, "src", None)
     if src is None or not src.running():
         raise RuntimeError("主相机 D435i 没有连接（本页「连接主相机」或 Camera调试 页）")
@@ -498,30 +489,46 @@ def camera_from_tab(cam_tab, n_frames=3, timeout_s=3.0):
         raise RuntimeError("没有主相机手眼标定（Camera调试 → 标定）")
     if src.K is None:
         raise RuntimeError("相机内参还没读到")
-    frames, last, t_end = [], -1, time.time() + timeout_s
-    rgb = None
-    while len(frames) < n_frames and time.time() < t_end:
-        r_, d_, fid = src.frames()
-        if r_ is not None and d_ is not None and fid != last:
-            rgb, last = r_, fid
-            frames.append(np.asarray(d_, float))
-        time.sleep(0.04)
-    if not frames:
+    n = int(n_frames or YP.FUSE_FRAMES)
+    if hasattr(cam_tab, "_grab_frames"):
+        rgb, depths = cam_tab._grab_frames(n, timeout=timeout_s)
+    else:
+        rgb, depths, last, t_end = None, [], -1, time.time() + timeout_s
+        while len(depths) < n and time.time() < t_end:
+            r_, d_, fid = src.frames()
+            if r_ is not None and d_ is not None and fid != last:
+                rgb, last = r_, fid
+                depths.append(d_)
+            else:
+                time.sleep(0.02)
+    if rgb is None or not depths:
         raise RuntimeError("没有拿到相机帧")
-    st = np.stack(frames)
-    st[st <= 0] = np.nan
-    with np.errstate(all="ignore"):
-        depth = np.nan_to_num(np.nanmedian(st, axis=0), nan=0.0)
     fence = cam_tab._fence() if hasattr(cam_tab, "_fence") else None
-    zt = float((fence or {}).get("z_table", 0.0) or 0.0)
-    ws = None
-    poly = (fence or {}).get("polygon")
-    if poly:
-        xs, ys = [float(p[0]) for p in poly], [float(p[1]) for p in poly]
-        ws = {"x": (min(xs), max(xs)), "y": (min(ys), max(ys))}
+    zt = (fence or {}).get("z_table")
     note = cam_tab._calib_note() if hasattr(cam_tab, "_calib_note") else None
-    return {"rgb": rgb, "depth": depth, "K": dict(src.K), "T_base_cam": calib["T_base_cam"], "z_table": zt,
-            "workspace": ws, "calib_note": note}
+    return {"rgb": rgb, "depths": list(depths), "K": dict(src.K), "T_base_cam": calib["T_base_cam"],
+            "z_table": None if zt is None else float(zt), "fence_poly": (fence or {}).get("polygon"),
+            "calib_note": note, "yolo": yolo}
+
+
+KIND_TEXT = {"cup": ("单杯", "#00e676"), "stack": ("已叠好", "#00e5ff"), "unknown": ("不像杯子", "#ff9100"),
+             "lifted": ("在夹爪里", "#b0bec5"), "outside": ("围栏外", "#ff5252"), "edge": ("被画面切掉", "#ff9100"),
+             "no_depth": ("没有深度", "#ff9100"), "rejected": ("剔除", "#9e9e9e")}
+
+
+def overlay_dets(res):
+    """V3.66 REAL CUP YOLOE PERCEPTION: YOLOE contours + labels (image pixels) for the main monitor"""
+    out = []
+    for e in (res or {}).get("dets") or []:
+        if not e.get("contour"):
+            continue
+        txt, col = KIND_TEXT.get(e.get("kind"), (str(e.get("kind")), "#ff9100"))
+        h = e.get("height_mm")
+        top = min(e["contour"], key=lambda p: p[1])
+        out.append({"contour": e["contour"], "color": col, "anchor": top,
+                    "label": f"{e.get('det_id', '')} {txt}" + (f" {h:.0f}mm" if h is not None else "")
+                             + f" {e.get('conf', 0):.2f}"})
+    return out
 
 
 # ================================================================================================ GUI tab
@@ -546,7 +553,7 @@ class RealCupTaskTabUI:
         self.io = None
         self.agent = None
         self.skills = None
-        self.overlay = {"cups": [], "plan": None}
+        self.overlay = {"cups": [], "plan": None, "dets": []}
         self.knobs, self.skill = None, None
         self.photo = self.photo_w = None
         self._shown = (-1, -1)
@@ -597,6 +604,16 @@ class RealCupTaskTabUI:
         ttk.Button(cb, text="▶ 连接主相机", command=self.on_cam_connect).pack(side="left")
         ttk.Button(cb, text="▶ 连接腕部相机", command=self.on_wrist_connect).pack(side="left", padx=4)
         ttk.Button(cb, text="识别杯子（不动）", command=self.on_perceive).pack(side="left", padx=4)
+        # V3.66 REAL CUP YOLOE PERCEPTION: the Camera tab's YOLOE object recognition (same model / confidence)
+        yb = ttk.Frame(left)
+        yb.pack(fill="x", pady=(0, 2))
+        ttk.Label(yb, text="杯子识别 YOLOE 提示词").pack(side="left")
+        self.v_cup_prompt = tk.StringVar(value=str(self.st.get("cup_prompt") or "cup"))
+        ttk.Entry(yb, textvariable=self.v_cup_prompt, width=14).pack(side="left", padx=2)
+        ttk.Label(yb, text="（模型 / 置信度 = Camera调试 → 视觉定位）").pack(side="left")
+        self.v_yolo = tk.StringVar(value="")
+        JC.fixed_label(tk, left, 2, width=self.DW, textvariable=self.v_yolo, font=("TkDefaultFont", 8),
+                       wraplength=self.DW - 6, pack={"fill": "x"})
 
         # -- gripper
         gf = ttk.LabelFrame(right, text="SO-101 夹爪（STS3215 舵机 · 180° = 夹紧，正角度 = 张开）")
@@ -820,6 +837,15 @@ class RealCupTaskTabUI:
             if pc[2] <= 0.05:
                 return None
             return ((K["fx"] * pc[0] / pc[2] + K["ppx"]) * sx, (K["fy"] * pc[1] / pc[2] + K["ppy"]) * sy)
+        for d in self.overlay.get("dets") or []:           # V3.66 REAL CUP YOLOE PERCEPTION: YOLOE masks
+            pts = []
+            for u, v in d["contour"]:
+                pts += [u * sx, v * sy]
+            if len(pts) >= 6:
+                self.cv.create_polygon(*pts, outline=d["color"], fill="", width=2)
+            if d.get("anchor"):
+                self.cv.create_text(d["anchor"][0] * sx, d["anchor"][1] * sy - 2, text=d["label"], fill=d["color"],
+                                    anchor="s", font=("TkDefaultFont", 8, "bold"))
         for name, c in self.overlay.get("cups") or []:
             uv = proj(c["rim_xyz_m"])
             if uv:
@@ -957,7 +983,7 @@ class RealCupTaskTabUI:
             pass
         d.update(provider=next((k for k, v in self.provs.items() if v == self.v_prov.get()), "openai"),
                  model=self.v_model.get().strip(), effort=self.v_effort.get(), task=self.v_task.get().strip(),
-                 use_llm=bool(self.v_use_llm.get()))
+                 use_llm=bool(self.v_use_llm.get()), cup_prompt=self.v_cup_prompt.get().strip() or "cup")
         try:
             d["max_steps"] = int(self.v_steps.get())
         except ValueError:
@@ -990,9 +1016,18 @@ class RealCupTaskTabUI:
             raise ValueError("关节速度 1–30 °/s，直线速度 5–50 mm/s，扭矩 5–80 %")
         return {"joint_vmax_deg_s": jv, "line_vmax_mm_s": lv, "clamp_torque_pct": tq}
 
-    def preflight(self, mode):
+    def yolo_cfg(self):
+        """V3.66 REAL CUP YOLOE PERCEPTION: the Camera tab's YOLOE settings (Tk thread)"""
+        import NERO_V366_Real_Cup_Yolo as YC
+        cfg = YC.yolo_cfg_from_tab(self.cam_tab, self.v_cup_prompt.get().strip() or YC.DEFAULT_PROMPT)
+        self.v_yolo.set(YC.describe_cfg(cfg))
+        return cfg
+
+    def preflight(self, mode, ycfg=None):
         """-> list of blocking problems for a run mode"""
         bad = []
+        if ycfg is not None and ycfg.get("error"):
+            bad.append(f"YOLOE 不可用：{ycfg['error']}")
         src = getattr(self.cam_tab, "src", None)
         if src is None or not src.running():
             bad.append("主相机 D435i 没有连接")
@@ -1039,7 +1074,8 @@ class RealCupTaskTabUI:
         if self.busy():
             self._log("[WARN] [V3.65 REAL] 上一个任务还在运行")
             return
-        bad = self.preflight(mode)
+        ycfg = self.yolo_cfg()
+        bad = self.preflight(mode, ycfg)
         if bad:
             self._log("[FAIL] [V3.65 REAL] 不能开始：" + "；".join(bad))
             return
@@ -1058,14 +1094,16 @@ class RealCupTaskTabUI:
                "model": self.v_model.get().strip(), "api_key": self.v_key.get().strip(),
                "reasoning_effort": self.v_effort.get(), "max_tool_steps": steps, "task": task}
         knobs, skill = self.knobs, self.skill
+        ycfg_text = self.v_yolo.get()
         arm = PipelineArm(self.pipe, lambda: self.jpanel.model, log=self._log)
-        io = RealIO(arm, self.grip if self.grip.connected else None, lambda: camera_from_tab(self.cam_tab),
+        io = RealIO(arm, self.grip if self.grip.connected else None, lambda: camera_from_tab(self.cam_tab, yolo=ycfg),
                     log=self._log, cfg=mc, motion_allowed=(mode != "plan"))
         self.io = io
 
         def job():
             t0 = time.time()
             note = None
+            self._log(f"[INFO] [V3.66 REAL CUP YOLOE] {ycfg_text}")
             try:
                 note = camera_from_tab(self.cam_tab, n_frames=1).get("calib_note")
             except Exception:
@@ -1127,7 +1165,8 @@ class RealCupTaskTabUI:
         pl = None
         if plan and plan.get("_wps"):
             pl = {"grasp": plan["_wps"]["grasp"][0], "release": plan["_wps"]["release"][0]}
-        self._ui(lambda: self.overlay.update(cups=cups, plan=pl))
+        dets = overlay_dets(res)
+        self._ui(lambda: self.overlay.update(cups=cups, plan=pl, dets=dets))
 
     def copy_log(self):
         try:

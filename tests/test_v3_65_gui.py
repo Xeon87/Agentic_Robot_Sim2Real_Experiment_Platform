@@ -59,12 +59,34 @@ class Src:
         return CAM.ppm_bytes(np.zeros((size[1], size[0], 3), np.uint8) + self.shade)
 
 
+class _Det:                                   # V3.66: the Camera tab's YOLOE detector (sees no cup here)
+    info = {"device": "CPU"}
+
+    def detect(self, rgb, mode, path, ref=None, prompts=None, conf=0.25):
+        return []
+
+
+class _V:
+    def __init__(self, v):
+        self.v = v
+
+    def get(self):
+        return self.v
+
+
+MODEL_DIR = TMP / "objectmodels"
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+(MODEL_DIR / "yoloe-26s-seg.pt").write_bytes(b"fake")
+
+
 class Cam:
     result, worker = None, None
     calib = {"T_base_cam": np.eye(4).tolist()}
 
     def __init__(self):
         self.src, self.wrist_src = Src(90), Src(60)
+        self.det_yolo = _Det()
+        self.v_ydir, self.v_ymodel, self.v_yconf = _V(str(MODEL_DIR)), _V("yoloe-26s-seg.pt"), _V("0.25")
 
     def _fence(self):
         return {"z_table": 0.0, "polygon": [[-0.8, -0.4], [-0.1, -0.4], [-0.1, 0.4], [-0.8, 0.4]]}
