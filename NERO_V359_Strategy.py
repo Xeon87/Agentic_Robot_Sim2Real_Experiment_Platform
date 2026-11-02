@@ -25,7 +25,7 @@ import os
 import re
 import time
 
-VERSION = "V3.63"
+VERSION = "V3.64"
 # V3.61 COLLAPSIBLE SKILL TAB + CODES AFTER SKILL NAMES + STACK CUPS SKILL (CS)
 # V3.62 CUP KNOBS READ BY THE SIM CUP SKILLS (NERO_V362_Cup_Skills): group 6 = 11 knobs, tag [仿真技能✓]
 # V3.63 CS skill card: joint-space safe motion + fixed D435i cup perception (knob values unchanged)

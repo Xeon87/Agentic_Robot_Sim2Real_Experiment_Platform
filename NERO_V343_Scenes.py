@@ -40,8 +40,14 @@ SCENES = {
     # V3.61 STACK CUPS SCENE (RoboDojo-style): two red/white party cups on the same table, stack one into the other
     "stack_cups": {"label": "stack_cups - 叠杯子 (RoboDojo)",
                    "summary": "two red party cups upright on the table: put cup_1 into cup_2 (nested stack)"},
+    # V3.64 SO-101 GRIPPER ON NERO: a VARIANT of stack_cups (same cups / table / task / skills, other gripper).
+    # Scene code keeps seeing "stack_cups" (active_scene() returns the base scene, so the backend, the camera process
+    # and every stack_cups branch run unchanged); only the MJCF builder and the cup skills read gripper_variant().
+    "stack_cups_so101": {"label": "stack_cups_so101 - 叠杯子 · SO-101 夹爪 (7 mm 转接环, 偏转 45°)",
+                         "summary": "stack_cups with the SO-101 gripper on a 7 mm adapter ring, rolled 45 deg",
+                         "base": "stack_cups", "gripper": "so101"},
 }
-SCENES_REV = "V3.62"       # VERSION above stays "V3.44" (tests pin it); this module gained stack_cups in V3.61
+SCENES_REV = "V3.64"       # VERSION above stays "V3.44" (tests pin it); stack_cups V3.61, stack_cups_so101 V3.64
 HERE = Path(__file__).resolve().parent
 
 # ----------------------------------------------------------------------------- geometry (store_in_safe)
@@ -60,13 +66,29 @@ def scene_from_env():
     return s if s in SCENES else None
 
 
+def base_scene(name):
+    """V3.64: a scene variant (stack_cups_so101) -> its base scene (stack_cups); other names unchanged"""
+    return SCENES.get(name, {}).get("base", name)
+
+
 def selected_scene():
-    return scene_from_env() or DEFAULT_SCENE
+    return base_scene(scene_from_env() or DEFAULT_SCENE)
 
 
 def active_scene():
     s = (os.environ.get("NERO_V343_ACTIVE_SCENE") or "").strip()
-    return s if s in SCENES else selected_scene()
+    return base_scene(s) if s in SCENES else selected_scene()
+
+
+def selected_variant():
+    """V3.64: the scene exactly as chosen in the console (NERO_SCENE, may be a variant such as stack_cups_so101)"""
+    s = scene_from_env() or DEFAULT_SCENE
+    return s if base_scene(s) == active_scene() else active_scene()
+
+
+def gripper_variant():
+    """V3.64 SO-101 GRIPPER ON NERO: "so101" for stack_cups_so101, else "official" (AgileX gripper)"""
+    return SCENES.get(selected_variant(), {}).get("gripper", "official")
 
 
 def scene_names():
@@ -512,6 +534,11 @@ def make_stack_cups_xml(original_xml_path, visual_quality=None):
     xml = xml.replace("<worldbody>", "<worldbody>\n" + stack_cups_world_xml(), 1)
     if visual_quality is not None:
         xml = visual_quality(xml)
+    so101 = gripper_variant() == "so101"
+    if so101:                                           # V3.64 SO-101 GRIPPER ON NERO (backend then adds no gripper)
+        import NERO_V364_SO101_Gripper as _G364
+        xml = _G364.insert_into_model_xml(xml)
+        print(f"[V3.64 SCENE] stack_cups_so101: SO-101 gripper mounted on link7 {_G364.describe()}", flush=True)
     eq = "\n        ".join(
         f'<connect name="hold_{o}" body1="link7" body2="{o}" anchor="0 0 0" active="false" '
         f'solref="0.008 1" solimp="0.98 0.995 0.001"/>' for o in hold_object_names())
@@ -519,7 +546,7 @@ def make_stack_cups_xml(original_xml_path, visual_quality=None):
         xml = xml.replace("</equality>", "        " + eq + "\n    </equality>", 1)
     else:
         xml = xml.replace("</mujoco>", "    <equality>\n        " + eq + "\n    </equality>\n</mujoco>", 1)
-    out = src.with_name("_nero_motor_v343_stack_cups_tmp.xml")
+    out = src.with_name("_nero_motor_v343_stack_cups_so101_tmp.xml" if so101 else "_nero_motor_v343_stack_cups_tmp.xml")
     out.write_text(xml, encoding="utf-8")
     return str(out)
 

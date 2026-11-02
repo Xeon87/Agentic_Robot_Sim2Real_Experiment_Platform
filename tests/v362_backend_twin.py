@@ -199,12 +199,16 @@ class ScriptedLLM:
 
 
 def run_backend_episode(task="Stack cup_1 into cup_2", source="cup_1", target="cup_2", knobs=None, trip_on=None,
-                        trips=1, pose_mode="truth", wrist=False, camera_up=True):
+                        trips=1, pose_mode="truth", wrist=False, camera_up=True, gripper="official"):
     """gui_run_task exactly as the backend A2 block calls it -> dict(log, final state, llm, core, twin)"""
     import NERO_V2_7_1_Agent as AG
     log = []
     sh = make_shared()
-    tw = SyncedTwin(sh, log=log.append)
+    tw = SyncedTwin(sh, log=log.append, gripper=gripper)
+    # V3.64: the scene chosen in the console decides the gripper profile of BackendIO
+    env_keep = {k_: os.environ.get(k_) for k_ in ("NERO_SCENE", "NERO_V343_ACTIVE_SCENE")}
+    if gripper == "so101":
+        os.environ["NERO_SCENE"], os.environ["NERO_V343_ACTIVE_SCENE"] = "stack_cups_so101", "stack_cups"
     core = FakeCore(tw, log, sh, trip_on=trip_on, trips=trips)
     core.cur_label = ""
     agent = AG.NeroLLMAgent(emit=log.append, tool_runner=None)
@@ -268,6 +272,11 @@ def run_backend_episode(task="Stack cup_1 into cup_2", source="cup_1", target="c
             "latch_pending": lambda: core.latched, "clear_latch": _clear,
         })
     finally:
+        for k_, v_ in env_keep.items():
+            if v_ is None:
+                os.environ.pop(k_, None)
+            else:
+                os.environ[k_] = v_
         CK.BackendIO.move_line, CK.BackendIO.move_joints = _orig_ml, _orig_mj
         AG._v360_append_score = orig_append
         if knobs is not None:

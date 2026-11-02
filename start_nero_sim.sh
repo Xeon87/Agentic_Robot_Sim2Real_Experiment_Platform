@@ -158,7 +158,12 @@ status INFO "MuJoCo model (external): $MODEL_FILE sha256=$(sha256sum "$MODEL_FIL
 SCENE344="${NERO_SCENE:-fill_egg_holder}"
 case "$SCENE344" in
   fill_egg_holder|store_in_safe|stack_cups) ;;   # V3.61 STACK CUPS SCENE
-  *) fatal "Unknown NERO_SCENE='$SCENE344' (known: fill_egg_holder, store_in_safe, stack_cups)";;
+  stack_cups_so101)                              # V3.64 SO-101 GRIPPER ON NERO (variant of stack_cups)
+    python3 -m py_compile "$HERE/NERO_V364_SO101_Gripper.py" || fatal "py_compile failed: NERO_V364_SO101_Gripper.py (V3.64 SO-101 GRIPPER)"
+    for f364 in wrist_roll_follower_so101_v1.stl moving_jaw_so101_v1.stl sts3215_03a_v1.stl; do
+      [[ -f "$HERE/assets/so101/$f364" ]] || fatal "Missing SO-101 mesh assets/so101/$f364 (V3.64 SO-101 GRIPPER)"
+    done ;;
+  *) fatal "Unknown NERO_SCENE='$SCENE344' (known: fill_egg_holder, store_in_safe, stack_cups, stack_cups_so101)";;
 esac
 export NERO_SCENE="$SCENE344"
 status INFO "V3.44 MuJoCo scene: $SCENE344 (chosen in the NERO console before start; default fill_egg_holder)"

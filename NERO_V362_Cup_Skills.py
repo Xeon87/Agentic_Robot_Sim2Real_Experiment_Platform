@@ -38,9 +38,10 @@ import sys
 import threading
 import time
 
-VERSION = "V3.63"
+VERSION = "V3.64"
 MARKER = "V3.62 STACK CUPS AGENT SKILLS"
 MARKER_V363 = "V3.63 JOINT-SPACE SAFE MOTION + FIXED D435i CUP PERCEPTION"
+MARKER_V364 = "V3.64 SO-101 GRIPPER ON NERO"
 HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
@@ -167,16 +168,94 @@ def pinch_frame(phi_rad, flip, tilt_follow=True):
     return R @ np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
 
 
-def pinch_tcp(rim_centre, phi_rad, depth_m, flip, tilt_follow=True):
-    """TCP position + rotation pinching the wall at rim angle phi, `depth` (along the wall) below the rim."""
+class GripperProfile:
+    """V3.64 GRIPPER PROFILES: the skill plans the GRASP frame (origin on the wall mid-surface where the jaws pinch,
+    z = approach, y = closing direction); a profile gives the fixed transform official TCP (URDF tcp_link: MoveIt, IK,
+    TF) -> grasp frame and the gripper openings (backend units, opening = 2000 * gripper_joint1)."""
+
+    def __init__(self, name, T_tcp_grasp, open_mm, label, approach_clearance_m=0.0, approach_along_wall=False,
+                 flips=(False, True), release_gap_max_mm=None, lift_settle_s=0.0,
+                 release_tilt_max_deg=0.0):
+        self.name, self.T_tcp_grasp, self.open_mm, self.label = name, np.asarray(T_tcp_grasp, float), float(open_mm), label
+        # V3.64: a gripper with a FIXED jaw (SO-101) descends with this clearance between the fixed pad and the wall
+        # (grasp frame moved along -y); clamping then slides the 10 g cup onto the fixed jaw
+        self.approach_clearance_m = float(approach_clearance_m)
+        # V3.64: ... and descends ALONG the conical wall (grasp z axis) instead of vertically, so the pad that stays
+        # outside the wall keeps that clearance past the rim bead (vertical: the cone narrows below the rim)
+        self.approach_along_wall = bool(approach_along_wall)
+        # V3.64 JAW SIDES: allowed pinch flips.  flip=True puts the grasp -y side (SO-101: the FIXED jaw) OUTSIDE the
+        # wall and the moving jaw inside.  A falling cup's conical wall moves OUTWARD at a fixed height (8.2 deg:
+        # +12 mm over the 85 mm release drop): with the moving jaw outside the cup caught it before it had opened, and
+        # with the fixed jaw inside the cup tilted 18 deg in the grip (V3.64 twin).  Fixed jaw outside + the release
+        # sidestep (TCP moved outward, fixed pad off the wall) is the combination that nests.
+        self.flips = tuple(flips)
+        # V3.64 LOW RELEASE: cap of the cup_release_gap_mm knob.  A one-side pinch holds less torque: the SO-101-held
+        # cup leans 1-3 deg, and over an 85 mm drop its base caught the target's inner wall and it hung on the jaw
+        self.release_gap_max_mm = release_gap_max_mm
+        # V3.64 LIFT SETTLE: during the lift the backend's pad-penetration guard opens the jaws and the cup swings on
+        # the CONNECT hold (official gripper too: up to 31 deg, upright again by the end of the lift).  The SO-101 jaw
+        # opens less and the cup needs ~2 s more to hang upright and be re-clamped -> wait before carrying it.
+        self.lift_settle_s = float(lift_settle_s)
+        # V3.64 LOW RELEASE: a cup released only 35 mm above its nested height still nests when it leans a little more
+        # (one-side pinch: pad friction keeps a carry lean of 6-9 deg); 0 = the knob rule (2 x cup_release_tilt_tol_deg)
+        self.release_tilt_max_deg = float(release_tilt_max_deg)
+
+        Rg = self.T_tcp_grasp[:3, :3]
+        if abs(np.linalg.det(Rg) - 1.0) > 1e-6 or np.abs(Rg.T @ Rg - np.eye(3)).max() > 1e-6:
+            raise ValueError(f"gripper profile {name}: TCP -> grasp transform is not a proper rotation")
+        self.T_grasp_tcp = np.linalg.inv(self.T_tcp_grasp)
+
+    def pre_offset(self, R, pre):
+        """pregrasp offset from the grasp TCP (same height `pre` either way)"""
+        if not self.approach_along_wall:
+            return np.array([0.0, 0.0, pre])
+        a = -np.asarray(R, float)[:, 2]
+        return a * (pre / max(a[2], 0.5))
+
+    def tcp_from_grasp(self, p, R):
+        T = np.eye(4)
+        T[:3, :3], T[:3, 3] = R, p
+        T = T @ self.T_grasp_tcp
+        return T[:3, 3].copy(), T[:3, :3].copy()
+
+
+def _t(x, y, z):
+    T = np.eye(4)
+    T[:3, 3] = [x, y, z]
+    return T
+
+
+OFFICIAL_PROFILE = GripperProfile("official", _t(0.0, CLAMP_CENTRE_Y_M, 0.0), 60.0,
+                                  "AgileX official two-finger gripper")
+
+
+def so101_profile():
+    import NERO_V364_SO101_Gripper as G
+    return GripperProfile("so101", G.T_tcp_grasp(), G.opening_mm_for_tip_gap(32.0),
+                          f"SO-101 gripper on a {G.MOUNT['ring_m'] * 1000:.0f} mm ring, roll {G.MOUNT['roll_deg']:+.0f} deg",
+                          approach_clearance_m=float(os.environ.get("NERO_V364_SO101_CLEARANCE_MM", "2.0")) / 1000.0,
+                          approach_along_wall=True, flips=(True,),
+                          release_gap_max_mm=float(os.environ.get("NERO_V364_SO101_RELEASE_GAP_MM", "35")),
+                          lift_settle_s=2.5, release_tilt_max_deg=float(os.environ.get("NERO_V364_SO101_RELEASE_TILT_DEG", "9")))
+
+
+def profile_for_scene(scene=None):
+    scene = scene or SC.active_scene()
+    return so101_profile() if scene == "stack_cups_so101" else OFFICIAL_PROFILE
+
+
+def pinch_tcp(rim_centre, phi_rad, depth_m, flip, tilt_follow=True, profile=None):
+    """TCP position + rotation pinching the wall at rim angle phi, `depth` (along the wall) below the rim.
+    V3.64: computed for the grasp frame of the gripper profile, returned as the official TCP pose."""
     g = geom()
     u = np.array([math.cos(phi_rad), math.sin(phi_rad), 0.0])
     R = pinch_frame(phi_rad, flip, tilt_follow)
     top = np.asarray(rim_centre, float) + g["r_top"] * u              # wall mid-surface at the rim
     wall_down = np.array([-math.sin(g["beta"]) * u[0], -math.sin(g["beta"]) * u[1], -math.cos(g["beta"])])
     p = top + depth_m * (wall_down if tilt_follow else np.array([0.0, 0.0, -1.0]))
-    p = p - CLAMP_CENTRE_Y_M * R[:, 1]                                 # pad clamp centre on the wall
-    return p, R
+    prof = profile or OFFICIAL_PROFILE
+    p = p - prof.approach_clearance_m * R[:, 1]                      # fixed-jaw grippers: clearance to the wall
+    return prof.tcp_from_grasp(p, R)                                 # official: pad clamp centre (+2 mm) on the wall
 
 
 def base_dir(xy):
@@ -291,7 +370,9 @@ def ik_chain(chain, q_start=None, start_first=True):
         a1 = a1 + math.pi if a1 < 0 else a1 - math.pi
         generic = [[a1, j2, 0.0, j4, 0.0, j6, j7] for j2 in (0.2, 0.6) for j4 in (0.8, 1.6)
                    for j6 in (0.5, -0.2) for j7 in (0.0, 1.0, -1.0)]
-        if q_prev and (qs or start_first is None):
+        if q_prev and name.startswith("~"):
+            seeds = [q_prev]                           # V3.64 straight-segment point: strict continuity, no branch change
+        elif q_prev and (qs or start_first is None):
             seeds = [q_prev] + generic[::12]           # later poses of a chain: continue the branch (fast fail)
         elif q_prev and start_first:
             seeds = [q_prev] + generic
@@ -301,6 +382,9 @@ def ik_chain(chain, q_start=None, start_first=True):
         if q is None:
             return {"ok": False, "why": f"{name}: no 6-DoF IK (pos {pe * 1000:.1f} mm, rot {re:.1f} deg)",
                     "min_margin_deg": None, "binding": name, "q": qs}
+        if name.startswith("~") and q_prev and max(abs(a - b) for a, b in zip(q, q_prev)) > math.radians(12.0):
+            return {"ok": False, "why": f"{name}: straight segment needs an IK branch change", "min_margin_deg": None,
+                    "binding": name, "q": qs}
         ms = [math.degrees(min(v - lo, hi - v)) for v, (lo, hi) in zip(q, JOINT_LIMITS)]
         k = min(range(7), key=lambda i: ms[i])
         if ms[k] < worst:
@@ -308,6 +392,12 @@ def ik_chain(chain, q_start=None, start_first=True):
         qs.append(q)
         q_prev = q
     return {"ok": True, "why": "", "min_margin_deg": round(worst, 1), "binding": binding, "q": qs}
+
+
+def segment_points(tag, p0, p1, R, n=5):
+    """V3.64: intermediate poses of a straight TCP segment (names start with '~' -> strict IK continuity)"""
+    p0, p1 = np.asarray(p0, float), np.asarray(p1, float)
+    return [(f"~{tag}{i}", p0 + (p1 - p0) * i / n, R) for i in range(1, n)]
 
 
 def joint_margins_deg(q):
@@ -358,7 +448,7 @@ def stack_heights(knobs, src_base_z, dst_base_z):
     return base_lift, base_release
 
 
-def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, log=None, _wide=False):
+def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, log=None, _wide=False, profile=None):
     """rim pinch plan: grasp rim angle + flip (pregrasp / grasp / lift reachable), then place rim angle with the SAME
     flip (the cup axis offset in the TCP frame is fixed by the grasp; V3.61 chose the flips independently, which
     would have put the carried cup 2 x rim radius off the target).  Knob angles are relative to the cup -> base
@@ -381,9 +471,11 @@ def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, lo
     grasp_found = False
     for phi in _angle_order(math.degrees(base_dir(s_rim)) + float(knobs["cup_grasp_rim_angle_deg"]),
                             span=180 if _wide else 45):
-        for flip in (False, True):
-            p, R = pinch_tcp(s_rim, phi, depth, flip, tilt)
-            ch = [("pregrasp", p + [0, 0, pre], R), ("grasp", p, R), ("lift", p + [0, 0, dz_lift], R)]
+        for flip in (profile or OFFICIAL_PROFILE).flips:
+            p, R = pinch_tcp(s_rim, phi, depth, flip, tilt, profile)
+            pp = p + (profile or OFFICIAL_PROFILE).pre_offset(R, pre)          # V3.64: official = [0, 0, pre]
+            ch = ([("pregrasp", pp, R)] + segment_points("d", pp, p, R) + [("grasp", p, R)]
+                  + segment_points("l", p, p + [0, 0, dz_lift], R) + [("lift", p + [0, 0, dz_lift], R)])
             for start_first in ((True, False) if q_start is not None else (True,)):
                 r = ik_chain(ch, q_start, start_first=start_first)
                 tried += 1
@@ -394,10 +486,10 @@ def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, lo
                 lift_tcp = p + [0, 0, dz_lift]
                 for phi_p in _angle_order(math.degrees(base_dir(d_rim)) + float(knobs["cup_place_rim_angle_deg"]),
                                           span=180 if _wide else 90):
-                    p1, R1 = pinch_tcp(rim_lift, phi_p, depth, flip, tilt)
-                    p2, _ = pinch_tcp(rim_rel, phi_p, depth, flip, tilt)
-                    chp = [("rotate", lift_tcp, R1), ("above_target", p1, R1), ("release", p2, R1),
-                           ("retreat", p2 + [0, 0, 0.08], R1)]
+                    p1, R1 = pinch_tcp(rim_lift, phi_p, depth, flip, tilt, profile)
+                    p2, _ = pinch_tcp(rim_rel, phi_p, depth, flip, tilt, profile)
+                    chp = ([("rotate", lift_tcp, R1), ("above_target", p1, R1)] + segment_points("w", p1, p2, R1, 3)
+                           + [("release", p2, R1), ("retreat", p2 + [0, 0, 0.08], R1)])
                     rp = ik_chain(chp, r["q"][-1], start_first=None)
                     if not rp["ok"]:
                         continue
@@ -421,21 +513,28 @@ def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, lo
                 break
         if best and best["key"][0]:
             break
+    if not grasp_found and not _wide:
+        if log:
+            log("[INFO] [V3.64 CUP PLAN] no reachable grasp within +-45 deg of the knob angle -> wide search")
+        return plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=q_start, log=log, _wide=True,
+                              profile=profile)
     if not grasp_found:
         return {"ok": False, "reason": "GRASP_UNREACHABLE", "detail": f"no reachable rim pinch on the source cup ({tried} tried)"}
     best_g, best_p = (best["g"], best["p"]) if best else (None, None)
     flip = best_g["flip"] if best_g else False
     lift_tcp = best_g["tcp"] + [0, 0, dz_lift] if best_g else None
-    if best_p is None and not _wide:
+    # V3.64: also search wide when the best chain would be refused anyway (margin < 4 deg; plans >= 4 deg unchanged)
+    if (best_p is None or best["key"][2] < MIN_MARGIN_RELAXED_DEG) and not _wide:
         # V3.63: nothing in the usual window -> one wide search (all rim angles), slower but only on failure
         if log:
             log("[INFO] [V3.63 CUP PLAN] no reachable chain within +-45 / +-90 deg of the knob angles -> wide search")
-        return plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=q_start, log=log, _wide=True)
+        return plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=q_start, log=log, _wide=True,
+                              profile=profile)
     if best_p is None:
         return {"ok": False, "reason": "PLACE_UNREACHABLE",
                 "detail": "the source cup can be grasped but no reachable carry/release pose over the target with the same grip"}
     wq = lambda R: R_to_quat_xyzw(R)
-    wps = [("pregrasp", best_g["tcp"] + [0, 0, pre], best_g["R"]), ("grasp", best_g["tcp"], best_g["R"]),
+    wps = [("pregrasp", best_g["tcp"] + (profile or OFFICIAL_PROFILE).pre_offset(best_g["R"], pre), best_g["R"]), ("grasp", best_g["tcp"], best_g["R"]),
            ("lift", lift_tcp, best_g["R"]), ("rotate", lift_tcp, best_p["R"]), ("above_target", best_p["tcp_above"], best_p["R"]),
            ("release", best_p["tcp_release"], best_p["R"]), ("retreat", best_p["tcp_release"] + [0, 0, 0.08], best_p["R"])]
     margin = min(best_g["r"]["min_margin_deg"], best_p["r"]["min_margin_deg"])
@@ -451,7 +550,11 @@ def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, lo
            "_wps": {n: (np.asarray(p, float), np.asarray(R, float)) for n, p, R in wps},
            "place_j7_margin_deg": best_p["r"].get("j7_margin_deg"),
            "_q": dict(zip(["pregrasp", "grasp", "lift", "rotate", "above_target", "release", "retreat"],
-                          [list(q) for q in best_g["r"]["q"]] + [list(q) for q in best_p["r"]["q"]]))}
+                          [list(q) for q in best_g["r"]["q"][::5]] + [list(q) for q, n in zip(best_p["r"]["q"],
+                           ["rotate", "above_target", "~w1", "~w2", "release", "retreat"]) if not n.startswith("~")])),
+           # V3.64: joint solutions along the straight segments (descent / lift / lowering) - strict IK continuity
+           "_qpath": {"grasp": [list(q) for q in best_g["r"]["q"][0:6]], "lift": [list(q) for q in best_g["r"]["q"][5:11]],
+                      "release": [list(q) for q in best_p["r"]["q"][1:5]]}}
     if log:
         log(f"[V3.63 CUP PLAN] grasp rim {out['grasp_rim_angle_rel_deg']:+.0f} deg (margin {out['grasp_margin_deg']} deg, "
             f"{out['grasp_binding']}) | place rim {out['place_rim_angle_rel_deg']:+.0f} deg (margin {out['place_margin_deg']} "
@@ -480,8 +583,23 @@ def _finger_xml(name, quat, axis, rng, pad):
             + "".join(studs) + "</body>")
 
 
-def twin_xml(cup_xy=None):
+def twin_xml(cup_xy=None, gripper="official"):
     xy = dict(SC.CUP_XY if cup_xy is None else cup_xy)
+    if gripper == "so101":                   # V3.64: the same SO-101 gripper parts the scene module mounts
+        import NERO_V364_SO101_Gripper as G
+        gp = G.gripper_parts(angle_unit="degree")             # the twin XML has no <compiler angle> (MJCF default)
+        g_asset, g_link7, g_eq, g_act, g_contact = gp["asset"], gp["link7"], gp["equality"], gp["actuator"], gp["contact"]
+    else:
+        g_asset = ""
+        g_link7 = ('<geom name="gripper_base_box" type="box" pos="0.0675 0 -0.0235" size="0.0325 0.040 0.032" '
+                   'rgba=".3 .3 .35 .5"/>'
+                   + _finger_xml("gripper_link1", "-1.27026e-06 0.707108 0.707105 -1.30815e-06", "0 0 1", "0 0.05", "finger1")
+                   + _finger_xml("gripper_link2", "0.707105 -1.30815e-06 1.30815e-06 -0.707108", "0 0 -1", "-0.05 0", "finger2"))
+        g_eq = '<joint name="gripper_coupling" joint1="gripper_joint2" joint2="gripper_joint1" polycoef="0 -1 0 0 0"/>'
+        g_act = ('<position name="gripper" joint="gripper_joint1" kp="40" kv="5" forcerange="-20 20" forcelimited="true" '
+                 'ctrlrange="0 0.05" ctrllimited="true"/><motor name="gripper_force" joint="gripper_joint1" gear="1" '
+                 'ctrlrange="-50 50" ctrllimited="true" forcerange="-50 50" forcelimited="true"/>')
+        g_contact = '<exclude body1="gripper_link1" body2="gripper_link2"/>'
     cups = "\n".join(SC.cup_body_xml(n, xy[n], z0=0.0005, origin=SC.CUP_ORIGIN) for n in SC.CUP_NAMES)
     holds = "".join(f'<connect name="hold_{n}" body1="link7" body2="{n}" anchor="0 0 0" active="false" '
                     'solref="0.008 1" solimp="0.98 0.995 0.001"/>' for n in SC.CUP_NAMES)
@@ -493,7 +611,7 @@ def twin_xml(cup_xy=None):
     return f"""<mujoco model="nero_v362_cup_twin">
   <option timestep="0.001" integrator="implicitfast"/>
   <visual><global offwidth="1280" offheight="960"/><headlight ambient="0.25 0.25 0.25" diffuse="0.30 0.30 0.30"/></visual>
-  <asset>{SC.CUP_ASSETS}</asset>
+  <asset>{SC.CUP_ASSETS}{g_asset}</asset>
   <worldbody>
     <light pos="0 0 2" dir="0 0 -1"/>
     <light name="eggscene_key" pos="0.25 -0.65 2.20" dir="-0.30 0.22 -1" directional="true" castshadow="true"
@@ -504,24 +622,17 @@ def twin_xml(cup_xy=None):
     <geom name="play_table" type="box" pos="-0.385 0 -0.03" size="0.335 0.38 0.03" rgba=".93 .93 .91 1"
           friction="1.2 0.01 0.001" solref="0.008 1" solimp="0.96 0.995 0.0005" margin="0.001"/>
     <body name="link7" mocap="true" pos="-0.3 0 0.45">
-      <!-- APPROXIMATE gripper housing (the official STL meshes are not in this repository) -->
-      <geom name="gripper_base_box" type="box" pos="0.0675 0 -0.0235" size="0.0325 0.040 0.032" rgba=".3 .3 .35 .5"/>
-      {_finger_xml("gripper_link1", "-1.27026e-06 0.707108 0.707105 -1.30815e-06", "0 0 1", "0 0.05", "finger1")}
-      {_finger_xml("gripper_link2", "0.707105 -1.30815e-06 1.30815e-06 -0.707108", "0 0 -1", "-0.05 0", "finger2")}
+      <!-- official: APPROXIMATE gripper housing (its STL meshes are not in this repository); so101: V3.64 parts -->
+      {g_link7}
     </body>
     {cups}
   </worldbody>
-  <contact><exclude body1="gripper_link1" body2="gripper_link2"/></contact>
+  <contact>{g_contact}</contact>
   <equality>
-    <joint name="gripper_coupling" joint1="gripper_joint2" joint2="gripper_joint1" polycoef="0 -1 0 0 0"/>
+    {g_eq}
     {holds}
   </equality>
-  <actuator>
-    <position name="gripper" joint="gripper_joint1" kp="40" kv="5" forcerange="-20 20" forcelimited="true"
-              ctrlrange="0 0.05" ctrllimited="true"/>
-    <motor name="gripper_force" joint="gripper_joint1" gear="1" ctrlrange="-50 50" ctrllimited="true"
-           forcerange="-50 50" forcelimited="true"/>
-  </actuator>
+  <actuator>{g_act}</actuator>
 </mujoco>"""
 
 
@@ -529,11 +640,12 @@ class TwinIO:
     """Headless MuJoCo twin of the backend's gripper + cups (see module docstring)."""
     name = "twin"
 
-    def __init__(self, log=None, cup_xy=None, start_tcp=None, pose_mode="truth"):
+    def __init__(self, log=None, cup_xy=None, start_tcp=None, pose_mode="truth", gripper="official"):
         import mujoco
         self._pose_mode = pose_mode
+        self._gripper = gripper
         self.mj = mujoco
-        self.m = mujoco.MjModel.from_xml_string(twin_xml(cup_xy))
+        self.m = mujoco.MjModel.from_xml_string(twin_xml(cup_xy, gripper))
         self.d = mujoco.MjData(self.m)
         self.log = log or (lambda s: None)
         self.mid = self.m.body("link7").mocapid[0]
@@ -634,8 +746,8 @@ class TwinIO:
         for i in range(self.d.ncon):
             c = self.d.contact[i]
             g1, g2 = int(c.geom1), int(c.geom2)
-            if "gripper_base_box" in ((self.mj.mj_id2name(self.m, self.mj.mjtObj.mjOBJ_GEOM, g1) or ""),
-                                      (self.mj.mj_id2name(self.m, self.mj.mjtObj.mjOBJ_GEOM, g2) or "")):
+            if {"gripper_base_box", "so101_housing"} & {(self.mj.mj_id2name(self.m, self.mj.mjtObj.mjOBJ_GEOM, g1) or ""),
+                                      (self.mj.mj_id2name(self.m, self.mj.mjtObj.mjOBJ_GEOM, g2) or "")}:
                 if (g1 in self.obj or g2 in self.obj) and c.dist < 0:
                     self.base_hits += 1
                 continue
@@ -853,6 +965,9 @@ class TwinIO:
     def pose_mode(self):
         return self._pose_mode
 
+    def gripper_profile(self):
+        return so101_profile() if self._gripper == "so101" else OFFICIAL_PROFILE
+
     def perceive(self, tag):
         """V3.63: fixed-camera capture of the twin -> NERO_V363_Cup_Perception.perceive_cups (needs OpenGL)"""
         import NERO_V363_Cup_Perception as CP
@@ -937,6 +1052,10 @@ class BackendIO:
             return {"ok": False, "label": label, "error": str(exc)[:300], "tcp_error_mm": None}
         return self._post(label, xyz, s0)
 
+    def gripper_profile(self):
+        """V3.64 SO-101 GRIPPER ON NERO: the gripper of the scene chosen in the console (stack_cups_so101 -> SO-101)"""
+        return profile_for_scene(SC.selected_variant())
+
     def pose_mode(self):
         f = self.c.get("pose_source_mode")
         mode = f() if f else "truth"
@@ -1019,8 +1138,16 @@ class BackendIO:
         self._sleep(0.15)
         qe = self.current_q()
         jerr = max(abs(math.degrees(a - b)) for a, b in zip(qe, q))
+        # V3.64 JOINT SETTLE: the V3.63 run stopped on a 3.22 deg settling error right after the trajectory ended -
+        # wait up to 1.2 s for the arm to settle, then accept <= 4 deg (the skill re-checks positions anyway)
+        t_settle = 0.0
+        while jerr > 3.0 and t_settle < 1.2 and int(self.sh["safety_trip_count"].value) == s0:
+            self._sleep(0.2)
+            t_settle += 0.2
+            qe = self.current_q()
+            jerr = max(abs(math.degrees(a - b)) for a, b in zip(qe, q))
         trips = int(self.sh["safety_trip_count"].value) - s0
-        return {"ok": jerr <= 3.0 and trips == 0, "label": label, "joint_error_deg": round(jerr, 2),
+        return {"ok": jerr <= 4.0 and trips == 0, "label": label, "joint_error_deg": round(jerr, 2),
                 "safety_trips": trips, "safety": trips > 0, "kind": "joints"}
 
     def latch_pending(self):
@@ -1106,6 +1233,12 @@ class CupSkills:
         self.grip_offset = None
         # V3.63 FIXED D435i CUP PERCEPTION: pose source "camera" = the fixed stand D435i (no simulator truth)
         self.camera = getattr(io, "pose_mode", lambda: "truth")() == "camera"
+        self.prof = getattr(io, "gripper_profile", lambda: OFFICIAL_PROFILE)()     # V3.64 GRIPPER PROFILES
+        cap = self.prof.release_gap_max_mm
+        if cap is not None and float(self.k["cup_release_gap_mm"]) > cap:
+            self.k = dict(self.k, cup_release_gap_mm=float(cap))
+            io.emit(f"[INFO] [V3.64 CUP] {self.prof.name}: release gap capped at {cap:.0f} mm (one-side pinch, "
+                    "the cup leans slightly in the grip)")
         self.cam = {}                  # name -> perceived cup entry
         self.cam_stack = None          # {"upper", "lower", "height_mm", "base_dz_mm", "nested_full"} when nested
         self.cam_single_h = None       # measured height of a single cup (rim bead included) for the nested check
@@ -1264,7 +1397,8 @@ class CupSkills:
             q_now = self.io.current_q()               # V3.63: plan from the robot's real joints (its IK branch)
         except Exception:
             q_now = None
-        plan = plan_cup_stack(self.k, s["rim"], s["quat"], t["rim"], t["quat"], q_start=q_now, log=self.io.emit)
+        plan = plan_cup_stack(self.k, s["rim"], s["quat"], t["rim"], t["quat"], q_start=q_now, log=self.io.emit,
+                              profile=self.prof)
         if not plan["ok"]:
             return self._res("plan_cup_stack", False, {"detail": plan.get("detail")}, reason=plan["reason"],
                              nxt=["stop_and_report"])
@@ -1308,42 +1442,84 @@ class CupSkills:
         self.motions.append((label, "joints"))
         return self._check(label, self.io.move_joints(f"V3.63 {label}", q, slow=slow))
 
-    def _go_line(self, label, xyz, R, speed, slow=None, q_hint=None):
-        """straight move if the checked Cartesian path is safe, else joint space to an IK solution with margins"""
+    def _go_line(self, label, xyz, R, speed, slow=None, q_hint=None, q_path=None, free_fallback=False):
+        """straight move if the checked Cartesian path is safe.  If it is refused:
+          * near the cups (descent / lift / lowering / retreat): follow a STRAIGHT joint path - the planned strict-
+            continuity joint solutions along the segment (q_path) or ones solved now from the current joints - in
+            short joint moves; if the segment cannot be followed continuously -> TARGET_UNREACHABLE (V3.64: a free
+            joint-space descent swept the SO-101 jaw through the cup in the twin)
+          * free_fallback (the level carry high above the cups): joint space to a checked IK solution, held-cup dip
+            check (V3.63)"""
         self._unlatched(label)
         q_now = self.io.current_q()
         r = self.io.move_line(f"V3.63 {label}", xyz, R_to_quat_xyzw(R), speed, slow=slow)
-        if r.get("refused"):
-            q_t = q_hint if q_hint is not None else ik_from(q_now, xyz, R)
-            if q_t is not None and q_hint is not None:
-                T = FastArm.fk(self._arm(), np.asarray(q_t, float))
-                if np.linalg.norm(T[:3, 3] - np.asarray(xyz, float)) > 0.002:
-                    q_t = ik_from(q_now, xyz, R)
-            if q_t is None or min(joint_margins_deg(q_t)) < PATH_MARGIN_DEG:
-                raise self._Abort("TARGET_UNREACHABLE", {"during": label, "why": r.get("why"),
-                                                         "detail": "no IK solution with joint margins for this pose"})
-            self.io.emit(f"[WARN] [V3.63 CUP] {label}: Cartesian path refused ({r.get('why')}) -> joint-space move to "
-                         f"a checked IK solution (min margin {min(joint_margins_deg(q_t)):.1f} deg)")
-            self.motions.append((label, "joints (line refused)"))
-            # a joint-space path is not straight in Cartesian space: while a cup is held the TCP must not dip more than
-            # 10 mm below the lower end of the requested segment (split at the line midpoint if it would)
-            path = [q_now, q_t]
-            if self.held:
-                z_floor = min(float(xyz[2]), float(self.io.tcp_pose()[0][2])) - 0.010
-                if self._dip_z(q_now, q_t) < z_floor:
-                    p0 = np.asarray(self.io.tcp_pose()[0], float)
-                    q_mid = ik_from(q_now, 0.5 * (p0 + np.asarray(xyz, float)), R)
-                    if q_mid is None or self._dip_z(q_now, q_mid) < z_floor or self._dip_z(q_mid, q_t) < z_floor:
-                        raise self._Abort("TARGET_UNREACHABLE", {"during": label, "why": r.get("why"),
-                                                                 "detail": "joint-space path would dip the held cup"})
-                    path = [q_now, q_mid, q_t]
+        if not r.get("refused"):
+            self.motions.append((label, "line"))
+            return self._check(label, r)
+        if not free_fallback:
+            path = None
+            if q_path and max(abs(a - b) for a, b in zip(q_path[0], q_now)) <= math.radians(3.0):
+                path = [list(q) for q in q_path]
+                T = self._arm().fk(np.asarray(path[-1], float))
+                if np.linalg.norm(T[:3, 3] - np.asarray(xyz, float)) > 0.003:
+                    path = None
+            if path is None:
+                p0 = np.asarray(self.io.tcp_pose()[0], float)
+                ch = segment_points("s", p0, xyz, R, 6) + [("~end", np.asarray(xyz, float), R)]
+                rr = ik_chain(ch, q_now)
+                if not rr["ok"]:
+                    raise self._Abort("TARGET_UNREACHABLE", {"during": label, "why": r.get("why"),
+                                                             "detail": f"the straight segment cannot be followed: {rr['why']}"})
+                path = [q_now] + rr["q"]
+            chk = check_joint_path(path, jump_deg=12.0)
+            if not chk["ok"]:
+                raise self._Abort("TARGET_UNREACHABLE", {"during": label, "why": r.get("why"), "detail": chk["why"]})
+            self.io.emit(f"[WARN] [V3.64 CUP] {label}: Cartesian path refused ({r.get('why')}) -> straight segment as "
+                         f"{len(path) - 1} short joint moves along strict-continuity IK (min margin {chk['min_margin_deg']} deg)")
+            self.motions.append((label, "joints (straight path)"))
             for k_, qk in enumerate(path[1:]):
-                r = self.io.move_joints(f"V3.63 {label} (joint space{'' if len(path) == 2 else f' {k_ + 1}/2'})", qk,
-                                        slow=slow or 2.5)
+                r = self.io.move_joints(f"V3.64 {label} (straight {k_ + 1}/{len(path) - 1})", qk, slow=slow or 2.5)
                 if not r.get("ok"):
                     break
-        else:
-            self.motions.append((label, "line"))
+            return self._check(label, r)
+        # V3.64 CARRY BRANCH: candidates = the planned (margin-checked) solution, IK seeded from it (the measured
+        # held-cup offset moves the goal a few mm), IK seeded from the current joints; the first with margins wins
+        # (V3.64 twin: seeding only from the current joints found a branch with J1 0.5 deg from its limit)
+        q_t = None
+        cands = []
+        if q_hint is not None:
+            T = FastArm.fk(self._arm(), np.asarray(q_hint, float))
+            if np.linalg.norm(T[:3, 3] - np.asarray(xyz, float)) <= 0.002:
+                cands.append(list(q_hint))
+            cands.append(ik_from(q_hint, xyz, R))
+        cands.append(ik_from(q_now, xyz, R))
+        for c_ in cands:
+            if c_ is not None and min(joint_margins_deg(c_)) >= PATH_MARGIN_DEG:
+                q_t = c_
+                break
+        if q_t is None:
+            raise self._Abort("TARGET_UNREACHABLE", {"during": label, "why": r.get("why"),
+                                                     "detail": "no IK solution with joint margins for this pose"})
+        self.io.emit(f"[WARN] [V3.63 CUP] {label}: Cartesian path refused ({r.get('why')}) -> joint-space move to "
+                     f"a checked IK solution (min margin {min(joint_margins_deg(q_t)):.1f} deg)")
+        self.motions.append((label, "joints (line refused)"))
+        # a joint-space path is not straight in Cartesian space: while a cup is held the TCP must not dip more than
+        # 10 mm below the lower end of the requested segment (split at the line midpoint if it would)
+        path = [q_now, q_t]
+        if self.held:
+            z_floor = min(float(xyz[2]), float(self.io.tcp_pose()[0][2])) - 0.010
+            if self._dip_z(q_now, q_t) < z_floor:
+                p0 = np.asarray(self.io.tcp_pose()[0], float)
+                q_mid = ik_from(q_now, 0.5 * (p0 + np.asarray(xyz, float)), R)
+                if q_mid is None or self._dip_z(q_now, q_mid) < z_floor or self._dip_z(q_mid, q_t) < z_floor:
+                    raise self._Abort("TARGET_UNREACHABLE", {"during": label, "why": r.get("why"),
+                                                             "detail": "joint-space path would dip the held cup"})
+                path = [q_now, q_mid, q_t]
+        for k_, qk in enumerate(path[1:]):
+            r = self.io.move_joints(f"V3.63 {label} (joint space{'' if len(path) == 2 else f' {k_ + 1}/2'})", qk,
+                                    slow=slow or 2.5)
+            if not r.get("ok"):
+                break
         return self._check(label, r)
 
     def _dip_z(self, qa, qb, n=21):
@@ -1384,11 +1560,11 @@ class CupSkills:
             if self.camera:
                 self._perceive(f"pick {source_cup}")
             s0 = self._cup(source_cup)
-            v["opening_before_mm"] = self.io.gripper_open(60.0)["opening_mm"]
+            v["opening_before_mm"] = self.io.gripper_open(self.prof.open_mm)["opening_mm"]
             # joint goal to the planned (margin-checked) IK branch - not a free pose goal
             self._go_joints(f"pregrasp {source_cup}", Q["pregrasp"])
             p, R = W["grasp"]
-            self._go_line(f"grasp {source_cup}", p, R, 0.03, q_hint=Q["grasp"])
+            self._go_line(f"grasp {source_cup}", p, R, 0.03, q_hint=Q["grasp"], q_path=self.plan["_qpath"]["grasp"])
             if self.camera:
                 # the cup is still on the table here: its rim centre in the TCP frame = the grasp offset (V3.63)
                 tcp_g, qg = self.io.tcp_pose()
@@ -1404,14 +1580,19 @@ class CupSkills:
                 return self._res(tool, False, v, reason="CUP_PUSHED_DURING_DESCENT", nxt=["observe_scene", "plan_cup_stack"])
             c = self.io.gripper_clamp(float(self.k["cup_clamp_force_n"]))
             v["clamp"] = c
+            if self.camera and self.prof.approach_clearance_m > 0:
+                # the clamp slid the cup onto the fixed jaw: -clearance along the grasp y axis (TCP frame)
+                self.cam_grip_offset = self.cam_grip_offset - self.prof.approach_clearance_m * self.prof.T_tcp_grasp[:3, 1]
             if not (c["contact_left"] and c["contact_right"]) and not c["hold_active"]:
-                self.io.gripper_open(60.0)
+                self.io.gripper_open(self.prof.open_mm)
                 self._retreat_up()
                 return self._res(tool, False, v, reason="NO_TWO_FINGER_CONTACT", nxt=["observe_scene", "plan_cup_stack"])
             tcp0, _ = self.io.tcp_pose()
             self.grip_offset = None
             p, R = W["lift"]
-            self._go_line(f"lift {source_cup}", p, R, 0.05, q_hint=Q["lift"])
+            self._go_line(f"lift {source_cup}", p, R, 0.05, q_hint=Q["lift"], q_path=self.plan["_qpath"]["lift"])
+            if self.prof.lift_settle_s > 0:
+                self.io.sleep(self.prof.lift_settle_s)
         except self._Abort as e:
             return self._abort_result(tool, e, v)
         tcp1, q1 = self.io.tcp_pose()
@@ -1434,7 +1615,7 @@ class CupSkills:
         v.update({"lift_tcp_rise_mm": round(rise_tcp * 1000, 1), "cup_rise_mm": round(rise_cup * 1000, 1),
                   "cup_tilt_after_lift_deg": s2["tilt_deg"], "hold_active": self.io.gripper_state()["hold_active"]})
         if rise_cup < 0.7 * max(rise_tcp, 0.01):
-            self.io.gripper_open(60.0)
+            self.io.gripper_open(self.prof.open_mm)
             self._retreat_up()
             return self._res(tool, False, v, reason="CUP_DID_NOT_FOLLOW_LIFT", nxt=["observe_scene", "plan_cup_stack"])
         # held cup rim centre in the TCP frame (the backend hold is a CONNECT at this point -> rigid while held)
@@ -1486,7 +1667,10 @@ class CupSkills:
             d, s, t = self._centre_error(src, target_cup)
             tcp, _q = self.io.tcp_pose()
             above = np.array([tcp[0] + d[0], tcp[1] + d[1], tcp[2]])
-            self._go_line(f"carry {src} over {target_cup}", above, R_p, CARRY_SPEED, slow=CARRY_SLOW_FACTOR)
+            self._go_line(f"carry {src} over {target_cup}", above, R_p, CARRY_SPEED, slow=CARRY_SLOW_FACTOR,
+                          free_fallback=True, q_hint=self.plan["_q"].get("above_target"))
+            if self.prof.lift_settle_s > 0:                # V3.64 LIFT SETTLE: the carry swings the cup on the hold too
+                self.io.sleep(self.prof.lift_settle_s)
             # 3. lower to the release height; the remaining error (if >= 3 mm) is folded into the same move
             d, s, t = self._centre_error(src, target_cup)
             v["centre_error_high_mm"] = round(float(np.linalg.norm(d)) * 1000, 1)
@@ -1508,13 +1692,15 @@ class CupSkills:
                   "base_above_target_base_mm": round(float(s["base"][2] - t["base"][2]) * 1000, 1)})
         if float(np.linalg.norm(d)) > tol:
             return self._res(tool, False, v, reason="NOT_CENTRED_OVER_TARGET", nxt=["place_cup_into", "stop_and_report"])
-        if s["tilt_deg"] > float(self.k["cup_release_tilt_tol_deg"]) * 2.0:
+        if s["tilt_deg"] > max(float(self.k["cup_release_tilt_tol_deg"]) * 2.0, self.prof.release_tilt_max_deg):
             return self._res(tool, False, v, reason="HELD_CUP_TOO_TILTED", nxt=["stop_and_report"])
         warn = []
         if s["tilt_deg"] > float(self.k["cup_release_tilt_tol_deg"]):
             warn.append(f"held cup tilted {s['tilt_deg']} deg (> {self.k['cup_release_tilt_tol_deg']} deg); released anyway "
                         "(the V3.61 release sweep succeeded up to 6 deg)")
-        self.io.gripper_open(60.0)
+        self.io.gripper_open(self.prof.open_mm)
+        if self.prof.approach_clearance_m > 0:
+            self._release_sidestep()
         self.io.sleep(1.5)
         self.held = None
         self.grip_offset = None
@@ -1524,6 +1710,23 @@ class CupSkills:
         st = self._state(src, target_cup)
         v["after_release"] = st
         return self._res(tool, True, v, nxt=["verify_stack"], warnings=warn)
+
+    def _release_sidestep(self, dist_m=0.008):
+        """V3.64 RELEASE SIDESTEP (fixed-jaw grippers): the released cup slides down along the FIXED pad and its
+        widening conical wall wedges against it (V3.64 twin: hung tilted 13-18 deg on the SO-101 fixed jaw).  Move the
+        TCP horizontally away from the wall (grasp -y; the moving jaw opened by 30 mm on the other side) so the cup
+        drops free.  Path-checked straight move; refused -> warning only (the release already happened)."""
+        p, q = self.io.tcp_pose()
+        R = quat_xyzw_to_R(q)
+        y = R @ self.prof.T_tcp_grasp[:3, 1]
+        h = np.array([y[0], y[1], 0.0])
+        if np.linalg.norm(h) < 1e-6:
+            return
+        tgt = np.asarray(p, float) - dist_m * h / np.linalg.norm(h)
+        r = self.io.move_line("V3.64 release sidestep (fixed jaw off the wall)", [float(v) for v in tgt], q, 0.02)
+        self.motions.append(("release sidestep", "line" if r.get("ok") else "skipped"))
+        if not r.get("ok"):
+            self.io.emit(f"[WARN] [V3.64 CUP] release sidestep not executed: {r.get('why') or r.get('error')}")
 
     def _state(self, upper, lower):
         if self.camera:
@@ -1560,7 +1763,7 @@ class CupSkills:
             if not ok:
                 return self._res("return_to_safe_pose", False, {"detail": why}, reason="SAFETY_LATCH_NOT_CLEARED",
                                  nxt=["stop_and_report"])
-        self.io.gripper_open(60.0)
+        self.io.gripper_open(self.prof.open_mm)
         r = self.io.go_home("V3.62 cup task")
         if self.stage not in ("VERIFIED",):
             self.stage = "OBSERVED"
@@ -1807,8 +2010,9 @@ def gui_run_task(ctx):
     knobs, skill = cup_knobs()
     io = BackendIO(ctx)
     skills = CupSkills(io, knobs, skill)
-    log(f"[V3.62 CUP TASK] scene=stack_cups | skill {skill['code']} {skill['short_name']} ({skill['source']}) | "
+    log(f"[V3.62 CUP TASK] scene={SC.selected_variant()} | skill {skill['code']} {skill['short_name']} ({skill['source']}) | "
         f"model={cfg['model']} | task={cfg['task']!r}")
+    log(f"[INFO] [V3.64 CUP] gripper: {skills.prof.label}")                  # V3.64 SO-101 GRIPPER ON NERO
 
     def _run():
         if not bool(cfg.get("dry_run", False)):
@@ -1821,10 +2025,10 @@ def gui_run_task(ctx):
 
 
 def twin_episode(knobs=None, source="cup_1", target="cup_2", log=print, snapshot_dir=None, cup_xy=None,
-                 pose_mode="truth"):
+                 pose_mode="truth", gripper="official"):
     """offline: the scripted CS episode in the headless twin -> (results, final cup state from simulator truth, io)"""
     k = dict(CUP_KNOB_DEFAULTS, **(knobs or {}))
-    io = TwinIO(log=log, cup_xy=cup_xy, pose_mode=pose_mode)
+    io = TwinIO(log=log, cup_xy=cup_xy, pose_mode=pose_mode, gripper=gripper)
     sk = CupSkills(io, k, {"code": "CS", "short_name": "Cup Stack", "skill_id": "cup_stack_rim_pinch"})
     res = sk.scripted_episode(source, target)
     io.skills = sk
@@ -1842,6 +2046,7 @@ def _study_job(job):
     import random
     k, src, dst, seed, solref = job[:5]
     pose_mode = job[5] if len(job) > 5 else "truth"
+    gripper = job[6] if len(job) > 6 else "official"              # V3.64 SO-101 GRIPPER ON NERO
     if pose_mode == "camera":
         os.environ["NERO_V308_DEPTH_NOISE_K"] = "0.002"      # D435i-like depth noise sigma = k z^2 + temporal fusion
     else:
@@ -1853,10 +2058,10 @@ def _study_job(job):
     rnd = random.Random(seed)
     xy = ({n: (x + rnd.uniform(-0.01, 0.01), y + rnd.uniform(-0.01, 0.01)) for n, (x, y) in SC.CUP_XY.items()}
           if seed else None)
-    res, st, io = twin_episode(k, src, dst, log=lambda s_: None, cup_xy=xy, pose_mode=pose_mode)
+    res, st, io = twin_episode(k, src, dst, log=lambda s_: None, cup_xy=xy, pose_mode=pose_mode, gripper=gripper)
     pick = next((r for r in res if r["tool"] == "pick_cup"), {})
     return {"knobs": k, "source": src, "target": dst, "position_noise_seed": seed, "cup_solref": solref or "scene default",
-            "pose_mode": pose_mode,
+            "pose_mode": pose_mode, "gripper": gripper,
             "line_refused_to_joint_space": [lab for lab, kind in io.skills.motions if "refused" in kind],
             "stacked": st["stacked"], "nested_full": st["nested_full"], "base_dz_mm": st["base_dz_mm"],
             "tilt_after_lift_deg": (pick.get("physical_verification") or {}).get("cup_tilt_after_lift_deg"),
@@ -1906,8 +2111,40 @@ def twin_study(processes=4, log=print, out_path=None, camera=False):
     return study
 
 
+def so101_study(processes=4, log=print, out_path=None, camera=True):
+    """V3.64 SO-101 twin study: both directions, +-10 mm cup position noise (seeds 1-4), pinch depth 30 / 40 mm,
+    and (camera=True, needs OpenGL) the fixed D435i as the pose source"""
+    from multiprocessing import Pool
+    jobs = [({}, a, b, sd, None, "truth", "so101") for a, b in (("cup_1", "cup_2"), ("cup_2", "cup_1")) for sd in (0, 1, 2, 3, 4)]
+    jobs += [({"cup_rim_pinch_depth_mm": d}, "cup_1", "cup_2", 0, None, "truth", "so101") for d in (30.0, 40.0)]
+    if camera:
+        jobs += [({}, a, b, sd, None, "camera", "so101") for a, b in (("cup_1", "cup_2"), ("cup_2", "cup_1")) for sd in (0, 4, 5)]
+    with Pool(processes) as pool:
+        rows = []
+        for r in pool.imap(_study_job, jobs):
+            rows.append(r)
+            log(f"[V3.64 SO-101 twin study] {r['pose_mode']} {r['source']}->{r['target']} {r['knobs']} seed "
+                f"{r['position_noise_seed']}: nested_full={r['nested_full']}" + (f" FAILED {r['failed_at']}" if r["failed_at"] else ""))
+    import NERO_V364_SO101_Gripper as G
+    study = {"version": VERSION, "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
+             "what": ("headless MuJoCo twin with the SO-101 gripper (official SO-101 meshes, simplified collision boxes, "
+                      "4 mm tip pads) on the assumed 7 mm ring / -45 deg roll mount; same arm kinematics, gripper logic "
+                      "and cups as the V3.63 study. Not measured on hardware."),
+             "mount": G.describe(), "rows": rows,
+             "summary": {"runs": len(rows), "nested_full": sum(1 for r in rows if r["nested_full"]),
+                         "camera_runs": sum(1 for r in rows if r["pose_mode"] == "camera"),
+                         "camera_nested_full": sum(1 for r in rows if r["pose_mode"] == "camera" and r["nested_full"])}}
+    if out_path:
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(study, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+    return study
+
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in ("--study", "--study-camera"):
+    if len(sys.argv) > 1 and sys.argv[1] == "--study-so101":
+        so101_study(out_path=sys.argv[2] if len(sys.argv) > 2 else None)
+    elif len(sys.argv) > 1 and sys.argv[1] in ("--study", "--study-camera"):
         twin_study(out_path=sys.argv[2] if len(sys.argv) > 2 else None, camera=sys.argv[1] == "--study-camera")
     else:
         r, st, _io = twin_episode(log=print)

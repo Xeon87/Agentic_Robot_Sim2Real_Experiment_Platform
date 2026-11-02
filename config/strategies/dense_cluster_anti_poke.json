@@ -2,7 +2,7 @@
   "skill_id": "dense_cluster_anti_poke",
   "short_name": "Dense Anti-Poke",
   "code": "DP",
-  "version": "V3.63",
+  "version": "V3.64",
   "saved": "2026-11-01 00:00:00",
   "is_baseline": false,
   "skill_card": {

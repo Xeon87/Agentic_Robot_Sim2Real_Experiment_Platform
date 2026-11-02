@@ -1,4 +1,13 @@
-# NERO V3.63 — single-folder release
+# NERO V3.64 — single-folder release
+
+**V3.64**（新仿真场景：叠杯子 · SO-101 夹爪，7 mm 转接环，绕法向偏转 45°）
+1. 怎么用：`bash start_nero.sh` → 仿真页场景下拉框选最后一项 `stack_cups_so101 - 叠杯子 · SO-101 夹爪 (7 mm 转接环, 偏转 45°)` → ▶ 启动仿真 → API key → 任务 `Stack cup_1 into cup_2` → ▶ RUN TASK。原来三个场景和所有界面不变。
+2. 建模：SO-101 官方网格（Apache-2.0，`assets/so101/`）装在 NERO 夹爪安装座上，中间 7 mm 转接环，夹爪绕转接环平面法线（安装座外法线）左手法则 45°；碰撞用简化方块。裸指尖闭合到 −10° 限位时仍隔 ~2.4 mm，夹不住 2 mm 杯壁，所以两个指尖各加 4 mm 指垫（**实物也需要加橡胶 / TPU 指垫**）。
+3. 算法（同一套 CS 技能，只换「夹爪档案」）：规划用夹爪的抓取坐标系（含 45° 偏转和转接环）；固定指在杯外、动指在杯内；沿杯壁斜向下探，固定指离杯壁 2 mm；松手前离套好高度只留 35 mm，松开后 TCP 向外让 8 mm（固定指离开杯壁）；抬起和搬运后各等 2.5 s 让杯子在夹持里摆正。原夹爪行为不变。
+4. 后端、相机进程、杯子感知、Agent 模块都没改（新场景对后端来说就是 `stack_cups`，只是模型里换了夹爪）。
+5. 怎么验证：`bash tests/check_release.sh`（rc=0）；`python3 tests/test_v3_64.py`；`python3 NERO_V362_Cup_Skills.py --study-so101 out.json` 重跑 SO-101 替身试验（`config/cup_stack_study_v364_so101.json`）。
+6. 安装尺寸是按 AgileX 安装座估的（座面 link7 x = 37.5 mm、转接环 7 mm、偏转 −45°），可用环境变量 `NERO_V364_SO101_SEAT_X_MM / _RING_MM / _ROLL_DEG` 改。**只在替身里验证过，完整仿真链路请复测，真机未验证。**
+
 
 **V3.63**（叠杯子：修复放置时 J7 越限急停 + 支持固定主相机 D435i 作为位姿源）
 1. V3.62 失败原因：放置时一次小的直线对中让 J7 越过 MuJoCo 限位 → 急停硬复位；技能没检查急停，继续空转。

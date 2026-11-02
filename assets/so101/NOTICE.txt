@@ -1,0 +1,4 @@
+SO-101 gripper meshes (wrist_roll_follower_so101_v1.stl, moving_jaw_so101_v1.stl, sts3215_03a_v1.stl)
+from TheRobotStudio/SO-ARM100, Simulation/SO101/assets (https://github.com/TheRobotStudio/SO-ARM100),
+licensed under the Apache License 2.0. Unmodified copies; used by NERO V3.64 (stack_cups_so101 scene) as visual
+meshes only - collision uses boxes fitted to the jaw inner faces (NERO_V364_SO101_Gripper.py).
