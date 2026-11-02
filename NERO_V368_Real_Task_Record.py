@@ -23,8 +23,9 @@ import os
 import sys
 import time
 
-VERSION = "V3.68"
+VERSION = "V3.69"
 MARKER = "V3.68 REAL TASK RECORD"
+MARKER_V369 = "V3.69 TASK VIDEO"
 HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
@@ -107,6 +108,7 @@ class TaskRecorder:
         self.t0 = time.time()
         self.steps = []
         self.n = 0
+        self.status = {"step": 0, "tool": "-", "phase": "start", "result": "", "t": time.time()}   # V3.69 TASK VIDEO
         root = root or task_root()
         self.folder = os.path.join(root, f"{time.strftime('%Y%m%d_%H%M%S')}_{mode}_{_slug(task)}")
         os.makedirs(self.folder, exist_ok=True)
@@ -134,11 +136,16 @@ class TaskRecorder:
             self.n += 1
             n = self.n
             st0 = {"stage": getattr(skills, "stage", None), "held": getattr(skills, "held", None)}
+            self.status = {"step": n, "tool": f"{name}({_args_text(args)})", "phase": "running", "result": "",
+                           "stage": st0["stage"], "held": st0["held"], "t": time.time()}
             self.shot(n, "before", name, args, None, st0, perception_fn)
             t = time.perf_counter()
             res = orig(name, args)
             dt = time.perf_counter() - t
             st1 = {"stage": getattr(skills, "stage", None), "held": getattr(skills, "held", None)}
+            self.status = {"step": n, "tool": f"{name}({_args_text(args)})", "phase": "done",
+                           "result": "OK" if (res or {}).get("ok") else f"FAIL {(res or {}).get('reason')}",
+                           "stage": st1["stage"], "held": st1["held"], "t": time.time()}
             img = self.shot(n, "after", name, args, res, st1, perception_fn, dt)
             rec = {"n": n, "tool": name, "args": args, "ok": bool((res or {}).get("ok")),
                    "reason": (res or {}).get("reason") or (res or {}).get("error"), "dt_s": round(dt, 2),
@@ -217,6 +224,89 @@ class TaskRecorder:
                 json.dump(d, f, ensure_ascii=False, indent=1, default=str)
         except OSError:
             pass
+
+
+# ================================================================================================ video
+class TaskVideo:
+    """V3.69 TASK VIDEO: task_video.mp4 in the task record folder - fixed D435i (+ wrist) at `fps`, YOLOE contours of
+    the last perception, header with time stamp, elapsed time, mode, current step / tool / phase / result, stage and
+    held cup.  A daemon thread; stop() finishes the file."""
+
+    def __init__(self, recorder, snap_fn, fps=5.0, width=1280, perception_fn=None, log=None):
+        import threading
+        self.rec, self.snap_fn, self.fps, self.width = recorder, snap_fn, float(fps), int(width)
+        self.perception_fn = perception_fn
+        self.log = log or (lambda s: None)
+        self.path = os.path.join(recorder.folder, "task_video.mp4")
+        self._stop = threading.Event()
+        self._th = threading.Thread(target=self._run, daemon=True, name="v369_task_video")
+        self.writer, self.frames = None, 0
+
+    def start(self):
+        self._th.start()
+        self.log(f"[INFO] [V3.69 TASK VIDEO] 录像中（{self.fps:g} fps）→ {self.path}")
+
+    def stop(self, timeout=5.0):
+        self._stop.set()
+        self._th.join(timeout)
+        self.log(f"[INFO] [V3.69 TASK VIDEO] 录像结束：{self.frames} 帧，{self.frames / max(self.fps, 1e-6):.0f} s → "
+                 f"{self.path}")
+
+    def compose(self):
+        cv2 = _cv2()
+        imgs = self.snap_fn()
+        if not imgs or imgs[0] is None:
+            return None
+        main = np.ascontiguousarray(np.asarray(imgs[0])[..., ::-1])
+        per = self.perception_fn() if self.perception_fn else None
+        for e in (per or {}).get("dets") or []:
+            c = e.get("contour") or []
+            if len(c) >= 3:
+                col = (0, 230, 118) if e.get("kind") in ("cup", "stack") else (0, 145, 255)
+                cv2.polylines(main, [np.asarray(c, np.int32).reshape(-1, 1, 2)], True, col, 2)
+        h = main.shape[0]
+        wr = imgs[1] if len(imgs) > 1 else None
+        if wr is not None:
+            wr = np.ascontiguousarray(np.asarray(wr)[..., ::-1])
+            wr = cv2.resize(wr, (int(round(wr.shape[1] * h / float(wr.shape[0]))), h))
+            main = np.hstack([main, wr])
+        sc = self.width / float(main.shape[1])
+        main = cv2.resize(main, (self.width, int(round(main.shape[0] * sc)) // 2 * 2))
+        st = self.rec.status
+        lines = [f"{time.strftime('%Y-%m-%d %H:%M:%S')}  T+{time.time() - self.rec.t0:6.1f} s  mode={self.rec.mode}",
+                 f"step #{st.get('step')} {st.get('phase')}: {st.get('tool')} {st.get('result') or ''}"[:120],
+                 f"stage={st.get('stage')}  held={st.get('held')}"]
+        bar = np.zeros((26 * len(lines) + 8, self.width, 3), np.uint8)
+        bar[:] = (40, 40, 40) if st.get("phase") != "done" else ((40, 120, 40) if str(st.get("result")).startswith("OK")
+                                                                 else (40, 40, 170))
+        for i, t in enumerate(lines):
+            cv2.putText(bar, t.encode("ascii", "replace").decode(), (8, 22 + 26 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (255, 255, 255), 2)
+        img = np.vstack([bar, main])
+        return img[: img.shape[0] // 2 * 2]
+
+    def _run(self):
+        cv2 = _cv2()
+        period = 1.0 / max(self.fps, 0.5)
+        nxt = time.time()
+        while not self._stop.is_set():
+            try:
+                img = self.compose()
+                if img is not None:
+                    if self.writer is None:
+                        self.writer = cv2.VideoWriter(self.path, cv2.VideoWriter_fourcc(*"mp4v"), self.fps,
+                                                      (img.shape[1], img.shape[0]))
+                        self.size = (img.shape[1], img.shape[0])
+                    if (img.shape[1], img.shape[0]) != self.size:
+                        img = cv2.resize(img, self.size)
+                    self.writer.write(img)
+                    self.frames += 1
+            except Exception as exc:
+                self.log(f"[WARN] [V3.69 TASK VIDEO] 一帧没录上：{exc}")
+            nxt += period
+            self._stop.wait(max(0.0, nxt - time.time()))
+        if self.writer is not None:
+            self.writer.release()
 
 
 # ================================================================================================ summary

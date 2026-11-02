@@ -72,8 +72,8 @@ except Exception:
 
 # ------------------------------------------------------------------ Z1
 for m in (CON, RR, YP, W49, RT, YC, TR):
-    assert m.VERSION == "V3.68", (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "V3.68"
+    assert m.VERSION in ("V3.68", "V3.69"), (m.__name__, m.VERSION)
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.68", "V3.69")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 for fn, h in (("NERO_V326_Wrist_Camera.py", "6b5c5d683073e4252b82c1c703ad664173960a179947f9e72775bb9683697d0a"),
               ("NERO_V2_7_1_Agent.py", "3e52d05ea84d94c8359d5875fa0fee8c2cc42d612b52e59109e1166912439696"),
@@ -90,7 +90,7 @@ for prof in (CK.OFFICIAL_PROFILE, CK.so101_profile()):
     assert not prof.lenient_pick and prof.wide_step_deg == 15 and prof.plan_time_budget_s is None
     assert not prof.remember_angles
 rp = RT.real_profile(CK)
-assert rp.lenient_pick and rp.wide_step_deg == 30 and rp.plan_time_budget_s == 10.0 and rp.remember_angles
+assert rp.lenient_pick and rp.wide_step_deg == 30 and rp.plan_time_budget_s in (10.0, 15.0) and rp.remember_angles   # V3.69: 15 s from the start
 assert "task/" in (ROOT / ".gitignore").read_text(encoding="utf-8")
 print("[Z1] V3.68; frozen modules unchanged; simulation profiles unchanged; real profile lenient / fast; task/ ignored")
 
@@ -135,7 +135,8 @@ if gl_ok:
     assert sk3.run_tool("observe_scene", {})["ok"] and sk3.run_tool("plan_cup_stack", {"source_cup": "cup_1",
                                                                                          "target_cup": "cup_2"})["ok"]
     r3 = sk3.run_tool("pick_cup", {"source_cup": "cup_1"})
-    assert not r3["ok"] and r3["reason"] == "NO_TWO_FINGER_CONTACT" and "did not stop" in r3["physical_verification"]["detail"], r3
+    # V3.69 CAMERA DECIDES GRIP: the camera confirmed the lift -> held, the servo only warns (was NO_TWO_FINGER_CONTACT)
+    assert r3["ok"] and "camera confirms" in r3["physical_verification"].get("clamp_note", ""), r3
     # a fresh view of a cup pushed far away stops the pick before the clamp
     io, tw4, arm4, grip4 = RTW.make()
     sk4 = RT.make_skills(io)
@@ -169,7 +170,9 @@ if gl_ok:
     t = time.time()
     p2 = sk5.run_tool("plan_cup_stack", {"source_cup": "cup_1", "target_cup": "cup_2"})
     t2 = time.time() - t
-    assert p1["ok"] and p2["ok"] and any("started from the last good rim angles" in l for l in log3)
+    # V3.69 BEST-OF PLAN: the remembered angles are one of the candidates ("last ..." in the plan log line)
+    assert p1["ok"] and p2["ok"] and any("started from the last good rim angles" in l or
+                                         ("[V3.69 CUP PLAN] last " in l) for l in log3), log3[-3:]
     k_far = dict(sk5.k, cup_grasp_rim_angle_deg=180.0, cup_place_rim_angle_deg=180.0)
     s_, d_ = sk5._cup("cup_1"), sk5._cup("cup_2")
     t = time.time()

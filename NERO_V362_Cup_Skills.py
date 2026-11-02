@@ -185,7 +185,7 @@ class GripperProfile:
                  flips=(False, True), release_gap_max_mm=None, lift_settle_s=0.0,
                  release_tilt_max_deg=0.0, align_rotate_m=0.0, descent_stop_above_rim_m=None,
                  wide_search_below_deg=None, lenient_pick=False, wide_step_deg=15, plan_time_budget_s=None,
-                 remember_angles=False):
+                 remember_angles=False, clear_view_before_verify=False, camera_decides_grip=False):
         self.name, self.T_tcp_grasp, self.open_mm, self.label = name, np.asarray(T_tcp_grasp, float), float(open_mm), label
         # V3.64: a gripper with a FIXED jaw (SO-101) descends with this clearance between the fixed pad and the wall
         # (grasp frame moved along -y); clamping then slides the 10 g cup onto the fixed jaw
@@ -225,6 +225,11 @@ class GripperProfile:
         self.wide_step_deg = int(wide_step_deg)
         self.plan_time_budget_s = None if plan_time_budget_s is None else float(plan_time_budget_s)
         self.remember_angles = bool(remember_angles)
+        # V3.69 CLEAR VIEW VERIFY: move the arm out of the fixed camera's view of the cups before verifying
+        self.clear_view_before_verify = bool(clear_view_before_verify)
+        # V3.69 CAMERA DECIDES GRIP: after the lift the camera (cup gone from the table) decides; the servo angle only
+        # warns (a 0.3-0.5 mm cup wall: clamped 2.62 mm vs empty 2.39 mm in the first real stack)
+        self.camera_decides_grip = bool(camera_decides_grip)
 
         Rg = self.T_tcp_grasp[:3, :3]
         if abs(np.linalg.det(Rg) - 1.0) > 1e-6 or np.abs(Rg.T @ Rg - np.eye(3)).max() > 1e-6:
@@ -475,7 +480,7 @@ def stack_heights(knobs, src_base_z, dst_base_z):
 
 
 def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, log=None, _wide=False, profile=None,
-                   allow_wide=True):
+                   allow_wide=True, deadline=None):
     """rim pinch plan: grasp rim angle + flip (pregrasp / grasp / lift reachable), then place rim angle with the SAME
     flip (the cup axis offset in the TCP frame is fixed by the grasp; V3.61 chose the flips independently, which
     would have put the carried cup 2 x rim radius off the target).  Knob angles are relative to the cup -> base
@@ -500,8 +505,11 @@ def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, lo
     step = int(getattr(profile, "wide_step_deg", 15) or 15) if _wide else 15
     budget = getattr(profile, "plan_time_budget_s", None) if _wide else None
     t_end = time.time() + float(budget) if budget else None
-    over = lambda: bool(t_end and time.time() > t_end and best is not None
-                        and best["key"][2] >= MIN_MARGIN_RELAXED_DEG)
+    if deadline is not None:                       # V3.69 BEST-OF PLAN: one budget from the start of the planning
+        over = lambda: time.time() > deadline
+    else:
+        over = lambda: bool(t_end and time.time() > t_end and best is not None
+                            and best["key"][2] >= MIN_MARGIN_RELAXED_DEG)
     for phi in _angle_order(math.degrees(base_dir(s_rim)) + float(knobs["cup_grasp_rim_angle_deg"]),
                             step=step, span=180 if _wide else 45):
         if over():
@@ -1437,6 +1445,9 @@ class CupSkills:
             q_now = None
         plan = None
         last = _LAST_ANGLES.get(self.prof.name) if self.prof.remember_angles else None
+        if self.prof.plan_time_budget_s is not None:
+            plan = self._plan_best_of(s, t, q_now, last)
+            last = None
         if last is not None:
             # V3.68 FAST PLAN: start from the rim angles of the last good plan (narrow search only)
             k2 = dict(self.k, cup_grasp_rim_angle_deg=last[0], cup_place_rim_angle_deg=last[1])
@@ -1471,6 +1482,36 @@ class CupSkills:
         pub["executable"] = True
         return self._res("plan_cup_stack", True, {"min_joint_margin_deg": plan["min_joint_margin_deg"]},
                          nxt=["pick_cup"], warnings=warn, plan=pub)
+
+    def _plan_best_of(self, s, t, q_now, last):
+        """V3.69 BEST-OF PLAN (real profile): the last good rim angles, the narrow window and - when the best is still
+        below the preferred margin - the wide search, all within ONE time budget counted from here; the plan with the
+        largest joint margin wins (V3.68 kept a 4.9 deg wide result although the narrow search had 6.1 deg)"""
+        t0 = time.time()
+        dead = t0 + float(self.prof.plan_time_budget_s)
+        cands = []
+        if last is not None:
+            k2 = dict(self.k, cup_grasp_rim_angle_deg=last[0], cup_place_rim_angle_deg=last[1])
+            cands.append(("last", plan_cup_stack(k2, s["rim"], s["quat"], t["rim"], t["quat"], q_start=q_now,
+                                                 profile=self.prof, allow_wide=False, deadline=dead)))
+        cands.append(("narrow", plan_cup_stack(self.k, s["rim"], s["quat"], t["rim"], t["quat"], q_start=q_now,
+                                               profile=self.prof, allow_wide=False, deadline=dead)))
+        good = [c for c in cands if c[1].get("ok")]
+        best_m = max((c[1]["min_joint_margin_deg"] for c in good), default=-1.0)
+        if best_m < max(MIN_MARGIN_RELAXED_DEG, self.prof.wide_search_below_deg or 0.0) and time.time() < dead:
+            cands.append(("wide", plan_cup_stack(self.k, s["rim"], s["quat"], t["rim"], t["quat"], q_start=q_now,
+                                                 profile=self.prof, _wide=True, allow_wide=False, deadline=dead)))
+        good = [c for c in cands if c[1].get("ok")]
+        txt = " · ".join(f"{n} " + (f"{p['min_joint_margin_deg']}°" if p.get("ok") else str(p.get("reason")))
+                         for n, p in cands)
+        if not good:
+            self.io.emit(f"[WARN] [V3.69 CUP PLAN] no plan ({txt}) in {time.time() - t0:.1f} s")
+            return cands[-1][1]
+        name, plan = max(good, key=lambda c: c[1]["min_joint_margin_deg"])
+        self.io.emit(f"[INFO] [V3.69 CUP PLAN] {txt} -> {name} ({plan['min_joint_margin_deg']}°, grasp "
+                     f"{plan['grasp_rim_angle_rel_deg']:+.0f}° place {plan['place_rim_angle_rel_deg']:+.0f}°) in "
+                     f"{time.time() - t0:.1f} s (budget {self.prof.plan_time_budget_s:.0f} s)")
+        return plan
 
     # ------------------------------------------------------------------ V3.63 JOINT-SPACE SAFE MOTION
     class _Abort(Exception):
@@ -1699,8 +1740,14 @@ class CupSkills:
             self.io.gripper_open(self.prof.open_mm)
             self._retreat_up()
             return self._res(tool, False, v, reason="CUP_DID_NOT_FOLLOW_LIFT", nxt=["observe_scene", "plan_cup_stack"])
-        if self.prof.lenient_pick and not v.get("clamp", {}).get("hold_active", True) \
-                and not (v.get("clamp", {}).get("contact_left") and v.get("clamp", {}).get("contact_right")):
+        no_hold = self.prof.lenient_pick and not v.get("clamp", {}).get("hold_active", True) \
+            and not (v.get("clamp", {}).get("contact_left") and v.get("clamp", {}).get("contact_right"))
+        if no_hold and self.camera and self.prof.camera_decides_grip:
+            # V3.69 CAMERA DECIDES GRIP: the cup left the table with the gripper -> held; the servo angle only warns
+            v["clamp_note"] = "servo stopped near the touch point (thin cup wall) - the camera confirms the cup is held"
+            self.io.emit("[WARN] [V3.69 CUP] 夹爪停在碰合点附近（薄杯壁分不清），主相机确认杯子已离开桌面 → 以相机为准，算夹住")
+            no_hold = False
+        if no_hold:
             # V3.68 LENIENT REAL PICK: lifted although the clamp did not report a hold -> both checks must agree
             self.io.gripper_open(self.prof.open_mm)
             self._retreat_up()
@@ -1930,7 +1977,19 @@ class CupSkills:
             return self._res("verify_stack", False, reason="BAD_CUP_NAMES")
         if self.held:
             return self._res("verify_stack", False, reason="CUP_STILL_HELD", nxt=["place_cup_into"])
-        st = self._state(upper_cup, lower_cup)
+        if self.camera and self.prof.clear_view_before_verify and hasattr(self.io, "clear_view"):
+            # V3.69 CLEAR VIEW VERIFY: the gripper above the stack hid the rims (first real stack: NOT_STACKED although
+            # nested) -> arm out of the view first; still hidden -> further away and look again
+            self.io.clear_view(0, f"verify {upper_cup} in {lower_cup}")
+            st = self._state(upper_cup, lower_cup)
+            if not st["stacked"] and any(k == "occluded" for k, _h in st.get("clusters") or []):
+                self.io.clear_view(1, f"verify {upper_cup} in {lower_cup}")
+                st = self._state(upper_cup, lower_cup)
+                st["view"] = "second clear-view retreat"
+            else:
+                st["view"] = "arm moved out of the camera view"
+        else:
+            st = self._state(upper_cup, lower_cup)
         ok = bool(st["stacked"])
         if ok:
             self.stage = "VERIFIED"

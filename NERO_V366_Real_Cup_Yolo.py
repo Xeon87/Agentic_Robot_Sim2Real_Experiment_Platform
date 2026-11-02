@@ -28,7 +28,7 @@ import math
 import os
 import sys
 
-VERSION = "V3.68"
+VERSION = "V3.69"
 MARKER = "V3.66 REAL CUP YOLOE PERCEPTION"
 MARKER_V367 = "V3.67 PERCEPTION ROBUSTNESS"
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -39,6 +39,7 @@ import NERO_V343_Scenes as SC               # noqa: E402
 
 DEFAULT_PROMPT = "cup"
 MERGE_M = 0.05                  # two masks whose cup axes are closer than this are one cup (or one nested pair)
+LIFT_NEAR_M = 0.12             # V3.69 LIFTED NEAR GRIPPER: a lifted cup is within this of the gripper (x-y)
 LIFT_M = 0.025                  # lowest mask points (1st percentile) this far above the table -> in the air (held)
 TOL_LOW_MM = 18.0               # single cup: silhouette height >= H_top - 18 mm
 TOL_HIGH_MM = 18.0              # nested pair: <= H_top + nested + 18 mm
@@ -249,8 +250,15 @@ def cup_from_mask(mask, depth, K, T, z0, g, ndz_m, robot_boxes=None, fence_poly=
     n_all = len(P)
     if n_all and float(np.percentile(P[:, 2], 1)) - z0 > LIFT_M:
         # the YOLOE mask is the cup itself (the gripper is not in it): its lowest points are the cup's bottom edge
-        out.update(kind="lifted", reason="杯子离开桌面（在夹爪里）", n_points=int(n_all))
-        return out
+        # V3.69 LIFTED NEAR GRIPPER: ... and a cup in the air is next to the gripper; a standing cup whose low depth
+        # is missing (image edge, calibration board) is not "lifted"
+        cxy = np.median(P[:, :2], axis=0)
+        near = (not robot_boxes) or min(float(np.hypot(*(cxy - np.asarray(c, float)[:2]))) for c, _R, _h in robot_boxes) \
+            <= LIFT_NEAR_M
+        if near:
+            out.update(kind="lifted", reason="杯子离开桌面（在夹爪里）", n_points=int(n_all))
+            return out
+        out["warnings"].append("杯底附近没有深度（不在夹爪旁，不算被夹起）")
     P = P[(P[:, 2] > z0 + 0.003) & (P[:, 2] < z0 + g["h"] + ndz_m + 0.05)] if len(P) else P
     out["n_points"] = int(len(P))
     if len(P) < MIN_PTS:

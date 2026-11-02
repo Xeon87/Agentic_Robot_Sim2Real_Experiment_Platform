@@ -28,7 +28,7 @@ import time
 
 import numpy as np
 
-VERSION = "V3.68"
+VERSION = "V3.69"
 MARKER = "V3.65 NERO REAL CUP TASK"
 CALIB_DIR = os.environ.get("NERO_CALIB_DIR") or os.path.expanduser("~/Downloads/cameracalib")
 SETTINGS_NAME = "real_cup_task.json"
@@ -51,6 +51,29 @@ DEFAULT_CFG = {
     "seat_mm": None, "ring_mm": None, "roll_deg": None,      # None = NERO_V364 MOUNT (estimate)
     "tip_corr_mm": [0.0, 0.0, 0.0],  # fingertip correction in the SO-101 gripper frame (4-pose touch calibration)
 }
+# V3.69 SPEED MULTIPLIER: 1X = the base speeds of the fields; joint moves scale fully up to JOINT_CAP, straight
+# segments near the cups (descent / lift / lowering) only up to LINE_CAP; settle / dwell times shrink
+SPEED_CHOICES = ("1X", "2X", "3X", "4X", "5X", "10X")
+JOINT_CAP_DEG_S = 72.0
+LINE_CAP_MM_S = 60.0
+
+
+def apply_speed(cfg, mult):
+    """V3.69 SPEED MULTIPLIER -> new motion cfg (joint / line speeds, settle, hover dwell) and a description"""
+    k = max(1.0, float(mult))
+    c = dict(cfg)
+    c["joint_vmax_deg_s"] = round(min(JOINT_CAP_DEG_S, float(cfg["joint_vmax_deg_s"]) * k), 1)
+    c["line_vmax_mm_s"] = round(min(LINE_CAP_MM_S, float(cfg["line_vmax_mm_s"]) * k), 1)
+    c["settle_s"] = round(max(0.15, float(cfg.get("settle_s", DEFAULT_CFG["settle_s"])) / k), 2)
+    c["hover_dwell_s"] = round(max(1.0, float(cfg.get("hover_dwell_s", DEFAULT_CFG["hover_dwell_s"])) / k), 1)
+    c["speed_mult"] = k
+    capped = [n for n, v, b in (("关节", c["joint_vmax_deg_s"], float(cfg["joint_vmax_deg_s"]) * k),
+                                ("直线", c["line_vmax_mm_s"], float(cfg["line_vmax_mm_s"]) * k)) if v < b - 1e-6]
+    desc = (f"{k:g}X：关节 {c['joint_vmax_deg_s']} °/s · 直线 {c['line_vmax_mm_s']} mm/s · 停稳 {c['settle_s']} s"
+            + (f"（{'/'.join(capped)}已到上限）" if capped else ""))
+    return c, desc
+
+
 MOUNT_LIMITS = {"seat_mm": (20.0, 60.0), "ring_mm": (0.0, 30.0), "roll_deg": (-180.0, 180.0)}
 EXAMPLES = (("cup_1 → cup_2", "Stack cup_1 into cup_2"), ("cup_2 → cup_1", "Put cup_2 into cup_1"))
 
@@ -74,6 +97,24 @@ def save_settings(d, path=None):
         return True
     except Exception:
         return False
+
+
+def yolo_device(log=None):
+    """V3.69 YOLOE DEVICE: 'cuda:0' when torch sees CUDA (forced - ultralytics was observed on the CPU: ~1 s per
+    frame), else None (CPU) with the reason in the log"""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            name = torch.cuda.get_device_name(0)
+            if log:
+                log(f"[OK] [V3.69 REAL] YOLOE 用 GPU：cuda:0（{name}）")
+            return "cuda:0"
+        why = f"torch {torch.__version__} 看不到 CUDA（torch.cuda.is_available() = False）"
+    except Exception as exc:
+        why = f"torch 不可用：{exc}"
+    if log:
+        log(f"[WARN] [V3.69 REAL] YOLOE 只能用 CPU（每帧约 1 s）：{why}")
+    return None
 
 
 def real_mount(cfg=None):
@@ -136,7 +177,9 @@ def real_profile(CK, lift_settle_s=0.5, cfg=None):
                              wide_search_below_deg=8.0,
                              # V3.68: lenient pick (clamp + lift, then judge), fast plan (30 deg wide step, 10 s
                              # budget, start from the last good rim angles)
-                             lenient_pick=True, wide_step_deg=30, plan_time_budget_s=10.0, remember_angles=True)
+                             lenient_pick=True, wide_step_deg=30, plan_time_budget_s=15.0, remember_angles=True,
+                             # V3.69: clear view before verifying, the camera decides whether the cup is held
+                             clear_view_before_verify=True, camera_decides_grip=True)
 
 
 def time_joint_path(path, vmax_joint_rad, tcp_pts=None, vmax_lin=None, ramp_frac=0.2, ramp_gain=1.5):
@@ -337,6 +380,17 @@ class RealIO:
         except Exception as exc:
             return {"ok": False, "error": str(exc)[:300]}
 
+    def clear_view(self, attempt, label):
+        """V3.69 CLEAR VIEW VERIFY: attempt 0 = back to the start posture (out of the fixed camera's view of the cups);
+        attempt 1 = additionally 100 mm straight up from there"""
+        if attempt == 0:
+            r = self.go_home(f"V3.69 clear view for {label}")
+        else:
+            p, q = self.tcp_pose()
+            r = self.move_line(f"V3.69 clear view (higher) for {label}", [p[0], p[1], p[2] + 0.10], q, 0.05)
+        self.emit(f"[INFO] [V3.69 REAL] 验证前让开视线（第 {attempt + 1} 次）：{'OK' if r.get('ok', True) else r.get('error')}")
+        return r
+
     # -- gripper (virtual opening mm = simulation backend units, 2000 * q1)
     def gripper_open(self, mm):
         import NERO_V365_STS3215_Gripper as GR
@@ -425,7 +479,8 @@ class RealIO:
         dt = time.perf_counter() - t_p
         self.perc_times.append(dt)
         self.emit(f"[V3.66 REAL CUP YOLOE] {tag} | table z {res['table_z_m'] * 1000:+.0f} mm | YOLOE {res['n_2d']} 个 | "
-                  + YC.summary(res) + f" | {dt:.2f} s（{YC.timing_text(res)}）")
+                  + YC.summary(res) + f" | {dt:.2f} s（{YC.timing_text(res)}）"
+                  + (f" · {res.get('device')}" if res.get("device") else ""))
         return res
 
 
@@ -712,6 +767,8 @@ class RealCupTaskTabUI:
         ttk.Button(cb, text="▶ 连接主相机", command=self.on_cam_connect).pack(side="left")
         ttk.Button(cb, text="▶ 连接腕部相机", command=self.on_wrist_connect).pack(side="left", padx=4)
         ttk.Button(cb, text="识别杯子（不动）", command=self.on_perceive).pack(side="left", padx=4)
+        self.v_video = tk.BooleanVar(value=bool(self.st.get("record_video", False)))      # V3.69 TASK VIDEO
+        ttk.Checkbutton(cb, text="任务录像", variable=self.v_video).pack(side="left", padx=4)
         # V3.66 REAL CUP YOLOE PERCEPTION: the Camera tab's YOLOE object recognition (same model / confidence)
         yb = ttk.Frame(left)
         yb.pack(fill="x", pady=(0, 2))
@@ -865,6 +922,10 @@ class RealCupTaskTabUI:
                         variable=self.v_use_llm).pack(side="left")
         ttk.Button(r4, text="■ 停止", command=self.on_stop).pack(side="right")
         ttk.Button(r4, text="▶ 运行", command=self.on_run).pack(side="right", padx=4)
+        # V3.69 SPEED MULTIPLIER (left of 「▶ 运行」)
+        self.v_speed = tk.StringVar(value=str(self.st.get("speed_mult") or "1X"))
+        ttk.Combobox(r4, textvariable=self.v_speed, values=SPEED_CHOICES, width=5, state="readonly").pack(side="right")
+        ttk.Label(r4, text="速度").pack(side="right", padx=(8, 2))
 
         # -- log
         lf = ttk.Frame(right)
@@ -1227,7 +1288,8 @@ class RealCupTaskTabUI:
         d.update(provider=next((k for k, v in self.provs.items() if v == self.v_prov.get()), "openai"),
                  model=self.v_model.get().strip(), effort=self.v_effort.get(), task=self.v_task.get().strip(),
                  use_llm=bool(self.v_use_llm.get()), cup_prompt=self.v_cup_prompt.get().strip() or "cup",
-                 show_tips=bool(self.v_tips.get()))
+                 show_tips=bool(self.v_tips.get()), speed_mult=self.v_speed.get(),
+                 record_video=bool(self.v_video.get()))
         try:
             d["max_steps"] = int(self.v_steps.get())
         except ValueError:
@@ -1314,6 +1376,7 @@ class RealCupTaskTabUI:
         if isinstance(cd, YP.YoloEDetector):
             if getattr(self, "_det_own", None) is None:
                 self._det_own = YP.YoloEDetector(log=self._log)
+                self._det_own.device = yolo_device(self._log)        # V3.69 YOLOE DEVICE
             det = self._det_own
         else:
             det = cd
@@ -1383,6 +1446,9 @@ class RealCupTaskTabUI:
         except ValueError as exc:
             self._log(f"[FAIL] [V3.65 REAL] {exc}")
             return
+        mult = float(str(self.v_speed.get() or "1X").rstrip("Xx") or 1)      # V3.69 SPEED MULTIPLIER
+        mc, speed_desc = apply_speed(mc, mult)
+        record_video = bool(self.v_video.get())
         self._save()
         self.refresh_skill()
         task = self.v_task.get().strip()
@@ -1405,7 +1471,7 @@ class RealCupTaskTabUI:
         geo = {k: mc.get(k) for k in ("roll_deg", "clearance_mm", "seat_mm", "ring_mm")}
         setup = (f"skill [{skill.get('code')}] · SO-101 偏转 {geo['roll_deg']:+.0f}° · 离杯壁 {geo['clearance_mm']:.0f} mm · "
                  f"空夹标定 {'已做' if touch_ok else '未做'} · 关节 {mc['joint_vmax_deg_s']} °/s · 直线 "
-                 f"{mc['line_vmax_mm_s']} mm/s · " + (f"LLM {llm['model']}" if use_llm else "固定流程"))
+                 f"{mc['line_vmax_mm_s']} mm/s（{mult:g}X）· " + (f"LLM {llm['model']}" if use_llm else "固定流程"))
 
         def snap():
             src = getattr(self.cam_tab, "src", None)
@@ -1422,6 +1488,8 @@ class RealCupTaskTabUI:
                 self._log(f"[WARN] [V3.65 REAL] 手眼标定：{note}")
             self._log(f"[V3.65 REAL CUP TASK] mode={mode} | {source} -> {target} | skill [{skill.get('code')}] | "
                       f"gripper {io.prof.label} | joint {mc['joint_vmax_deg_s']} deg/s · line {mc['line_vmax_mm_s']} mm/s")
+            if not perceive_only:
+                self._log(f"[INFO] [V3.69 REAL] 速度 {speed_desc}")
             if perceive_only:
                 res = io.perceive("识别杯子")
                 self._set_overlay(res, None)
@@ -1430,7 +1498,8 @@ class RealCupTaskTabUI:
                 self._log("[WARN] [V3.68 REAL] 还没做「空夹标定」：空夹会被当成夹住（停在碰合点也算夹住），请先标定")
             if mode != "plan":
                 text = (f"档位 {'② 悬停预演' if mode == 'hover' else '③ 实机执行'}：{source} → {target}\n"
-                        f"关节 {mc['joint_vmax_deg_s']} °/s · 直线 {mc['line_vmax_mm_s']} mm/s\n"
+                        f"速度 {speed_desc}\n"
+                        + ("⚠ 高速档：先在 ② 里用同样速度试过再跑 ③；急停在手边。\n" if mult >= 3 else "")
                         + ("机械臂到源杯上方约 5 cm、升高、转腕、到目标杯上方，再回起点；不下探、不合夹爪。"
                            if mode == "hover" else
                            "机械臂会下探捏住杯沿、抬起、放进另一只杯子（夹爪会夹紧）。请先跑过 ② 悬停预演。")
@@ -1445,6 +1514,15 @@ class RealCupTaskTabUI:
             except Exception as exc:
                 self._log(f"[WARN] [V3.68 TASK RECORD] 记录文件夹建不了：{exc}")
             out, err = {"ok": False}, None
+            vid = None
+            if rec is not None and record_video:          # V3.69 TASK VIDEO
+                try:
+                    vid = TR.TaskVideo(rec, snap, perception_fn=lambda: getattr(io, "last_perception", None),
+                                       log=self._log)
+                    vid.start()
+                except Exception as exc:
+                    self._log(f"[WARN] [V3.69 TASK VIDEO] 录像没开始：{exc}")
+                    vid = None
             try:
                 if mode == "plan":
                     out = run_plan_preview(io, source, target, knobs, skill, recorder=rec)
@@ -1460,6 +1538,9 @@ class RealCupTaskTabUI:
                     out = run_execute(io, source, target, knobs, skill, agent=agent, llm_cfg=llm, recorder=rec)
             except Exception as exc:
                 err = exc
+            finally:
+                if vid is not None:
+                    vid.stop()
             failed = None
             for r in out.get("results") or []:
                 if not r.get("ok") and r.get("reason") != "ALREADY_STACKED":
