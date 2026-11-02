@@ -28,7 +28,7 @@ import time
 
 import numpy as np
 
-VERSION = "V3.67"
+VERSION = "V3.68"
 MARKER = "V3.65 NERO REAL CUP TASK"
 CALIB_DIR = os.environ.get("NERO_CALIB_DIR") or os.path.expanduser("~/Downloads/cameracalib")
 SETTINGS_NAME = "real_cup_task.json"
@@ -133,7 +133,10 @@ def real_profile(CK, lift_settle_s=0.5, cfg=None):
                              align_rotate_m=float(c["align_rotate_mm"]) / 1000.0,
                              descent_stop_above_rim_m=(None if c.get("descent_stop_mm") in (None, "")
                                                        else float(c["descent_stop_mm"]) / 1000.0),
-                             wide_search_below_deg=8.0)
+                             wide_search_below_deg=8.0,
+                             # V3.68: lenient pick (clamp + lift, then judge), fast plan (30 deg wide step, 10 s
+                             # budget, start from the last good rim angles)
+                             lenient_pick=True, wide_step_deg=30, plan_time_budget_s=10.0, remember_angles=True)
 
 
 def time_joint_path(path, vmax_joint_rad, tcp_pts=None, vmax_lin=None, ramp_frac=0.2, ramp_gain=1.5):
@@ -181,6 +184,7 @@ class RealIO:
         self.prof = real_profile(CK, float(self.cfg["lift_settle_s"]), self.cfg)
         self.T_l7g = real_mount(self.cfg)[0]
         self.motion_log = []
+        self.perc_times = []                           # V3.68: perception durations (task summary)
 
     # -- basics
     def emit(self, s):
@@ -408,6 +412,7 @@ class RealIO:
         prompt resolution, depth fusion, locate_objects) + cup axis / silhouette height / kind (NERO_V366).
         No colour fallback: YOLOE unavailable -> the perception raises, the skill aborts (PERCEPTION_UNAVAILABLE)."""
         import NERO_V366_Real_Cup_Yolo as YC
+        t_p = time.perf_counter()
         cam = self.camera_fn()
         try:
             res = YC.perceive_cups_yolo(cam, robot_boxes=self.gripper_boxes(),
@@ -416,10 +421,11 @@ class RealIO:
             self.emit(f"[FAIL] [V3.66 REAL CUP YOLOE] YOLOE 不可用：{exc} → 任务终止（不改用颜色法）")
             raise
         self.last_perception, self.last_cam = res, cam
-        if YC.needs_snapshot(res):                     # V3.67 FAILURE SNAPSHOT
-            self.save_snapshot(tag, res)
+        # V3.68 FAST PERCEPTION: snapshots only when a run fails (the task record keeps before / after images)
+        dt = time.perf_counter() - t_p
+        self.perc_times.append(dt)
         self.emit(f"[V3.66 REAL CUP YOLOE] {tag} | table z {res['table_z_m'] * 1000:+.0f} mm | YOLOE {res['n_2d']} 个 | "
-                  + YC.summary(res))
+                  + YC.summary(res) + f" | {dt:.2f} s（{YC.timing_text(res)}）")
         return res
 
 
@@ -432,10 +438,17 @@ def make_skills(io, knobs=None, skill=None, log=None):
     return sk
 
 
-def run_plan_preview(io, source, target, knobs=None, skill=None):
+def _record(sk, io, recorder):
+    """V3.68 REAL TASK RECORD: before / after images + step lines for every tool call"""
+    if recorder is not None:
+        recorder.wrap(sk, perception_fn=lambda: getattr(io, "last_perception", None))
+    return sk
+
+
+def run_plan_preview(io, source, target, knobs=None, skill=None, recorder=None):
     """mode 1: camera + plan only"""
     io.motion_allowed = False
-    sk = make_skills(io, knobs, skill)
+    sk = _record(make_skills(io, knobs, skill), io, recorder)
     out = [sk.run_tool("observe_scene", {})]
     if out[-1].get("ok"):
         out.append(sk.run_tool("plan_cup_stack", {"source_cup": source, "target_cup": target}))
@@ -456,11 +469,11 @@ def _hover_pregrasp(sk, io, source, W, Q):
             "align": info}
 
 
-def run_hover(io, source, target, knobs=None, skill=None):
+def run_hover(io, source, target, knobs=None, skill=None, recorder=None):
     """mode 2: pregrasp hover above the source rim (jaws ~5 cm above the rim, gripper only opens) -> straight up to
     the lift height -> rotate -> above the target (the carry pose, without a cup) -> back to the start posture"""
     CK = io.CK
-    sk = make_skills(io, knobs, skill)
+    sk = _record(make_skills(io, knobs, skill), io, recorder)
     io.home_q = io.current_q()
     res = [sk.run_tool("observe_scene", {})]
     if not res[-1].get("ok"):
@@ -500,10 +513,10 @@ def run_hover(io, source, target, knobs=None, skill=None):
     return {"ok": ok, "results": res, "steps": steps, "skills": sk}
 
 
-def run_execute(io, source, target, knobs=None, skill=None, agent=None, llm_cfg=None):
+def run_execute(io, source, target, knobs=None, skill=None, agent=None, llm_cfg=None, recorder=None):
     """mode 3: the full task - scripted (observe, plan, pick, place, verify, back) or the LLM agent"""
     import NERO_V362_Cup_Skills as CK
-    sk = make_skills(io, knobs, skill)
+    sk = _record(make_skills(io, knobs, skill), io, recorder)
     io.home_q = io.current_q()
     if agent is None:
         out = sk.scripted_episode(source, target)
@@ -584,6 +597,7 @@ def camera_from_tab(cam_tab, yolo=None, n_frames=None, timeout_s=3.0):
     if src.K is None:
         raise RuntimeError("相机内参还没读到")
     n = int(n_frames or YP.FUSE_FRAMES)
+    t_grab = time.perf_counter()
     if hasattr(cam_tab, "_grab_frames"):
         rgb, depths = cam_tab._grab_frames(n, timeout=timeout_s)
     else:
@@ -602,7 +616,7 @@ def camera_from_tab(cam_tab, yolo=None, n_frames=None, timeout_s=3.0):
     note = cam_tab._calib_note() if hasattr(cam_tab, "_calib_note") else None
     return {"rgb": rgb, "depths": list(depths), "K": dict(src.K), "T_base_cam": calib["T_base_cam"],
             "z_table": None if zt is None else float(zt), "fence_poly": (fence or {}).get("polygon"),
-            "calib_note": note, "yolo": yolo}
+            "calib_note": note, "yolo": yolo, "grab_s": round(time.perf_counter() - t_grab, 3)}
 
 
 KIND_TEXT = {"occluded": ("被夹爪挡住", "#b0bec5"), "cup": ("单杯", "#00e676"), "stack": ("已叠好", "#00e5ff"), "unknown": ("不像杯子", "#ff9100"),
@@ -787,6 +801,13 @@ class RealCupTaskTabUI:
             ttk.Entry(g1, textvariable=v_, width=6).pack(side="left")
         ttk.Button(g1, text="读取碰点标定（固定指尖）", command=self.on_tip_from_touch).pack(side="left", padx=(8, 2))
         ttk.Button(g1, text="清除指尖修正", command=self.on_tip_clear).pack(side="left")
+        # V3.68 FINGERTIP OVERLAY + ROLL SWEEP
+        g2 = ttk.Frame(gf2)
+        g2.pack(fill="x", padx=4, pady=2)
+        self.v_tips = tk.BooleanVar(value=bool(self.st.get("show_tips", True)))
+        ttk.Checkbutton(g2, text="主相机画面画出模型指尖（对照真实指头校「偏转 °」）",
+                        variable=self.v_tips).pack(side="left")
+        ttk.Button(g2, text="偏转角扫描（只算不动）", command=self.on_roll_sweep).pack(side="right")
         self.v_geo = tk.StringVar(value="")
         JC.fixed_label(tk, gf2, 2, width=640, textvariable=self.v_geo, font=("TkFixedFont", 9), wraplength=630,
                        pack={"fill": "x", "padx": 4})
@@ -989,6 +1010,7 @@ class RealCupTaskTabUI:
                 self.cv.create_oval(u - 6, v - 6, u + 6, v + 6, outline="#00e5ff", width=2)
                 self.cv.create_text(u + 8, v - 8, text=f"{name} {c['kind']}", fill="#00e5ff", anchor="sw",
                                     font=("TkDefaultFont", 9, "bold"))
+        self._draw_tips(proj)                          # V3.68 FINGERTIP OVERLAY
         pl = self.overlay.get("plan")
         if pl:
             for key, col in (("grasp", "#ffeb3b"), ("release", "#76ff03")):
@@ -997,6 +1019,78 @@ class RealCupTaskTabUI:
                     u, v = uv
                     self.cv.create_line(u - 7, v, u + 7, v, fill=col, width=2)
                     self.cv.create_line(u, v - 7, u, v + 7, fill=col, width=2)
+
+    def _draw_tips(self, proj):
+        """V3.68 FINGERTIP OVERLAY: model fixed (F) / moving (M) fingertips for the current arm pose and the mount in
+        the fields; compare with the real jaws in the image and tune 「偏转 °」 until they coincide"""
+        if not bool(self.v_tips.get()) or not getattr(self.jpanel, "model", None):
+            return
+        try:
+            a = self.pipe.actual_arm_deg(self.jpanel.model)
+            if not a:
+                return
+            import NERO_V368_Real_Task_Record as TR
+            if getattr(self, "_fast", None) is None:
+                import NERO_V362_Cup_Skills as CK
+                self._fast = CK.FastArm()
+            geo = self.geometry_cfg()
+            st = self.grip.last if self.grip.connected else None
+            fx, mv = TR.fingertip_points(self._fast.fk(np.radians(np.asarray(a, float))), geo,
+                                         (st or {}).get("open_deg"))
+        except Exception:
+            return
+        uf, um = proj(fx), proj(mv)
+        if not uf or not um:
+            return
+        self.cv.create_line(uf[0], uf[1], um[0], um[1], fill="#ffeb3b", width=2)
+        for (u, v), col, t in ((uf, "#ff9800", "F 固定指"), (um, "#00e5ff", "M 动指")):
+            self.cv.create_oval(u - 5, v - 5, u + 5, v + 5, outline=col, width=2)
+            self.cv.create_text(u + 7, v + 7, text=t, fill=col, anchor="nw", font=("TkDefaultFont", 8, "bold"))
+
+    def on_roll_sweep(self):
+        """V3.68 ROLL SWEEP: plan the current cup pair for mount rolls -90..+90 deg (arm does not move)"""
+        if self.busy():
+            self._log("[WARN] [V3.68 REAL] 正在运行任务")
+            return
+        ycfg = self.yolo_cfg()
+        bad = [b for b in self.preflight("plan", ycfg) if "关节反馈" in b or "YOLOE" in b or "主相机" in b or "标定" in b]
+        if bad:
+            self._log("[FAIL] [V3.68 ROLL SWEEP] 不能开始：" + "；".join(bad))
+            return
+        try:
+            cfg = self.motion_cfg()
+        except ValueError as exc:
+            self._log(f"[FAIL] [V3.68 ROLL SWEEP] {exc}")
+            return
+        task = self.v_task.get().strip()
+        source, target = parse_task_cups(task)
+        knobs = self.knobs
+        arm = PipelineArm(self.pipe, lambda: self.jpanel.model, log=self._log)
+        io = RealIO(arm, None, lambda: camera_from_tab(self.cam_tab, yolo=ycfg), log=self._log, cfg=cfg,
+                    motion_allowed=False)
+        self.io = io
+
+        def job():
+            import NERO_V362_Cup_Skills as CK
+            import NERO_V368_Real_Task_Record as TR
+            sk = make_skills(io, knobs, self.skill)
+            r = sk.run_tool("observe_scene", {})
+            if not r.get("ok"):
+                self._log(f"[FAIL] [V3.68 ROLL SWEEP] 识别杯子失败：{r.get('reason')} {r.get('error') or ''}")
+                return
+            s_, t_ = sk._cup(source), sk._cup(target)
+            self._log(f"[INFO] [V3.68 ROLL SWEEP] {source} → {target}，偏转 −90…+90°，每个角度最多约 5 s")
+            rows = TR.roll_sweep(knobs, (s_["rim"], s_["quat"], t_["rim"], t_["quat"]), io.current_q(), cfg,
+                                 log=self._log, stop_fn=lambda: io.stop_ev.is_set())
+            okr = [r_ for r_ in rows if r_["ok"]]
+            if okr:
+                b = max(okr, key=lambda r_: r_["margin"])
+                good = ", ".join("{:+.0f}°".format(r_["roll"]) for r_ in okr)
+                self._log(f"[OK] [V3.68 ROLL SWEEP] 可规划的偏转角：{good}"
+                          f"；余量最大 {b['roll']:+.0f}°（{b['margin']}°）。当前填的 {cfg['roll_deg']:+.0f}°")
+            else:
+                self._log("[FAIL] [V3.68 ROLL SWEEP] 这组杯子位置在所有偏转角下都规划不到")
+        self._start("偏转角扫描", job)
 
     def _draw_wrist(self):
         w = getattr(self.cam_tab, "wrist_src", None)
@@ -1132,7 +1226,8 @@ class RealCupTaskTabUI:
             pass
         d.update(provider=next((k for k, v in self.provs.items() if v == self.v_prov.get()), "openai"),
                  model=self.v_model.get().strip(), effort=self.v_effort.get(), task=self.v_task.get().strip(),
-                 use_llm=bool(self.v_use_llm.get()), cup_prompt=self.v_cup_prompt.get().strip() or "cup")
+                 use_llm=bool(self.v_use_llm.get()), cup_prompt=self.v_cup_prompt.get().strip() or "cup",
+                 show_tips=bool(self.v_tips.get()))
         try:
             d["max_steps"] = int(self.v_steps.get())
         except ValueError:
@@ -1212,7 +1307,17 @@ class RealCupTaskTabUI:
     def yolo_cfg(self):
         """V3.66 REAL CUP YOLOE PERCEPTION: the Camera tab's YOLOE settings (Tk thread)"""
         import NERO_V366_Real_Cup_Yolo as YC
-        cfg = YC.yolo_cfg_from_tab(self.cam_tab, self.v_cup_prompt.get().strip() or YC.DEFAULT_PROMPT)
+        # V3.68 FAST PERCEPTION: the task's own detector instance (same class / model / confidence as the Camera tab)
+        # so a different prompt used in the Camera tab does not force a model reload before each cup perception
+        import NERO_V347_Yolo_Perception as YP
+        cd = getattr(self.cam_tab, "det_yolo", None)
+        if isinstance(cd, YP.YoloEDetector):
+            if getattr(self, "_det_own", None) is None:
+                self._det_own = YP.YoloEDetector(log=self._log)
+            det = self._det_own
+        else:
+            det = cd
+        cfg = YC.yolo_cfg_from_tab(self.cam_tab, self.v_cup_prompt.get().strip() or YC.DEFAULT_PROMPT, detector=det)
         self.v_yolo.set(YC.describe_cfg(cfg))
         return cfg
 
@@ -1288,19 +1393,31 @@ class RealCupTaskTabUI:
                "reasoning_effort": self.v_effort.get(), "max_tool_steps": steps, "task": task}
         knobs, skill = self.knobs, self.skill
         ycfg_text = self.v_yolo.get()
+        try:
+            note = self.cam_tab._calib_note() if hasattr(self.cam_tab, "_calib_note") else None
+        except Exception:
+            note = None
         arm = PipelineArm(self.pipe, lambda: self.jpanel.model, log=self._log)
         io = RealIO(arm, self.grip if self.grip.connected else None, lambda: camera_from_tab(self.cam_tab, yolo=ycfg),
                     log=self._log, cfg=mc, motion_allowed=(mode != "plan"))
         self.io = io
+        touch_ok = bool(self.grip.cfg.get("touch_calibrated"))
+        geo = {k: mc.get(k) for k in ("roll_deg", "clearance_mm", "seat_mm", "ring_mm")}
+        setup = (f"skill [{skill.get('code')}] · SO-101 偏转 {geo['roll_deg']:+.0f}° · 离杯壁 {geo['clearance_mm']:.0f} mm · "
+                 f"空夹标定 {'已做' if touch_ok else '未做'} · 关节 {mc['joint_vmax_deg_s']} °/s · 直线 "
+                 f"{mc['line_vmax_mm_s']} mm/s · " + (f"LLM {llm['model']}" if use_llm else "固定流程"))
+
+        def snap():
+            src = getattr(self.cam_tab, "src", None)
+            w = getattr(self.cam_tab, "wrist_src", None)
+            m = src.frames()[0] if src is not None and src.running() else None
+            wr = w.frames()[0] if w is not None and w.running() else None
+            return (m, wr)
 
         def job():
+            import NERO_V368_Real_Task_Record as TR
             t0 = time.time()
-            note = None
             self._log(f"[INFO] [V3.66 REAL CUP YOLOE] {ycfg_text}")
-            try:
-                note = camera_from_tab(self.cam_tab, n_frames=1).get("calib_note")
-            except Exception:
-                pass
             if note:
                 self._log(f"[WARN] [V3.65 REAL] 手眼标定：{note}")
             self._log(f"[V3.65 REAL CUP TASK] mode={mode} | {source} -> {target} | skill [{skill.get('code')}] | "
@@ -1309,9 +1426,9 @@ class RealCupTaskTabUI:
                 res = io.perceive("识别杯子")
                 self._set_overlay(res, None)
                 return
-            if mode == "plan":
-                out = run_plan_preview(io, source, target, knobs, skill)
-            else:
+            if mode == "execute" and not touch_ok:
+                self._log("[WARN] [V3.68 REAL] 还没做「空夹标定」：空夹会被当成夹住（停在碰合点也算夹住），请先标定")
+            if mode != "plan":
                 text = (f"档位 {'② 悬停预演' if mode == 'hover' else '③ 实机执行'}：{source} → {target}\n"
                         f"关节 {mc['joint_vmax_deg_s']} °/s · 直线 {mc['line_vmax_mm_s']} mm/s\n"
                         + ("机械臂到源杯上方约 5 cm、升高、转腕、到目标杯上方，再回起点；不下探、不合夹爪。"
@@ -1321,8 +1438,18 @@ class RealCupTaskTabUI:
                 if not self.ask("NERO 实机叠杯子", text):
                     self._log("[INFO] [V3.65 REAL] 已取消")
                     return
-                if mode == "hover":
-                    out = run_hover(io, source, target, knobs, skill)
+            rec = None
+            try:                                       # V3.68 REAL TASK RECORD
+                rec = TR.TaskRecorder(task if mode == "execute" else f"{source} into {target}", mode, snap_fn=snap,
+                                      log=self._log, meta={"setup": setup, "source": source, "target": target})
+            except Exception as exc:
+                self._log(f"[WARN] [V3.68 TASK RECORD] 记录文件夹建不了：{exc}")
+            out, err = {"ok": False}, None
+            try:
+                if mode == "plan":
+                    out = run_plan_preview(io, source, target, knobs, skill, recorder=rec)
+                elif mode == "hover":
+                    out = run_hover(io, source, target, knobs, skill, recorder=rec)
                 else:
                     agent = None
                     if use_llm:
@@ -1330,7 +1457,9 @@ class RealCupTaskTabUI:
                         agent = AG.NeroLLMAgent(emit=self._log, tool_runner=None)
                         agent.provider = llm["provider"]
                         self.agent = agent
-                    out = run_execute(io, source, target, knobs, skill, agent=agent, llm_cfg=llm)
+                    out = run_execute(io, source, target, knobs, skill, agent=agent, llm_cfg=llm, recorder=rec)
+            except Exception as exc:
+                err = exc
             failed = None
             for r in out.get("results") or []:
                 if not r.get("ok") and r.get("reason") != "ALREADY_STACKED":
@@ -1344,8 +1473,35 @@ class RealCupTaskTabUI:
             self.skills = sk
             if sk is not None:
                 self._set_overlay(getattr(io, "last_perception", None), sk.plan, sk)
+            # V3.68 REAL TASK RECORD: end-of-task summary (egg-task style)
+            per = getattr(io, "last_perception", None) or {}
+            cups_txt = " · ".join(f"{e.get('det_id')} {e.get('kind')}@({e['base_xyz_m'][0]:+.3f},{e['base_xyz_m'][1]:+.3f})"
+                                  + (f" h{e['height_mm']:.0f}" if e.get("height_mm") else "")
+                                  for e in per.get("cups") or [])
+            pt = list(getattr(io, "perc_times", []) or [])
+            ml = list(getattr(io, "motion_log", []) or [])
+            stats = {"n_perc": len(pt), "perc_avg_s": (sum(pt) / len(pt)) if pt else 0.0, "n_motion": len(ml),
+                     "motion_s": sum(float(m.get("elapsed_s") or 0) for m in ml)}
+            steps_ = list(rec.steps) if rec is not None else []
+            if mode == "hover":
+                for i, st_ in enumerate(out.get("steps") or []):
+                    steps_.append({"n": len(steps_) + 1, "tool": f"hover: {st_[0]}", "args": {}, "ok": st_[1],
+                                   "reason": st_[3], "dt_s": 0.0, "details": [] if st_[2] is None else
+                                   [f"TCP error {st_[2]} mm"]})
+            final = out.get("final")
+            if err is not None:
+                final = f"{type(err).__name__}: {err}"
+            text_, ok_ = TR.task_summary(task if mode == "execute" else f"{source} into {target}",
+                                         mode + (" (LLM)" if use_llm else ""), steps_, bool(out.get("ok")),
+                                         time.time() - t0, setup=setup, cups=cups_txt, folder=rec.folder if rec else None,
+                                         final_text=final if isinstance(final, str) else None, stats=stats)
+            self._log(text_)
+            if rec is not None:
+                rec.finish(text_, ok_)
             self._log(f"{'[OK]' if out.get('ok') else '[FAIL]'} [V3.65 REAL CUP TASK] mode={mode} finished in "
                       f"{time.time() - t0:.0f} s")
+            if err is not None:
+                raise err
         self._start(f"实机叠杯子 {mode}", job)
 
     def _set_overlay(self, res, plan, sk=None):

@@ -33,6 +33,7 @@ TMP = Path(tempfile.mkdtemp(prefix="nero_v365_gui_"))
 os.environ["NERO_V360_USER_STRATEGY_DIR"] = str(TMP / "user")
 os.environ["NERO_V360_ACTIVE_STRATEGY_FILE"] = str(TMP / "logs" / "active.json")
 os.environ["NERO_CALIB_DIR"] = str(TMP / "cameracalib")
+os.environ["NERO_V368_TASK_DIR"] = str(TMP / "task")          # V3.68: task records never in the release folder
 H = lambda b: hashlib.sha256(b).hexdigest()
 SNAP0 = {str(p.relative_to(ROOT)): H(p.read_bytes()) for p in ROOT.rglob("*")
          if p.is_file() and ".git" not in p.parts and "__pycache__" not in p.parts and "logs" not in p.parts}

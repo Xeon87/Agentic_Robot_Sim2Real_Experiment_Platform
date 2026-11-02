@@ -27,6 +27,7 @@ STRAT359="$HERE/NERO_V359_Strategy.py"         # V3.59 skill strategy knobs + sk
 REALCUP365="$HERE/NERO_V365_Real_Cup_Task.py"  # V3.65 NERO实机任务 tab (stack_cups_so101 skills on the real arm)
 GRIP365="$HERE/NERO_V365_STS3215_Gripper.py"   # V3.65 SO-101 jaw on the STS3215 bus servo
 CUPYOLO366="$HERE/NERO_V366_Real_Cup_Yolo.py"   # V3.66 real cup perception = the Camera tab's YOLOE pipeline
+TASKREC368="$HERE/NERO_V368_Real_Task_Record.py"  # V3.68 task records (before / after images) + summary
 
 if [[ "${1:-}" == "--sim" ]]; then
   shift
@@ -45,7 +46,7 @@ echo "============================================================"
 echo " NERO ${RELEASE} — console"
 echo " Folder: $HERE"
 echo "============================================================"
-for f in "$SIM" "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" "$CAM" "$YOLO347" "$WRIST349" "$STRAT359" "$REALCUP365" "$GRIP365" "$CUPYOLO366" "$HERE/SHA256SUMS.txt"; do
+for f in "$SIM" "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" "$CAM" "$YOLO347" "$WRIST349" "$STRAT359" "$REALCUP365" "$GRIP365" "$CUPYOLO366" "$TASKREC368" "$HERE/SHA256SUMS.txt"; do
   [[ -f "$f" ]] || die "NERO file missing from this folder: $f"
 done
 if ( cd "$HERE" && sha256sum --quiet -c SHA256SUMS.txt ) >/dev/null 2>&1; then
@@ -59,7 +60,7 @@ fi
 # The console uses only the Python standard library + tkinter.
 PY="${NERO_CONSOLE_PYTHON:-/usr/bin/python3}"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
-"$PY" -m py_compile "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" "$STRAT359" "$REALCUP365" "$GRIP365" "$CUPYOLO366" || die "py_compile failed: $CONSOLE / $REAL / $JOINT / $CONS / $SAFE"
+"$PY" -m py_compile "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" "$STRAT359" "$REALCUP365" "$GRIP365" "$CUPYOLO366" "$TASKREC368" || die "py_compile failed: $CONSOLE / $REAL / $JOINT / $CONS / $SAFE"
 "$PY" -c "import tkinter" 2>/dev/null || die "tkinter missing for $PY (sudo apt install python3-tk), or run the simulation directly: ./start_nero.sh --sim"
 bash -n "$SIM" || die "syntax error in $SIM"
 

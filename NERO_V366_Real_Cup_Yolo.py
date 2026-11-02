@@ -28,7 +28,7 @@ import math
 import os
 import sys
 
-VERSION = "V3.67"
+VERSION = "V3.68"
 MARKER = "V3.66 REAL CUP YOLOE PERCEPTION"
 MARKER_V367 = "V3.67 PERCEPTION ROBUSTNESS"
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -49,6 +49,7 @@ OCCL_PAD_PX = 10
 TILT_SPLIT_MAX_DEG = 4.0        # two half-sample tilt fits must agree within this, else the tilt is not trusted
 TILT_RMS_MAX_M = 0.005
 TILT_MIN_BAND_PTS = 150
+FIT_MAX_PTS = 1500              # V3.68 FAST PERCEPTION: wall points used per cone fit (evenly subsampled)
 SNAP_KEEP = 40                  # failure snapshots kept in NERO_CALIB_DIR/real_cup_logs
 
 
@@ -77,11 +78,13 @@ def resolve_query(YP, model_dir, model_name, prompts):
     return "text", sel
 
 
-def yolo_cfg_from_tab(cam_tab, prompt_text=DEFAULT_PROMPT):
-    """Camera tab YOLOE settings (Tk variables -> call in the Tk thread).  -> dict, with "error" when unusable."""
+def yolo_cfg_from_tab(cam_tab, prompt_text=DEFAULT_PROMPT, detector=None):
+    """Camera tab YOLOE settings (Tk variables -> call in the Tk thread).  -> dict, with "error" when unusable.
+    V3.68 FAST PERCEPTION: `detector` = the task's own YoloEDetector (same class, same model file / confidence / prompt
+    rules) so that switching prompts in the Camera tab does not force a model reload before every cup perception"""
     YP = _yp()
     prompts = YP.parse_prompts(prompt_text) or [DEFAULT_PROMPT]
-    det = getattr(cam_tab, "det_yolo", None)
+    det = detector if detector is not None else getattr(cam_tab, "det_yolo", None)
     if det is None or not all(hasattr(cam_tab, a) for a in ("v_ydir", "v_ymodel", "v_yconf")):
         return {"error": "Camera调试 页没有 YOLOE 检测器（视觉定位子页没有建立）", "prompts": prompts}
     try:
@@ -262,6 +265,8 @@ def cup_from_mask(mask, depth, K, T, z0, g, ndz_m, robot_boxes=None, fence_poly=
     wall = P[(P[:, 2] > z0 + 0.008) & (P[:, 2] < z0 + g["h"] - 0.010)]
     if len(wall) < MIN_PTS:
         wall = P
+    if len(wall) > FIT_MAX_PTS:                    # V3.68 FAST PERCEPTION: same result, a fraction of the time
+        wall = wall[np.linspace(0, len(wall) - 1, FIT_MAX_PTS).astype(int)]
     cam_xy = T[:2, 3]
     if top_hidden >= OCCL_TOP_FRAC:                # gripper at the top of the cup: low wall points only
         low = wall[wall[:, 2] < z0 + g["h"] - 0.030]
@@ -323,14 +328,21 @@ def perceive_cups_yolo(cam, robot_boxes=None, cup=None, nested_dz=None, hull_box
     K = dict(cam["K"])
     T = np.asarray(cam["T_base_cam"], float)
     det = ycfg["detector"]
+    import time as _t
+    tm = {"grab_s": cam.get("grab_s")}
+    t0 = _t.perf_counter()
     try:
         d2 = det.detect(rgb, ycfg["mode"], ycfg["path"], prompts=ycfg["prompts"], conf=ycfg["conf"])
     except YP.YoloUnavailable as exc:
         raise YoloCupUnavailable(str(exc))
+    t1 = _t.perf_counter()
     depth = YP.fuse_depth(depths, d2) if len(depths) > 1 else depths[0]
     zt = cam.get("z_table")
     fence = cam.get("fence_poly")
+    t2 = _t.perf_counter()
     res, diag = YP.locate_objects(d2, depth, K, T, table_z=zt, fence_poly=fence, calib_note=cam.get("calib_note"))
+    t3 = _t.perf_counter()
+    tm.update(yolo_s=t1 - t0, fuse_s=t2 - t1, locate_s=t3 - t2)
     g = SC.cup_geometry(cup)
     ndz = float(g["nested_dz"] if nested_dz is None else nested_dz)
     # V3.67 PERCEPTION ROBUSTNESS: image region of the gripper (tight boxes when given, else the filter boxes)
@@ -383,7 +395,9 @@ def perceive_cups_yolo(cam, robot_boxes=None, cup=None, nested_dz=None, hull_box
     for i, e in enumerate(dets):
         e["det_id"] = f"#{i + 1}"
     gz = diag.get("ground_z_m")
-    return {"hull": hull, "cups": cups, "dets": dets, "table_z_m": round(float(gz if gz is not None else (zt or 0.0)), 4),
+    tm["cup_s"] = _t.perf_counter() - t3                           # V3.68: timings for the log
+    return {"timing": {k: (None if v is None else round(float(v), 3)) for k, v in tm.items()},
+            "hull": hull, "cups": cups, "dets": dets, "table_z_m": round(float(gz if gz is not None else (zt or 0.0)), 4),
             "n_2d": len(d2), "diag": diag, "yolo": describe_cfg(ycfg),
             "device": (getattr(det, "info", {}) or {}).get("device")}
 
@@ -432,6 +446,14 @@ def save_snapshot(cam, res, tag, folder=None, keep=SNAP_KEEP):
     except OSError:
         pass
     return d
+
+
+def timing_text(res):
+    """V3.68: 'grab 0.21 · YOLOE 0.08 · fuse 0.02 · 3D 0.31 · cup 0.12 s'"""
+    t = (res or {}).get("timing") or {}
+    parts = [(n, t.get(k)) for n, k in (("帧", "grab_s"), ("YOLOE", "yolo_s"), ("融合", "fuse_s"), ("3D", "locate_s"),
+                                        ("杯", "cup_s"))]
+    return " · ".join(f"{n} {v:.2f}" for n, v in parts if v is not None) + " s"
 
 
 def summary(res):

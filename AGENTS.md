@@ -1,7 +1,7 @@
-# NERO 项目开发与交接文档（V3.67 · Sim2Real 与自动寻优路线版）
+# NERO 项目开发与交接文档（V3.68 · Sim2Real 与自动寻优路线版）
 
 > 放在仓库根目录，命名为 `AGENTS.md`（Codex / 后续开发 Agent 会自动读取）。
-> 更新时间：2026-11-02。当前已交付最新版本：**V3.67**（仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`）。
+> 更新时间：2026-11-02。当前已交付最新版本：**V3.68**（仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`）。
 > 接手者请在做任何修改前通读本文件。本文件里“用户”指项目所有者 Jimmy。
 
 ## 0. 一句话现状
@@ -16,7 +16,8 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 - **V3.65（已交付）**：控制台新 TAB「NERO实机任务」（`NERO_V365_Real_Cup_Task.py`）：叠杯子 · SO-101 的仿真技能 / 参数 / 夹爪档案 / LLM 工具契约原样用于实机（`RealIO` 只换眼睛、手臂、手）；SO-101 动指舵机 STS3215 驱动 `NERO_V365_STS3215_Gripper.py`（180° = 夹紧，位置控制 + 扭矩上限夹紧，无力闭环）；`NERO_V313` 新增关节路径执行（MoveIt `/execute_trajectory`，路径围栏检查）。运行档位 ① 规划预览 ② 悬停预演 ③ 实机执行。**只在替身和模拟舵机上验证过，真机未验证**。
 - **V3.66（已交付）**：实机任务的杯子识别改用 Camera调试页的 YOLOE 物体识别流水线（`NERO_V366_Real_Cup_Yolo.py`：同一检测器对象 / 模型 / 置信度 / 取帧 / `fuse_depth` / `locate_objects`），在 YOLOE 实例轮廓上做锥面杯轴 + **轮廓顶边量杯高**（D435i 杯口丢深度，V3.65 实测深度杯高 99–108 mm）+ 单杯 / 已叠好判断；YOLOE 不可用直接终止，不退回颜色法；主相机监控框画轮廓 + 标签。**只在替身（假 YOLOE 轮廓）上验证过，真机未验证**。
 - **V3.67（已交付）**：实机抓杯「先对准 → 原地转腕（两指连线沿杯子半径）→ 竖直降到预抓取点 → 两段下探（杯口上方 10 mm 复查）」（共用技能里由夹爪档案 `align_rotate_m` / `descent_stop_above_rim_m` 打开，仿真档案为 0 / None 不变）；实机固定指离杯壁 8 mm；实测安装参数 + 碰点标定指尖修正（`real_mount`）；倾斜可信度 + 夹爪遮挡（`occluded`）+ 失败快照；规划余量 4–8° 写明可执行；STS3215 空夹标定（`touch_deg`）。**只在替身上验证过，真机未验证**。
-- **接下来的核心路线（V3.68 → V3.70，再顺延一版；先请用户在实机上按 ①→②→③ 复测叠杯子）**：遵循**“一套大脑、两套身体（仿真与实机除眼睛和手脚外 100% 通用）”**原则，将算法拆分为**“铁打的底层骨架 + 可拨动的控制旋钮（Control Knobs / Strategy Profile）”**，通过**带噪仿真自动寻优试验（DOE / 贝叶斯优化）**自动搜索各场景鲁棒最优参数包，并按 `纯视觉干跑 → 5 cm 悬停预演 → 实机柔顺抓放` 稳步完成真机迁移。
+- **V3.68（已交付）**：实机抓杯“抓了再判断”（`lenient_pick`：下探后一律夹紧抬起，抬起后夹爪 + 相机两条一致才算成功；修复 V3.67 用陈旧倾斜值放弃夹取的 bug）；规划记住上次角度 + 全角度 30° / 10 s 预算；识别各步计时、自有 YOLOE 实例、只在失败时存快照；主相机画模型指尖 F/M 校偏转角；偏转角扫描；任务记录 `task/`（每个工具调用前后截图 + steps.jsonl + summary.txt）+ `[V3.68 STEP n]` 日志 + `[REAL TASK SUMMARY]`。**只在替身上验证过，真机未验证**。
+- **接下来的核心路线（V3.69 → V3.71，再顺延一版；先请用户在实机上按 ①→②→③ 复测叠杯子）**：遵循**“一套大脑、两套身体（仿真与实机除眼睛和手脚外 100% 通用）”**原则，将算法拆分为**“铁打的底层骨架 + 可拨动的控制旋钮（Control Knobs / Strategy Profile）”**，通过**带噪仿真自动寻优试验（DOE / 贝叶斯优化）**自动搜索各场景鲁棒最优参数包，并按 `纯视觉干跑 → 5 cm 悬停预演 → 实机柔顺抓放` 稳步完成真机迁移。
 
 ## 1. 用户的沟通规则（必须遵守，原话优先）
 
@@ -62,7 +63,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 2. 更新：`VERSION` 文件、`NERO_V313_Real_Robot.py` / `NERO_V312_Console.py` / `NERO_V347_Yolo_Perception.py` / `NERO_V349_Real_Wrist_Camera.py` 里的 `VERSION = "..."`；`README.md` 与 `CHANGELOG.md` 顶部加本版说明。
 3. `chmod +x *.sh tests/*.sh`。
 4. 删除 `__pycache__/` 和 `logs/`。
-5. 重新生成校验和（V3.60 起扫描 3 层，包含 `config/strategies/*.json`）：`sha256sum $(find . -maxdepth 3 -type f ! -name "SHA256SUMS.txt" ! -path "./.git/*" ! -path "*/__pycache__/*" ! -path "./logs/*" | sed 's|^\./||' | sort) > SHA256SUMS.txt`。
+5. 重新生成校验和（V3.60 起扫描 3 层，包含 `config/strategies/*.json`；V3.68 起排除 `task/`）：`sha256sum $(find . -maxdepth 3 -type f ! -name "SHA256SUMS.txt" ! -path "./.git/*" ! -path "*/__pycache__/*" ! -path "./logs/*" ! -path "./task/*" | sed 's|^\./||' | sort) > SHA256SUMS.txt`。
 6. 跑 `bash tests/check_release.sh`，必须 `rc=0`（跑完若产生 `__pycache__`，再次清理并刷新 `SHA256SUMS.txt`）。
 7. 从工作目录打包 `NERO_V3_XX.zip`，保留 `.sh` 可执行权限。
 
@@ -87,7 +88,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 3. **后端去掉 11 个 `# V3.43 A2 BEGIN/END` 块后与 V3.42 字节级一致**（`test_v3_44` C2）；默认鸡蛋场景生成的 XML sha256 = `31c52c06965826a06612c970d1b522a05396d9da9b5c9d0919c8824c832a3ef2`（C3）。如果新阶段需要让仿真读取外部策略包（`StrategyProfile`），必须通过环境变量/配置文件钩子在 A2 块或独立桥接模块中非侵入式注入，或者同步维护 C2 块标记，绝不破坏 `test_v3_44` 校验。
 4. **Qt 环境保护（V3.46）**：控制台进程里 `import cv2` 只能走 `NERO_V325_Camera._import_cv2()`；所有子进程用 `clean_child_env()`。
 5. **实机腕部相机独立性**：实机腕部相机逻辑全部位于 `NERO_V349_Real_Wrist_Camera.py` 与 `NERO_V325_Camera.py`，绝不改动仿真腕部相机 `NERO_V326_Wrist_Camera.py`。
-6. **发布包运行时只读（V3.60）**：程序运行时绝不写发布文件夹里的任何文件（`config/strategies/` 只读）；当前技能写 `logs/v360_active_strategy.json`，用户技能写 `~/Downloads/cameracalib/strategies/`（`NERO_V360_USER_STRATEGY_DIR`）。`test_v3_60` F6 / `test_v3_60_gui` H6 会校验。
+6. **发布包运行时只读（V3.60）**：程序运行时绝不写发布文件夹里的任何文件（`config/strategies/` 只读）；例外只有运行时输出目录 `logs/` 和（V3.68 起，用户要求放在项目文件夹内的）`task/`，两者都在 `.gitignore` 里、不进校验和，测试用 `NERO_V368_TASK_DIR` 指到临时目录；当前技能写 `logs/v360_active_strategy.json`，用户技能写 `~/Downloads/cameracalib/strategies/`（`NERO_V360_USER_STRATEGY_DIR`）。`test_v3_60` F6 / `test_v3_60_gui` H6 会校验。
 7. **默认技能 EB = 原逻辑（V3.60）**：`BASELINE_KNOBS` 代入后必须与后端 / V3.58 原代码零偏差（`test_v3_60` F2 从后端源码 AST 抽取原函数比对）；改默认值等于改行为，要先和用户确认。
 8. **叠杯子（V3.62）**：后端对叠杯子只允许在 RUN TASK 的已有 A2 块里调用 `NERO_V362_Cup_Skills.gui_run_task()`（`test_v3_62` P1：去掉这段后与 V3.60 后端字节级一致）；杯子技能逻辑只写在 `NERO_V362_Cup_Skills.py`，`BackendIO` 与 `TwinIO` 共用同一套 `CupSkills`。场景杯子的原点是杯口中心（`SC.CUP_ORIGIN="rim"`），判断套叠用 `cup_task_state(..., origin="rim")`。
 9. **叠杯子运动安全（V3.63）**：持杯运动只朝规划时检查过余量的关节解执行；任何直线插补轨迹先经 `check_joint_path`（≥ 4°、≤ 5°/点）才执行；技能遇急停必须停下并经后端 `_v337_clear_latch` 解锁，不能在锁住时继续发运动。固定相机杯子感知只在 `NERO_V331_Fixed_Camera.py` 的 stack_cups 分支里，鸡蛋场景路径不变（`test_v3_31`）。
@@ -114,6 +115,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 | `NERO_V364_SO101_Gripper.py` | **SO-101 夹爪（V3.64）**：安装（`MOUNT`，环境变量可改）、动指开口映射（`jaw_angle_deg` / `opening_mm_for_tip_gap`）、`T_tcp_grasp`（官方 TCP → SO-101 抓取系）、`gripper_parts` / `insert_into_model_xml`（场景与替身共用同一份 MJCF）；网格在 `assets/so101/` |
 | `NERO_V365_Real_Cup_Task.py` | **NERO实机任务（V3.65）**：`RealIO`（CupSkills 的实机 IO：FastArm TCP、连续 IK 直线段 / 关节线性插值 → 关节路径执行、D435i 杯子感知（桌面 z 平移 + 围栏工作区）、STS3215 夹爪换算）、`run_plan_preview` / `run_hover` / `run_execute`、`PipelineArm`、`camera_from_tab`、`RealCupTaskTabUI` |
 | `NERO_V366_Real_Cup_Yolo.py` | **实机杯子识别（V3.66）**：`yolo_cfg_from_tab`（Camera 页 YOLOE 设置，文字提示 / -pf 选择同 `_resolve_object_query`）、`perceive_cups_yolo`（detect → fuse_depth → locate_objects → 每个实例轮廓：锥面杯轴、轮廓顶边杯高 `silhouette_height`、`classify` 单杯 / 已叠好、lifted / outside / edge、重复框合并）、`summary` |
+| `NERO_V368_Real_Task_Record.py` | **实机任务记录（V3.68）**：`TaskRecorder`（每个工具调用前后截图、steps.jsonl、summary.txt，目录 `task/` 或 `NERO_V368_TASK_DIR`）、`step_line` / `task_summary`（日志）、`fingertip_points`（模型指尖叠加）、`roll_sweep`（偏转角扫描） |
 | `NERO_V365_STS3215_Gripper.py` | **SO-101 实机夹爪（V3.65）**：Feetech STS 协议（取自用户工具）、`SO101RealGripper`（open_deg / open_gap / clamp / status）、角度↔指尖缝↔仿真虚拟开口换算、夹紧扭矩换算、`SimServo` 模拟舵机 |
 | `NERO_V361_Cup_Stack.py` | **叠杯子离线试验（V3.61）**：`release_trial` / `release_sweep`（只有杯子的 MuJoCo 松手试验）、`choose_release_params`、严格 6-DoF `pose_ik`（`CS.ik_tool` 会丢姿态，别用它算姿态）、`rim_pinch_pose`、`grasp_reachability`、`plan_cup_stack`（5 个航点）、`run_study`；结果存 `config/cup_stack_study_v361.json`（静态文件，运行时不写） |
 | `config/strategies/` | 内置技能 JSON（只读，与 `builtin_strategy_presets()` 完全一致）：`egg_grasp_v345_baseline`（EB，`default.json` 是它的副本）、`dense_cluster_anti_poke`（DP）、`hover_dry_run_safe`（HD）、`quick_hover_verify`（QH） |
@@ -137,7 +139,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
    - **痛点 B（画面下沿黑色夹爪阴影与塑封膜反光拉偏角点）**：**V3.58 方案**：开启 `CORNER_REFINE_SUBPIX` + `tryRefineMarkers`，并通过**干净子集去畸变 + 平面 RANSAC 单应性检验（`_clean_outlier_corners`）**自动剥离每张图里偏离 `> 1.15 px` 的 1–3 个孤立反光/夹爪遮挡坏角点（保留其余干净角点），而对 `>= 4` 个坏角点的运动模糊帧则整张剔除。
    - **痛点 C（起点偏左导致采样集中在左侧 + 纸面微翘）**：**V3.58 方案**：`plan_intr_auto_targets` 读取起点标定板实际位置 `s0_board["center_frac"]` 作为最远点采样种子，将四向及对角倾视基线提升至 `18°–28°`；`calibrate_eye_in_hand` 将 2D 深度比例因子 `alpha_z` 拓宽至 `[0.12, 1.85]`（以 `axy=1.0` 起算），并在自动采集达标后**一键同步保存 `wrist_intrinsics.json` 与 `wrist_handeye_calib.json`**。
 
-## 7. 版本简史（V3.43 – V3.67）
+## 7. 版本简史（V3.43 – V3.68）
 
 | 版本 | 核心改动内容 |
 | :--- | :--- |
@@ -161,11 +163,12 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 | **V3.62** | 叠杯子 Agent 技能（填 API key + 输入任务即可在仿真里叠杯子）；后端 RUN TASK A2 块加 `stack_cups` 分支；杯子原点改杯口中心 + 卷边硬接触 + 与质量无关的杯子接触；第 ⑥ 组 11 旋钮 `[仿真技能✓]`；修正 V3.61 抓放翻转不一致；替身试验 16/16 |
 | **V3.63** | 修复叠杯子放置 J7 越限急停（联合规划 + 逐点轨迹检查 + 先转腕再平移 + 急停即停解锁重试 + 不做小修正）；固定主相机 D435i 杯子感知（相机进程分支）；替身带 URDF 运动学与相机渲染；试验 20/20（相机 4/4） |
 | **V3.64** | 新场景 `stack_cups_so101`（SO-101 夹爪 + 7 mm 转接环 + 偏转 45°，后端不变）；夹爪档案（抓取坐标系、固定指在外、沿杯壁下探、抬起 / 搬运后摆正等待、低位松手 + 松手后外移）；通用：全角度回退、搬运优先规划关节解、关节停稳等待；SO-101 替身试验 |
+| **V3.68** | 实机抓杯“抓了再判断”+ 修陈旧倾斜 bug；规划记忆角度 + 限时全角度；识别计时 / 只在失败存快照；指尖叠加校偏转角；偏转角扫描；`task/` 每步前后截图记录 + 每步日志 + 结束总结 |
 | **V3.67** | 实机抓杯先对准 → 原地转腕（两指沿杯子半径）→ 两段下探；实机离杯壁 8 mm；实测安装 / 碰点指尖修正；倾斜可信度、夹爪遮挡、失败快照；4–8° 规划可执行；空夹标定 |
 | **V3.66** | 实机杯子识别 = Camera 调试页 YOLOE 流水线（同一检测器 / 模型 / 取帧 / 3D 定位）+ 锥面杯轴 + 轮廓顶边量杯高 + 单杯 / 已叠好；YOLOE 不可用即终止；监控框画 YOLOE 轮廓 |
 | **V3.65** | 控制台「NERO实机任务」TAB：叠杯子 · SO-101 仿真技能和参数原样上实机（RealIO）；STS3215 夹爪驱动（位置 + 扭矩上限夹紧）；V313 关节路径执行（`/execute_trajectory` + 路径围栏）；运行档位 ①②③；替身当实机身体全流程测试 |
 
-## 8. 后续开发计划（V3.59–V3.67 已交付；V3.68 → V3.70：带噪仿真寻优与真机迁移，原编号顺延三版）
+## 8. 后续开发计划（V3.59–V3.68 已交付；V3.69 → V3.71：带噪仿真寻优与真机迁移，原编号顺延四版）
 
 ### 8.0 核心设计哲学（已与用户对齐确认）
 1. **一套大脑，两套身体（仿真与实机 100% 逻辑通用）**：
@@ -204,7 +207,7 @@ ightarrow$ `跨点安全抬升 (+40 mm)` $
 ightarrow$ `下一目标 / 蛋托孔位 / 手动坐标 B 悬停` $
 ightarrow$ `回起点姿态`，方便在夹爪未就绪时完整验证视觉定位与跨点搬运动线。
 
-### 8.2 阶段 2（V3.68 起，原 V3.60；因叠杯子场景顺延）：带噪仿真自动最优化试验台（Sim-in-the-Loop Auto-Optimizer）
+### 8.2 阶段 2（V3.69 起，原 V3.60；因叠杯子场景顺延）：带噪仿真自动最优化试验台（Sim-in-the-Loop Auto-Optimizer）
 
 - **核心目标**：在仿真中引入真实物理噪声（防止仿真过拟合），用科学试验设计（DOE/LHS）与贝叶斯/进化寻优算法自动跑批试验，为不同场景自动找出最优控制旋钮组合。
 - **新增与修改模块**：
@@ -222,7 +225,7 @@ ightarrow$ `回起点姿态`，方便在夹爪未就绪时完整验证视觉定�
 - **阶段 2 验收标准**：
   - 给定带 `±2 mm` 视觉噪声的测试场景，寻优器在 30–40 轮内收敛，产出的 `<scene>_optimal.json` 在带噪测试集上的成功率与安全净空显著优于初始默认参数；`tests/test_v3_60.py` 全部通过。
 
-### 8.3 阶段 3（V3.69，原 V3.61；叠杯子实机部分已在 V3.65–V3.67 先做）：实机「主从视觉 + 5 cm 悬停预演（Hover Dry-Run）」安全闭环
+### 8.3 阶段 3（V3.70，原 V3.61；叠杯子实机部分已在 V3.65–V3.68 先做）：实机「主从视觉 + 5 cm 悬停预演（Hover Dry-Run）」安全闭环
 
 - **核心目标**：建立虚实统一技能桥接器（`RealSkillBridge`），加载阶段 2 算出的最优策略包，在不触碰真实鸡蛋的前提下，完成“主相机粗定位 → 5 cm 悬停 → 腕部相机精修对齐 → 蛋托孔位 5 cm 悬停复核”的全自动预演闭环。
 - **新增与修改模块**：
@@ -236,7 +239,7 @@ ightarrow$ `回起点姿态`，方便在夹爪未就绪时完整验证视觉定�
 - **阶段 3 验收标准**：
   - 实机桌面随意摆放鸡蛋（或假蛋/乒乓球）与 6 孔蛋托，运行「档位 2（5 cm 悬停预演）」，机械臂平顺完成粗定位接近与腕部精修，腕部实时画面中 TCP 准星与真实鸡蛋中心、蛋槽中心偏差 `≤ 2.0 mm`，全程零越界、零碰撞；`tests/test_v3_61.py` 全部通过。
 
-### 8.4 阶段 4（V3.70，原 V3.62）：实机柔顺抓放全流程 + Agent 智能策略调度
+### 8.4 阶段 4（V3.71，原 V3.62）：实机柔顺抓放全流程 + Agent 智能策略调度
 
 - **核心目标**：打通最后 5 cm 慢速垂直下探、真实夹爪柔顺闭合、双重抓持状态校验与失败自动补抓，实现真机连续抓鸡蛋入托，并支持 VLM Agent 根据桌面场景自动调度/微调策略包。
 - **新增与修改模块**：

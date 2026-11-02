@@ -66,6 +66,9 @@ ALIGN_MIN_DEG = 5.0            # smaller differences: arrive with the grasp angl
 ALIGN_MAX_TCP_DEV_M = 0.05     # the joint-space rotation may move the TCP at most this much
 TIP_BEYOND_GRASP_M = 0.010     # SO-101 pad: fingertip 10 mm beyond the grasp-frame origin along the approach
 PRE_CONTACT_MOVE_MM = 6.0      # V3.67 TWO-STAGE DESCENT: cup estimate moved more than this -> abort before contact
+LENIENT_ABORT_MM = 30.0        # V3.68 LENIENT REAL PICK: only a cup clearly pushed away (fresh view) stops the pick
+LENIENT_TILT_DEG = 25.0        # ... or clearly knocked over (tilt change, fresh view)
+_LAST_ANGLES = {}              # V3.68 FAST PLAN: profile name -> (grasp rel deg, place rel deg) of the last good plan
 PATH_MARGIN_DEG = 4.0          # every point of an executed path keeps all joints >= 4 deg inside the MuJoCo limits
 PATH_JUMP_DEG = 5.0            # max joint change between two consecutive path points (more = IK branch flip)
 SMALL_CORRECTION_M = 0.003     # centring errors below this are not corrected (no tiny moves)
@@ -181,7 +184,8 @@ class GripperProfile:
     def __init__(self, name, T_tcp_grasp, open_mm, label, approach_clearance_m=0.0, approach_along_wall=False,
                  flips=(False, True), release_gap_max_mm=None, lift_settle_s=0.0,
                  release_tilt_max_deg=0.0, align_rotate_m=0.0, descent_stop_above_rim_m=None,
-                 wide_search_below_deg=None):
+                 wide_search_below_deg=None, lenient_pick=False, wide_step_deg=15, plan_time_budget_s=None,
+                 remember_angles=False):
         self.name, self.T_tcp_grasp, self.open_mm, self.label = name, np.asarray(T_tcp_grasp, float), float(open_mm), label
         # V3.64: a gripper with a FIXED jaw (SO-101) descends with this clearance between the fixed pad and the wall
         # (grasp frame moved along -y); clamping then slides the 10 g cup onto the fixed jaw
@@ -214,6 +218,13 @@ class GripperProfile:
         self.descent_stop_above_rim_m = None if descent_stop_above_rim_m is None else float(descent_stop_above_rim_m)
         # V3.67 PLAN MARGIN: also run the wide rim-angle search when the best chain is below this margin
         self.wide_search_below_deg = None if wide_search_below_deg is None else float(wide_search_below_deg)
+        # V3.68 LENIENT REAL PICK: no abort before the clamp on camera estimates taken while the gripper hides the cup;
+        # clamp + lift always, then judge (clamp stop above the touch point AND the cup gone from the table)
+        self.lenient_pick = bool(lenient_pick)
+        # V3.68 FAST PLAN: wide rim-angle search step, time budget of the wide search, start from the last good angles
+        self.wide_step_deg = int(wide_step_deg)
+        self.plan_time_budget_s = None if plan_time_budget_s is None else float(plan_time_budget_s)
+        self.remember_angles = bool(remember_angles)
 
         Rg = self.T_tcp_grasp[:3, :3]
         if abs(np.linalg.det(Rg) - 1.0) > 1e-6 or np.abs(Rg.T @ Rg - np.eye(3)).max() > 1e-6:
@@ -463,7 +474,8 @@ def stack_heights(knobs, src_base_z, dst_base_z):
     return base_lift, base_release
 
 
-def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, log=None, _wide=False, profile=None):
+def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, log=None, _wide=False, profile=None,
+                   allow_wide=True):
     """rim pinch plan: grasp rim angle + flip (pregrasp / grasp / lift reachable), then place rim angle with the SAME
     flip (the cup axis offset in the TCP frame is fixed by the grasp; V3.61 chose the flips independently, which
     would have put the carried cup 2 x rim radius off the target).  Knob angles are relative to the cup -> base
@@ -484,8 +496,16 @@ def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, lo
     best = None
     tried = 0
     grasp_found = False
+    # V3.68 FAST PLAN: the wide search may use a coarser step and a time budget (real profile; simulation unchanged)
+    step = int(getattr(profile, "wide_step_deg", 15) or 15) if _wide else 15
+    budget = getattr(profile, "plan_time_budget_s", None) if _wide else None
+    t_end = time.time() + float(budget) if budget else None
+    over = lambda: bool(t_end and time.time() > t_end and best is not None
+                        and best["key"][2] >= MIN_MARGIN_RELAXED_DEG)
     for phi in _angle_order(math.degrees(base_dir(s_rim)) + float(knobs["cup_grasp_rim_angle_deg"]),
-                            span=180 if _wide else 45):
+                            step=step, span=180 if _wide else 45):
+        if over():
+            break
         for flip in (profile or OFFICIAL_PROFILE).flips:
             p, R = pinch_tcp(s_rim, phi, depth, flip, tilt, profile)
             pp = p + (profile or OFFICIAL_PROFILE).pre_offset(R, pre)          # V3.64: official = [0, 0, pre]
@@ -500,7 +520,9 @@ def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, lo
                 bg = {"phi": phi, "flip": flip, "r": r, "tcp": p, "R": R}
                 lift_tcp = p + [0, 0, dz_lift]
                 for phi_p in _angle_order(math.degrees(base_dir(d_rim)) + float(knobs["cup_place_rim_angle_deg"]),
-                                          span=180 if _wide else 90):
+                                          step=step, span=180 if _wide else 90):
+                    if over():
+                        break
                     p1, R1 = pinch_tcp(rim_lift, phi_p, depth, flip, tilt, profile)
                     p2, _ = pinch_tcp(rim_rel, phi_p, depth, flip, tilt, profile)
                     chp = ([("rotate", lift_tcp, R1), ("above_target", p1, R1)] + segment_points("w", p1, p2, R1, 3)
@@ -528,7 +550,7 @@ def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, lo
                 break
         if best and best["key"][0]:
             break
-    if not grasp_found and not _wide:
+    if not grasp_found and not _wide and allow_wide:
         if log:
             log("[INFO] [V3.64 CUP PLAN] no reachable grasp within +-45 deg of the knob angle -> wide search")
         return plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=q_start, log=log, _wide=True,
@@ -540,7 +562,7 @@ def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, lo
     lift_tcp = best_g["tcp"] + [0, 0, dz_lift] if best_g else None
     # V3.64: also search wide when the best chain would be refused anyway (margin < 4 deg; plans >= 4 deg unchanged)
     wide_below = max(MIN_MARGIN_RELAXED_DEG, float(getattr(profile, "wide_search_below_deg", None) or 0.0))
-    if (best_p is None or best["key"][2] < wide_below) and not _wide:
+    if (best_p is None or best["key"][2] < wide_below) and not _wide and allow_wide:
         # V3.63: nothing in the usual window -> one wide search (all rim angles), slower but only on failure
         if log:
             log("[INFO] [V3.63 CUP PLAN] no reachable chain within +-45 / +-90 deg of the knob angles -> wide search")
@@ -1413,8 +1435,23 @@ class CupSkills:
             q_now = self.io.current_q()               # V3.63: plan from the robot's real joints (its IK branch)
         except Exception:
             q_now = None
-        plan = plan_cup_stack(self.k, s["rim"], s["quat"], t["rim"], t["quat"], q_start=q_now, log=self.io.emit,
-                              profile=self.prof)
+        plan = None
+        last = _LAST_ANGLES.get(self.prof.name) if self.prof.remember_angles else None
+        if last is not None:
+            # V3.68 FAST PLAN: start from the rim angles of the last good plan (narrow search only)
+            k2 = dict(self.k, cup_grasp_rim_angle_deg=last[0], cup_place_rim_angle_deg=last[1])
+            p_ = plan_cup_stack(k2, s["rim"], s["quat"], t["rim"], t["quat"], q_start=q_now, log=self.io.emit,
+                                profile=self.prof, allow_wide=False)
+            if p_.get("ok") and p_["min_joint_margin_deg"] >= max(MIN_MARGIN_RELAXED_DEG,
+                                                                   self.prof.wide_search_below_deg or 0.0):
+                plan = p_
+                self.io.emit(f"[INFO] [V3.68 CUP PLAN] started from the last good rim angles "
+                             f"(grasp {last[0]:+.0f} deg, place {last[1]:+.0f} deg)")
+        if plan is None:
+            plan = plan_cup_stack(self.k, s["rim"], s["quat"], t["rim"], t["quat"], q_start=q_now, log=self.io.emit,
+                                  profile=self.prof)
+        if plan.get("ok") and self.prof.remember_angles and plan["min_joint_margin_deg"] >= MIN_MARGIN_RELAXED_DEG:
+            _LAST_ANGLES[self.prof.name] = (plan["grasp_rim_angle_rel_deg"], plan["place_rim_angle_rel_deg"])
         if not plan["ok"]:
             return self._res("plan_cup_stack", False, {"detail": plan.get("detail")}, reason=plan["reason"],
                              nxt=["stop_and_report"])
@@ -1606,7 +1643,19 @@ class CupSkills:
             v["cup_moved_by_descent_mm"] = round(moved, 1)
             if s1.get("stale"):
                 v["descent_check"] = "cup hidden by the gripper in the fixed camera view - not checked"
-            if moved > 8.0 or s1["tilt_deg"] > 6.0:
+            if self.prof.lenient_pick:
+                # V3.68 LENIENT REAL PICK: only a FRESH view of a cup clearly pushed away / knocked over stops the pick;
+                # the tilt is compared with the one before the descent (V3.67 compared a stale absolute tilt)
+                d_tilt = 0.0 if s1.get("stale") else abs(float(s1["tilt_deg"]) - float(s0["tilt_deg"]))
+                v["cup_tilt_change_deg"] = round(d_tilt, 1)
+                if moved > LENIENT_ABORT_MM or d_tilt > LENIENT_TILT_DEG:
+                    self._retreat_up()
+                    why = (f"cup moved {moved:.0f} mm (> {LENIENT_ABORT_MM:.0f})" if moved > LENIENT_ABORT_MM else
+                           f"cup tilt changed {d_tilt:.0f} deg (> {LENIENT_TILT_DEG:.0f})")
+                    v["detail"] = why
+                    return self._res(tool, False, v, reason="CUP_PUSHED_DURING_DESCENT",
+                                     nxt=["observe_scene", "plan_cup_stack"])
+            elif moved > 8.0 or s1["tilt_deg"] > 6.0:
                 self._retreat_up()
                 return self._res(tool, False, v, reason="CUP_PUSHED_DURING_DESCENT", nxt=["observe_scene", "plan_cup_stack"])
             c = self.io.gripper_clamp(float(self.k["cup_clamp_force_n"]))
@@ -1614,7 +1663,8 @@ class CupSkills:
             if self.camera and self.prof.approach_clearance_m > 0:
                 # the clamp slid the cup onto the fixed jaw: -clearance along the grasp y axis (TCP frame)
                 self.cam_grip_offset = self.cam_grip_offset - self.prof.approach_clearance_m * self.prof.T_tcp_grasp[:3, 1]
-            if not (c["contact_left"] and c["contact_right"]) and not c["hold_active"]:
+            clamp_held = bool((c["contact_left"] and c["contact_right"]) or c["hold_active"])
+            if not clamp_held and not self.prof.lenient_pick:
                 self.io.gripper_open(self.prof.open_mm)
                 self._retreat_up()
                 return self._res(tool, False, v, reason="NO_TWO_FINGER_CONTACT", nxt=["observe_scene", "plan_cup_stack"])
@@ -1649,6 +1699,13 @@ class CupSkills:
             self.io.gripper_open(self.prof.open_mm)
             self._retreat_up()
             return self._res(tool, False, v, reason="CUP_DID_NOT_FOLLOW_LIFT", nxt=["observe_scene", "plan_cup_stack"])
+        if self.prof.lenient_pick and not v.get("clamp", {}).get("hold_active", True) \
+                and not (v.get("clamp", {}).get("contact_left") and v.get("clamp", {}).get("contact_right")):
+            # V3.68 LENIENT REAL PICK: lifted although the clamp did not report a hold -> both checks must agree
+            self.io.gripper_open(self.prof.open_mm)
+            self._retreat_up()
+            v["detail"] = "the cup left the table but the gripper did not stop on it (clamp closed to the touch point)"
+            return self._res(tool, False, v, reason="NO_TWO_FINGER_CONTACT", nxt=["observe_scene", "plan_cup_stack"])
         # held cup rim centre in the TCP frame (the backend hold is a CONNECT at this point -> rigid while held)
         Rt = quat_xyzw_to_R(q1)
         self.grip_offset = (self.cam_grip_offset if self.camera else
@@ -1745,10 +1802,14 @@ class CupSkills:
             out["check"] = "cup partly hidden by the gripper: position from the lower wall"
         off = float(np.linalg.norm(base - np.asarray(s0["base"][:2]))) * 1000.0
         out["cup_offset_mm"] = round(off, 1)
-        if off > PRE_CONTACT_MOVE_MM:
+        lim = LENIENT_ABORT_MM if self.prof.lenient_pick else PRE_CONTACT_MOVE_MM      # V3.68 LENIENT REAL PICK
+        if off > lim:
             out["abort"] = True
             self.io.emit(f"[WARN] [V3.67 CUP] {cup} is {off:.1f} mm away from where the grasp was planned -> no descent "
                          "(re-observe and re-plan)")
+        elif self.prof.lenient_pick and off > PRE_CONTACT_MOVE_MM:
+            self.io.emit(f"[INFO] [V3.68 CUP] {cup} estimate {off:.1f} mm from the plan (camera view partly hidden) -> "
+                         "continue, the lift decides")
         return out
 
     def _retreat_up(self, dz=0.08):
