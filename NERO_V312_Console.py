@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V3.69"
+VERSION = "V3.70"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -262,6 +262,73 @@ def _v312_pick_cjk_font(root):
         pass
 
 
+# V3.70 CRASH LOG: a hard crash (segfault in Tk / X11 / a C extension) used to kill the console together with its
+# terminal and left nothing behind.  faulthandler writes the Python stack of every thread into logs/crash.log at the
+# moment of the crash; uncaught Python exceptions (main thread, worker threads, Tk callbacks) are appended there too.
+_V370_CRASH = {"fh": None, "path": None}
+
+
+def v370_crash_write(title, exc_type, exc, tb):
+    import traceback
+    path = _V370_CRASH.get("path")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"\n===== [V3.70 CRASH LOG] {time.strftime('%Y-%m-%d %H:%M:%S')} {VERSION} pid {os.getpid()} "
+                    f"· {title} =====\n")
+            f.write("".join(traceback.format_exception(exc_type, exc, tb)))
+    except Exception:
+        pass
+
+
+def install_crash_log(log_dir, root=None):
+    import faulthandler
+    import threading as _th
+    os.makedirs(log_dir, exist_ok=True)
+    path = os.path.join(log_dir, "crash.log")
+    if _V370_CRASH["fh"] is None or _V370_CRASH["path"] != path:
+        fh = open(path, "a", encoding="utf-8")         # kept open for the whole run: faulthandler needs a live fd
+        fh.write(f"----- [V3.70 CRASH LOG] console start {time.strftime('%Y-%m-%d %H:%M:%S')} {VERSION} "
+                 f"pid {os.getpid()} (nothing below this line = no crash) -----\n")
+        fh.flush()
+        faulthandler.enable(file=fh, all_threads=True)
+        _V370_CRASH.update(fh=fh, path=path)
+        prev_sys = sys.excepthook
+
+        def _sys_hook(t, e, tb):
+            v370_crash_write("uncaught exception (main thread)", t, e, tb)
+            prev_sys(t, e, tb)
+        sys.excepthook = _sys_hook
+        prev_th = _th.excepthook
+
+        def _th_hook(a):
+            v370_crash_write(f"uncaught exception in thread {getattr(a.thread, 'name', '?')}",
+                             a.exc_type, a.exc_value, a.exc_traceback)
+            prev_th(a)
+        _th.excepthook = _th_hook
+    if root is not None:
+        def _tk_hook(t, e, tb):
+            v370_crash_write("exception in a Tk callback", t, e, tb)
+            import traceback
+            traceback.print_exception(t, e, tb)
+        root.report_callback_exception = _tk_hook
+    return path
+
+
+def v370_mirror_lines(path, lines):
+    """V3.70 CONSOLE LOG MIRROR: real-page [V3.xx ...] lines (real NERO, Camera, skills, real task tabs) also go into
+    logs/console.log so one file holds the whole story (the subprocess output is already written there)."""
+    if not path or not lines:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            for ln in lines:
+                f.write(f"[{time.strftime('%H:%M:%S')} REAL] {ln}\n")
+    except Exception:
+        pass
+
+
 def run_console(initial_tab="sim"):
     import tkinter as tk
     from tkinter import ttk, messagebox
@@ -272,6 +339,7 @@ def run_console(initial_tab="sim"):
     open(console_log, "w").close()
 
     root = tk.Tk()
+    install_crash_log(log_dir, root)                  # V3.70 CRASH LOG
     _v312_pick_cjk_font(root)
     root.title(f"NERO {VERSION} 控制台")
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
@@ -474,6 +542,7 @@ def run_console(initial_tab="sim"):
     v_follow = tk.BooleanVar(value=True)
     v_rviz = tk.BooleanVar(value=True)
     v_domain = tk.StringVar(value=str(RR.DEFAULT_DOMAIN_ID))
+    v_payload = tk.StringVar(value=RR.DEFAULT_TEACH_PAYLOAD)      # V3.70 TEACH PAYLOAD
     r0 = ttk.Frame(pf)
     r0.pack(fill="x", padx=6, pady=3)
     ttk.Label(r0, text="can_port").pack(side="left")
@@ -486,6 +555,9 @@ def run_console(initial_tab="sim"):
     ttk.Combobox(r0, textvariable=v_fw, values=["v121", "v120", "v112", "v111", "default", ""], width=7, state="readonly").pack(side="left", padx=(2, 10))
     ttk.Label(r0, text="ROS_DOMAIN_ID").pack(side="left")
     ttk.Entry(r0, textvariable=v_domain, width=4).pack(side="left", padx=(2, 10))
+    ttk.Label(r0, text="示教负载").pack(side="left")             # V3.70: gravity compensation class for teach mode
+    ttk.Combobox(r0, textvariable=v_payload, values=list(RR.PAYLOAD_CHOICES) + ["不设置"], width=6,
+                 state="readonly").pack(side="left", padx=(2, 10))
     r1 = ttk.Frame(pf)
     r1.pack(fill="x", padx=6, pady=3)
     ttk.Label(r1, text="speed_percent").pack(side="left")
@@ -514,7 +586,7 @@ def run_console(initial_tab="sim"):
         return {"can_port": v_port.get().strip() or "can0", "effector_type": v_eff.get(), "fw_version": v_fw.get(),
                 "push_fw": v_fw.get() or RR.DEFAULT_FW_VERSION, "speed_percent": int(v_speed.get()), "speed_unlocked": bool(v_unlock.get()),
                 "auto_control_gate": bool(v_gate.get()), "follow": bool(v_follow.get()), "use_rviz": bool(v_rviz.get()),
-                "domain_id": dom}
+                "domain_id": dom, "teach_payload": v_payload.get()}
 
     def refresh_preview(*_a):
         preview.set(f"ROS_DOMAIN_ID={real_cfg()['domain_id']}  " + RR.launch_command(real_cfg()))
@@ -724,11 +796,15 @@ def run_console(initial_tab="sim"):
 
     def real_poll():
         serve_asks()
+        mirrored = []                                 # V3.70 CONSOLE LOG MIRROR
         try:
             while True:
-                log_append(real_log, pipe.events.get_nowait())
+                ln = pipe.events.get_nowait()
+                mirrored.append(ln)
+                log_append(real_log, ln)
         except queue.Empty:
             pass
+        v370_mirror_lines(console_log, mirrored)
         try:
             while True:
                 log_append(cam_log, cam_q.get_nowait())

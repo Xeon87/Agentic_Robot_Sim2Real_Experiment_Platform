@@ -28,7 +28,7 @@ import time
 
 import numpy as np
 
-VERSION = "V3.69"
+VERSION = "V3.70"
 MARKER = "V3.65 NERO REAL CUP TASK"
 CALIB_DIR = os.environ.get("NERO_CALIB_DIR") or os.path.expanduser("~/Downloads/cameracalib")
 SETTINGS_NAME = "real_cup_task.json"

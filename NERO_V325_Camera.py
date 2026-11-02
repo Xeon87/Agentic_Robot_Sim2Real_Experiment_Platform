@@ -2363,10 +2363,16 @@ class CameraTabUI:
                             "请扶稳机械臂、手在急停上。继续？"):
                 return
             if getattr(self.safe_tab, "mode", None) == "teach" and hasattr(self.safe_tab, "v_mode"):
-                self.safe_tab._teach_exiting = True
-                self.safe_tab.v_mode.set("edit")
-                self.safe_tab.on_mode()
-                self.safe_tab._teach_exiting = False
+                # V3.70 TK MAIN THREAD: the safety editor redraws its canvases when it leaves teach mode - that is Tk
+                # (X11) work and must run in the Tk main thread; from this worker it crashed the console in libX11
+                # (first real hand-eye calibration: segfault right after 「退出示教模式」 + 「▶ 自动采集」)
+                def _leave_teach_ui(st=self.safe_tab):
+                    if getattr(st, "mode", None) == "teach":
+                        st._teach_exiting = True
+                        st.v_mode.set("edit")
+                        st.on_mode()
+                        st._teach_exiting = False
+                self._ui(_leave_teach_ui)
             try:
                 ev = self.pipe.set_teach_mode(False, home_model=self._model(), return_home=False)
             except TypeError:

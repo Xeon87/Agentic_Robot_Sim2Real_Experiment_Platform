@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 import NERO_V313_Real_Robot as RR  # noqa: E402
 import NERO_V314_Joint_Control as JC  # noqa: E402
 
-assert RR.VERSION.startswith(("V3.2", "V3.3", "V3.4", "V3.5", "V3.6"))
+assert RR.VERSION.startswith(("V3.2", "V3.3", "V3.4", "V3.5", "V3.6", "V3.7"))
 TMP = Path(tempfile.mkdtemp(prefix="v321_"))
 FAKE = TMP / "fake"
 (FAKE / "pyAgxArm").mkdir(parents=True)

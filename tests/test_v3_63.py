@@ -70,12 +70,12 @@ except Exception:
 
 # ------------------------------------------------------------------ S1
 for m in (CON, RR, YP, W49, ST, CK, CP):
-    assert m.VERSION in ("V3.63", "V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69"), (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.63", "V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69")
+    assert m.VERSION in ("V3.63", "V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69", "V3.70"), (m.__name__, m.VERSION)
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.63", "V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69", "V3.70")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 assert H((ROOT / "NERO_V326_Wrist_Camera.py").read_bytes()) == "6b5c5d683073e4252b82c1c703ad664173960a179947f9e72775bb9683697d0a"
 assert H((ROOT / "NERO_V2_7_1_Agent.py").read_bytes()) == "3e52d05ea84d94c8359d5875fa0fee8c2cc42d612b52e59109e1166912439696"
-assert H((ROOT / "NERO_V325_Camera.py").read_bytes()) == "5f41c189ea742fc4c3b4d4b33b7190c5a456ba6e6eb6adf39bde92bf1ed82688"
+assert H((ROOT / "NERO_V325_Camera.py").read_bytes()) == "a58e69b363a5a861b3ad0806ba276c49601fc214ffdfc07ffba9bdc0c2c65797"
 BK = (ROOT / "NERO_V2_7_1_Unified_Backend.py").read_text(encoding="utf-8")
 a = BK.index('        if _v343_scene_name() == "stack_cups":   # V3.62 STACK CUPS AGENT')
 b = BK.index('        if _v343_scene_name() != "fill_egg_holder":\n            append_gui_log(f"[V3.43 SCENE] RUN TASK blocked')

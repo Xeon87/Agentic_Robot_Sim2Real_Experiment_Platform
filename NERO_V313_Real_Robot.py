@@ -30,7 +30,7 @@ import sys
 import threading
 import time
 
-VERSION = "V3.69"
+VERSION = "V3.70"
 # V3.54 FIRMWARE V1.2.1 (NeroFW.V121) + FOLLOWER MODE TEACH EXIT + STEP 3 PUSH RECOVERY
 DEFAULT_FW_VERSION = "v121"
 SUPPORTED_FW_VERSIONS = ("v121", "v120", "v112", "v111", "default")
@@ -812,7 +812,54 @@ SPEED_APIS = ("set_speed_percent", "set_motion_speed", "set_speed", "set_joint_s
 MOVEJ_APIS = ("move_j", "move_joint", "joint_ctrl", "set_joint_angles")
 
 
-def cmd_mode(channel="can0", fw="v111", mode="teach", enable_timeout_s=6.0, verify_s=3.0, hold=None, speed_pct=10):
+# V3.70 TEACH PAYLOAD: in teach (leader) mode the firmware holds the arm with its gravity compensation.  A model
+# for a heavier end effector than the light SO-101 gripper (+ 7 mm ring) leaves a net torque that pulls the joints
+# back after the hand lets go.  The end-load setting is sent before set_leader_mode when the installed pyAgxArm
+# offers such an API (Piper: set_payload('empty'|'half'|'full'); the NERO driver d90e234 has none - then a WARN).
+PAYLOAD_APIS = ("set_payload", "set_end_load", "set_load", "set_tcp_load", "set_end_effector_load")
+PAYLOAD_CHOICES = ("empty", "half", "full")
+DEFAULT_TEACH_PAYLOAD = "empty"                      # SO-101 (~0.2 kg incl. servo) = the lightest class
+DIAG_API_KEYS = ("mode", "leader", "master", "follower", "teach", "drag", "enable", "disable",
+                 "load", "payload", "gravity", "tcp", "param", "config")
+
+
+def apply_teach_payload(robot, payload):
+    """V3.70: send the end-load class before teach mode.  Returns a JSON-able report (never raises)."""
+    p = str(payload or "").strip().lower()
+    if p in ("", "none", "off", "skip", "不设置"):
+        return {"payload": None, "api": None, "ok": None, "note": "不设置（沿用控制器当前负载）"}
+    if p not in PAYLOAD_CHOICES:
+        return {"payload": p, "api": None, "ok": False, "note": f"未知负载档 {p}（可选 empty / half / full）"}
+    for name in PAYLOAD_APIS:
+        fn = getattr(robot, name, None)
+        if not callable(fn):
+            continue
+        try:
+            try:
+                r = fn(p)
+            except TypeError:
+                r = fn(load=p)
+            return {"payload": p, "api": name, "ok": r is not False, "result": _jsonable(r)}
+        except Exception as exc:
+            return {"payload": p, "api": name, "ok": False, "note": str(exc)[:200]}
+    return {"payload": p, "api": None, "ok": False,
+            "note": "当前 pyAgxArm 的 NERO 驱动没有负载设置接口（set_payload 等）"}
+
+
+
+def teach_payload_line(pl):
+    """V3.70: one user-facing log line for the payload report of the mode helper."""
+    if pl.get("payload") is None:
+        return f"[INFO] [V3.70 teach] 示教负载：{pl.get('note') or '不设置'}"
+    if pl.get("ok"):
+        return f"[OK] [V3.70 teach] 示教负载 = {pl['payload']}（{pl.get('api')}）已发送：重力补偿按轻负载计算"
+    return (f"[WARN] [V3.70 teach] 示教负载 {pl.get('payload')} 没有设置成功：{pl.get('note') or pl.get('api')}。"
+            "原因：控制器的重力补偿可能按较重的末端计算，换轻的 SO-101 后松手关节会被拉回。"
+            "下一步：看上面「模式接口」一行有没有 load / payload 字样的接口并告诉开发者；"
+            "或用 AgileX 上位机把末端负载设为空载 / 实际重量；或在夹爪上临时加配重（约等于原夹爪重量）再试示教")
+
+
+def cmd_mode(channel="can0", fw="v111", mode="teach", enable_timeout_s=6.0, verify_s=3.0, hold=None, speed_pct=10, payload=None):
     """V3.19 TEACH MODE (V3.20/V3.54: upgraded for firmware V1.2.1 / NeroFW.V121).
     teach  -> set_leader_mode() (pyAgxArm nero_api: leader = linkage teaching input, moved by hand); older
               pyAgxArm: set_master_mode(). Verified: ctrl_mode becomes 0x06 / 0x02 or leader angles stream
@@ -844,7 +891,7 @@ def cmd_mode(channel="can0", fw="v111", mode="teach", enable_timeout_s=6.0, veri
             except Exception:
                 return None
         apis = sorted(m for m in dir(robot) if not m.startswith("_") and any(
-            k in m for k in ("mode", "leader", "master", "follower", "teach", "drag", "enable", "disable")))
+            k in m for k in DIAG_API_KEYS))           # V3.70: also lists load / payload / gravity / tcp / param APIs
         cm0 = ctrl_mode_of(status())
         _emit(event="diag", apis=apis, ctrl_mode_before=cm0, fw=fw_attr)
         if mode == "teach":
@@ -853,6 +900,10 @@ def cmd_mode(channel="can0", fw="v111", mode="teach", enable_timeout_s=6.0, veri
                 _emit(event="mode_result", ok=False, mode=mode, error="pyAgxArm 没有 set_leader_mode / set_master_mode",
                       apis=apis, ctrl_mode=cm0)
                 return 2
+            pl = apply_teach_payload(robot, payload)     # V3.70 TEACH PAYLOAD (before the mode switch)
+            _emit(event="payload", **pl)
+            if pl.get("api"):
+                time.sleep(0.3)
             ts0, a0 = _leader_stamp(robot)
             getattr(robot, fn_name)()
             time.sleep(1.0)
@@ -2263,7 +2314,9 @@ class RealPipeline:
                            "--mode", "teach" if on else "normal", "--speed", str(int(round(self.EXIT_SPEED * 100))))
         if hold:
             argv += ["--hold", json.dumps([round(v, 5) for v in hold])]
-        diags, ev, p = [], None, None
+        if on:                                         # V3.70 TEACH PAYLOAD
+            argv += ["--payload", str(cfg.get("teach_payload", DEFAULT_TEACH_PAYLOAD) or "none")]
+        diags, ev, p, pl = [], None, None, None
         try:
             p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s)
             for l in p.stdout.splitlines():
@@ -2273,6 +2326,8 @@ class RealPipeline:
                         diags.append(d)
                     elif d.get("event") == "mode_result":
                         ev = d
+                    elif d.get("event") == "payload":
+                        pl = d
         except Exception as exc:
             ev = {"ok": False, "error": f"mode helper: {exc}"}
         ev = ev or {"ok": False, "error": f"mode helper produced no result (rc={getattr(p, 'returncode', '?')}) "
@@ -2284,6 +2339,8 @@ class RealPipeline:
             if "hold" in d:
                 self.log(f"[INFO] [V3.22 teach] 重新使能前：退出接口={d.get('exit_apis') or '-'} · 速度接口={d.get('speed_api') or '无'}（{d.get('speed_pct')}%）"
                          f" · 保持当前位姿接口={d.get('movej_api') or '无'}")
+        if pl is not None:
+            self.log(teach_payload_line(pl))
         return ev
 
     def _sync_fake_controller(self, q):
@@ -2670,6 +2727,7 @@ def main(argv=None):
     md.add_argument("--mode", choices=["teach", "normal"], required=True)
     md.add_argument("--hold", default="", help="V3.22: JSON list of 7 joint angles (rad) to hold when re-enabling")
     md.add_argument("--speed", type=int, default=10)
+    md.add_argument("--payload", default="", help="V3.70: teach end-load class empty / half / full (none = do not set)")
     ld = sub.add_parser("leader")
     ld.add_argument("--channel", default="can0")
     ld.add_argument("--fw", default="v111")
@@ -2681,7 +2739,8 @@ def main(argv=None):
     if a.cmd == "push":
         return cmd_push(a.channel, a.fw, a.timeout, a.period, a.max_reports)
     if a.cmd == "mode":
-        return cmd_mode(a.channel, a.fw, a.mode, hold=json.loads(a.hold) if a.hold else None, speed_pct=a.speed)
+        return cmd_mode(a.channel, a.fw, a.mode, hold=json.loads(a.hold) if a.hold else None, speed_pct=a.speed,
+                        payload=a.payload or None)
     if a.cmd == "leader":
         return cmd_leader(a.channel, a.fw, a.period, a.max_reports)
     return cmd_monitor(a.period)
