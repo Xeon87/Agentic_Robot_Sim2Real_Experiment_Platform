@@ -69,10 +69,10 @@ HAVE_MJ = CUP.mujoco_available()
 # ------------------------------------------------------------------ M1
 V362 = ST.VERSION >= "V3.62"           # V3.62 intentionally changed: backend A2 block, cup origin, cup knobs (CHANGELOG)
 for m in (CON, RR, YP, W49, ST):
-    assert m.VERSION in ("V3.61", "V3.62", "V3.63", "V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71"), (m.__name__, m.VERSION)
+    assert m.VERSION in ("V3.61", "V3.62", "V3.63", "V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72"), (m.__name__, m.VERSION)
 assert CUP.VERSION == "V3.61"
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.61", "V3.62", "V3.63", "V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71")
-assert SC.VERSION == "V3.44" and SC.SCENES_REV in ("V3.61", "V3.62", "V3.63", "V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71")
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.61", "V3.62", "V3.63", "V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72")
+assert SC.VERSION == "V3.44" and SC.SCENES_REV in ("V3.61", "V3.62", "V3.63", "V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 assert H((ROOT / "NERO_V326_Wrist_Camera.py").read_bytes()) == "6b5c5d683073e4252b82c1c703ad664173960a179947f9e72775bb9683697d0a"
 FROZEN_V360 = {"NERO_V2_7_1_Unified_Backend.py": "ffbd630d70edf57a49929363134ceaae3b95fe4675e0887509d3dc5d7b08f1ed",
@@ -92,7 +92,7 @@ print("[M1] V3.61 versions/markers; V308, V326, backend, Agent, Camera tab uncha
 
 # ------------------------------------------------------------------ M2
 assert list(SC.SCENES)[:3] == ["fill_egg_holder", "store_in_safe", "stack_cups"]   # V3.64 adds the stack_cups_so101 variant
-assert list(SC.SCENES)[3:] in ([], ["stack_cups_so101"]) and SC.DEFAULT_SCENE == "fill_egg_holder"
+assert list(SC.SCENES)[3:] in ([], ["stack_cups_so101"], ["stack_cups_so101", "sort_items"])  # V3.72: + sort_items and SC.DEFAULT_SCENE == "fill_egg_holder"
 assert [k for k, _ in CON.SIM_SCENES] == list(SC.SCENES) and CON.scene_env("stack_cups") == {"NERO_SCENE": "stack_cups"}
 L = (ROOT / "start_nero_sim.sh").read_text()
 case = L[L.index('SCENE344="${NERO_SCENE:-fill_egg_holder}"'):L.index('export NERO_SCENE="$SCENE344"')]

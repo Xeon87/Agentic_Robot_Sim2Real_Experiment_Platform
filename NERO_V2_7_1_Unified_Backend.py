@@ -13559,6 +13559,27 @@ def run_gui(
             except Exception as _e362:
                 append_gui_log(f"[FAIL] [V3.62 CUP] stack_cups RUN TASK could not start: {_e362}")
             return
+        if _v343_scene_name() == "sort_items":   # V3.72 SORT ITEMS AGENT: skills live in NERO_V372_Sort_Skills.py
+            try:
+                import NERO_V372_Sort_Skills as _V372
+                _V372.gui_run_task({
+                    "skill_core": skill_core, "agent": llm_agent, "cfg_fn": llm_capture_config,
+                    "background": llm_background, "log": append_gui_log, "messagebox": messagebox,
+                    "require_arm": llm_require_arm_controller, "pose_plan": _v340_pose_with_fallback,
+                    "slow": _v218_slow_trajectory_in_place, "go_q0": _v307_go_q0,
+                    "start_check": _v239_task_start_posture_check, "safety_gate": _v2521_run_task_safety_gate,
+                    "pose_source_mode": v311_mode, "wrist_selected": v326_wrist_selected,
+                    "latch_pending": _v337_latch_pending, "clear_latch": _v337_clear_latch,
+                    "shared": {"gripper_target_mm": gripper_target_mm, "gripper_actual_mm": gripper_actual_mm,
+                               "gripper_force_mode": gripper_force_mode, "gripper_force_N": gripper_force_N,
+                               "clamp_speed_mult_shared": clamp_speed_mult_shared,
+                               "hold_enabled_shared": hold_enabled_shared, "hold_off_request": hold_off_request,
+                               "hold_active_shared": hold_active_shared, "contact_left_n_shared": contact_left_n_shared,
+                               "contact_right_n_shared": contact_right_n_shared, "safety_trip_count": safety_trip_count},
+                })
+            except Exception as _e372:
+                append_gui_log(f"[FAIL] [V3.72 SORT] sort_items RUN TASK could not start: {_e372}")
+            return
         if _v343_scene_name() != "fill_egg_holder":
             append_gui_log(f"[V3.43 SCENE] RUN TASK blocked: scene {_v343_scene_name()} has no Agent skills yet")
             messagebox.showinfo("NERO V3.44", f"场景 {_v343_scene_name()} 目前只提供仿真场景，还没有 Agent 技能。\n"

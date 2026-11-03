@@ -46,8 +46,13 @@ SCENES = {
     "stack_cups_so101": {"label": "stack_cups_so101 - 叠杯子 · SO-101 夹爪 (7 mm 转接环, 偏转 45°)",
                          "summary": "stack_cups with the SO-101 gripper on a 7 mm adapter ring, rolled 45 deg",
                          "base": "stack_cups", "gripper": "so101"},
+    # V3.72 SORT ITEMS SCENE: banana, apple, computer mouse and a thick marker on the table, an open red bin and an
+    # open blue bin left / right; the agent sorts the items into the bins as the task prompt says (SO-101 gripper)
+    "sort_items": {"label": "sort_items - 物品分类放入红框 / 蓝框 · SO-101 夹爪（香蕉 / 苹果 / 鼠标 / 马克笔）",
+                   "summary": "banana, apple, mouse, marker on the table; sort them into the open red / blue bins by the prompt",
+                   "gripper": "so101"},
 }
-SCENES_REV = "V3.64"       # VERSION above stays "V3.44" (tests pin it); stack_cups V3.61, stack_cups_so101 V3.64
+SCENES_REV = "V3.72"       # VERSION above stays "V3.44" (tests pin it); stack_cups V3.61, stack_cups_so101 V3.64, sort_items V3.72
 HERE = Path(__file__).resolve().parent
 
 # ----------------------------------------------------------------------------- geometry (store_in_safe)
@@ -100,6 +105,8 @@ def tf_body_map():
     """semantic name -> MuJoCo body; TF child frame = 'sim_' + semantic (object_pose('valuables_box') etc.)."""
     if active_scene() == "stack_cups":                  # V3.61 STACK CUPS SCENE
         return {n: n for n in CUP_NAMES}
+    if active_scene() == "sort_items":                  # V3.72 SORT ITEMS SCENE
+        return {n: n for n in SORT_ITEM_NAMES}
     return {"obj_valuables_box": "obj_valuables_box", "obj_safe_handle": "obj_safe_handle",
             "obj_safe_door": "safe_door"}
 
@@ -107,10 +114,12 @@ def tf_body_map():
 def hold_object_names():
     if active_scene() == "stack_cups":                  # V3.61 STACK CUPS SCENE
         return list(CUP_NAMES) + list(LEGACY_HIDDEN)
+    if active_scene() == "sort_items":                  # V3.72 SORT ITEMS SCENE
+        return list(SORT_ITEM_NAMES) + list(LEGACY_HIDDEN)
     return ["obj_valuables_box", "obj_safe_handle"] + list(LEGACY_HIDDEN)
 
 
-PROTECTED_PREFIXES = ("safe_body_",)
+PROTECTED_PREFIXES = ("safe_body_", "sort_bin_")     # V3.72: the bin walls / floors protect like the safe walls
 
 
 def _derived():
@@ -140,6 +149,8 @@ def planning_boxes(model=None, data=None):
     """MoveIt boxes for the fixed safe walls: (id, centre, full size) - same format as the egg-holder list."""
     if active_scene() == "stack_cups":                  # V3.61: the cups are movable objects, no fixed obstacles
         return []
+    if active_scene() == "sort_items":                  # V3.72: the two open bins (walls + floor) are fixed obstacles
+        return [(n, c, tuple(2.0 * v for v in h)) for n, c, h, _rgba in sort_bin_boxes()]
     return [(n, c, tuple(2.0 * v for v in h)) for n, c, h in static_boxes()]
 
 
@@ -168,7 +179,7 @@ def door_angle(model, data):
 
 
 def planning_rotated_boxes(model, data):
-    if active_scene() == "stack_cups":                  # V3.61: no hinged door in the cup scene
+    if active_scene() in ("stack_cups", "sort_items"):  # V3.61 / V3.72: no hinged door in these scenes
         return []
     return door_boxes(door_angle(model, data))
 
@@ -314,6 +325,8 @@ def make_store_in_safe_xml(original_xml_path, visual_quality=None):
     V3.61: the backend calls this for every non-default scene (unchanged A2 block) -> stack_cups is dispatched here."""
     if active_scene() == "stack_cups":
         return make_stack_cups_xml(original_xml_path, visual_quality=visual_quality)
+    if active_scene() == "sort_items":                  # V3.72 SORT ITEMS SCENE
+        return make_sort_items_xml(original_xml_path, visual_quality=visual_quality)
     import numpy as np
     src = Path(original_xml_path).resolve()
     xml = src.read_text(encoding="utf-8")
@@ -584,3 +597,225 @@ def cup_task_state(cup1_xyz, cup1_quat_wxyz, cup2_xyz, cup2_quat_wxyz, cup=None,
     return {"xy_offset_mm": round(dxy * 1000, 1), "base_dz_mm": round(float(dz) * 1000, 1), "tilt_cup1_deg": round(t1, 1),
             "tilt_cup2_deg": round(t2, 1), "stacked": bool(stacked), "nested_full": bool(full),
             "nested": bool(stacked), "success": bool(stacked)}
+
+
+# ----------------------------------------------------------------------------- V3.72 SORT ITEMS SCENE
+# Items lie on the table (body origin = the item centre, = the grasp point of long items); x = long axis.
+# category = ground truth for the test log only - the agent gets the detector label and decides by the prompt.
+SORT_ITEMS = {
+    "obj_banana": {"label": "banana", "category": "fruit", "xy": (-0.31, -0.085), "yaw_deg": 12.0, "cz": 0.017,
+                   "width": 0.034, "length": 0.18, "height": 0.034, "shape": "long", "mass": 0.12},
+    "obj_apple": {"label": "apple", "category": "fruit", "xy": (-0.45, 0.07), "yaw_deg": 0.0, "cz": 0.037,
+                  "width": 0.074, "length": 0.074, "height": 0.074, "shape": "round", "mass": 0.18},
+    "obj_mouse": {"label": "computer mouse", "category": "office", "xy": (-0.45, -0.06), "yaw_deg": 75.0, "cz": 0.019,
+                  "width": 0.062, "length": 0.11, "height": 0.038, "shape": "long", "mass": 0.09,
+                  "grasp_z": 0.012},      # V3.72: pads on the flat chassis sides (the shell above is narrower)
+    "obj_marker": {"label": "marker pen", "category": "office", "xy": (-0.32, 0.08), "yaw_deg": -18.0, "cz": 0.0105,
+                   "width": 0.021, "length": 0.13, "height": 0.021, "shape": "long", "mass": 0.025},
+}
+SORT_ITEM_NAMES = tuple(SORT_ITEMS)
+# two open bins; the robot faces -x, so y < 0 is the robot's left
+SORT_BINS = {
+    "red": {"centre": (-0.37, -0.25), "inner": (0.24, 0.24), "wall_h": 0.06, "wall_t": 0.006, "floor_t": 0.004,
+            "rgba": "0.82 0.12 0.10 1", "side": "left (robot view, y < 0)"},
+    "blue": {"centre": (-0.37, 0.25), "inner": (0.24, 0.24), "wall_h": 0.06, "wall_t": 0.006, "floor_t": 0.004,
+             "rgba": "0.12 0.30 0.85 1", "side": "right (robot view, y > 0)"},
+}
+
+
+def sort_item_poses(seed=None):
+    """V3.72: item (x, y, yaw_deg); NERO_V372_ITEM_SEED (or seed) adds +-15 mm / +-15 deg jitter"""
+    s = seed if seed is not None else os.environ.get("NERO_V372_ITEM_SEED")
+    out = {n: (it["xy"][0], it["xy"][1], it["yaw_deg"]) for n, it in SORT_ITEMS.items()}
+    if s in (None, ""):
+        return out
+    import numpy as np
+    rng = np.random.default_rng(int(s))
+    return {n: (x + rng.uniform(-0.015, 0.015), y + rng.uniform(-0.015, 0.015), yaw + rng.uniform(-15, 15))
+            for n, (x, y, yaw) in out.items()}
+
+
+def sort_bin_boxes():
+    """(geom name, centre, half size, rgba) of every bin wall / floor"""
+    out = []
+    for col, b in SORT_BINS.items():
+        cx, cy = b["centre"]
+        ix, iy = b["inner"][0] / 2.0, b["inner"][1] / 2.0
+        t, h, f = b["wall_t"], b["wall_h"], b["floor_t"]
+        out += [(f"sort_bin_{col}_floor", (cx, cy, f / 2.0), (ix + t, iy + t, f / 2.0), b["rgba"]),
+                (f"sort_bin_{col}_wall_xneg", (cx - ix - t / 2.0, cy, h / 2.0), (t / 2.0, iy + t, h / 2.0), b["rgba"]),
+                (f"sort_bin_{col}_wall_xpos", (cx + ix + t / 2.0, cy, h / 2.0), (t / 2.0, iy + t, h / 2.0), b["rgba"]),
+                (f"sort_bin_{col}_wall_yneg", (cx, cy - iy - t / 2.0, h / 2.0), (ix, t / 2.0, h / 2.0), b["rgba"]),
+                (f"sort_bin_{col}_wall_ypos", (cx, cy + iy + t / 2.0, h / 2.0), (ix, t / 2.0, h / 2.0), b["rgba"])]
+    return out
+
+
+def _yaw_quat(deg):
+    a = math.radians(deg) / 2.0
+    return (math.cos(a), 0.0, 0.0, math.sin(a))
+
+
+def _ballast(name, pos, mass):
+    """V3.72 HANG BALLAST: an invisible, non-colliding mass inside the item so that its centre of mass lies straight
+    below the body origin (= the grasp point).  The backend's CONNECT hold is a ball joint at the body origin: like the
+    cups' rim origin (V3.62) this keeps a held item hanging the way it was gripped (without it the banana rolled ~70 deg
+    about its long axis on the lift and was placed upside down)."""
+    return (f'<geom name="{name}_ballast" type="sphere" pos="{_f(*pos)}" size="0.004" mass="{mass:.4f}" '
+            'rgba="0 0 0 0" contype="0" conaffinity="0"/>')
+
+
+def sort_item_body_xml(name, x, y, yaw_deg, free=True):
+    """V3.72 TOP-CENTRE ITEM ORIGIN: the body origin is the item's top centre (like the cups' rim origin, V3.62); the
+    backend's CONNECT hold pins this point, the ballast keeps the centre of mass well below it -> a held item hangs
+    the way it was gripped.  oz = local z of the item's centre (= cz - height)."""
+    it = SORT_ITEMS[name]
+    q = _yaw_quat(yaw_deg)
+    oz = it["cz"] - it["height"]
+    fr = '<freejoint/>' if free else ''
+    con = 'friction="1.0 0.02 0.002" condim="6" solref="0.004 1" solimp="0.95 0.99 0.001"'
+    head = f'<body name="{name}" pos="{_f(x, y, it["height"] + 0.0005)}" quat="{_f(*q)}">{fr}'
+    if name == "obj_banana":                            # 4 capsules on an arc (R 130 mm, 80 deg), bends towards +y
+        R, n = 0.13, 4
+        th = [math.radians(-40.0 + 80.0 * i / n) for i in range(n + 1)]
+        pts = [(R * math.sin(a), R * (1.0 - math.cos(a))) for a in th]
+        mb = 0.6 * it["mass"]                           # ballast also cancels the arc's sideways centre of mass
+        m = (it["mass"] - mb) / n
+        y_arc = sum((pts[i][1] + pts[i + 1][1]) / 2.0 for i in range(n)) / n
+        g = "".join(f'<geom name="obj_banana_seg{i}" type="capsule" '
+                    f'fromto="{_f(pts[i][0], pts[i][1], oz, pts[i + 1][0], pts[i + 1][1], oz)}" '
+                    f'size="0.017" mass="{m:.4f}" rgba="0.97 0.84 0.18 1" {con}/>' for i in range(n))
+        g += (f'<geom name="obj_banana_tip0" type="sphere" pos="{_f(pts[0][0], pts[0][1], oz)}" size="0.006" '
+              f'rgba="0.30 0.22 0.08 1" contype="0" conaffinity="0" mass="0"/>'
+              f'<geom name="obj_banana_tip1" type="sphere" pos="{_f(pts[-1][0], pts[-1][1], oz)}" size="0.006" '
+              f'rgba="0.30 0.22 0.08 1" contype="0" conaffinity="0" mass="0"/>')
+        g += _ballast(name, (0.0, -y_arc * (it["mass"] - mb) / mb, oz - 0.010), mb)
+    elif name == "obj_apple":
+        g = (f'<geom name="obj_apple_body" type="sphere" pos="{_f(0, 0, oz)}" size="0.037" mass="{0.55 * it["mass"]:.4f}" '
+             f'rgba="0.78 0.10 0.10 1" {con}/>'
+             f'<geom name="obj_apple_stem" type="cylinder" pos="{_f(0, 0, oz + 0.040)}" size="0.0025 0.007" '
+             'rgba="0.35 0.22 0.10 1" contype="0" conaffinity="0" mass="0"/>'
+             + _ballast(name, (0.0, 0.0, oz - 0.022), 0.45 * it["mass"]))
+    elif name == "obj_mouse":                           # flat chassis + domed shell, 110 x 62 x 38 mm
+        g = (f'<geom name="obj_mouse_base" type="box" pos="{_f(0, 0, oz - 0.009)}" size="0.055 0.031 0.010" '
+             f'mass="{0.35 * it["mass"]:.4f}" rgba="0.22 0.23 0.25 1" {con}/>'
+             f'<geom name="obj_mouse_shell" type="ellipsoid" pos="{_f(0, 0, oz + 0.001)}" size="0.050 0.028 0.018" '
+             f'mass="{0.10 * it["mass"]:.4f}" rgba="0.30 0.31 0.34 1" {con}/>'
+             f'<geom name="obj_mouse_wheel" type="cylinder" pos="{_f(0.030, 0, oz + 0.017)}" euler="90 0 0" '
+             'size="0.004 0.003" rgba="0.1 0.1 0.1 1" contype="0" conaffinity="0" mass="0"/>'
+             + _ballast(name, (0.0, 0.0, oz - 0.014), 0.55 * it["mass"]))
+    else:                                               # thick marker, 130 mm x 21 mm, black barrel + orange cap
+        # the cap is heavier per length: the ballast also moves the centre of mass back under the grasp point
+        g = (f'<geom name="obj_marker_barrel" type="cylinder" fromto="{_f(-0.065, 0, oz, 0.040, 0, oz)}" size="0.0105" '
+             f'mass="{0.4 * it["mass"]:.4f}" rgba="0.08 0.08 0.09 1" {con}/>'
+             f'<geom name="obj_marker_cap" type="cylinder" fromto="{_f(0.040, 0, oz, 0.065, 0, oz)}" size="0.0110" '
+             f'mass="{0.1 * it["mass"]:.4f}" rgba="0.95 0.45 0.05 1" {con}/>'
+             + _ballast(name, (-0.002, 0.0, oz - 0.006), 0.5 * it["mass"]))
+    return head + g + '</body>'
+
+
+def sort_item_centre(name, pos, quat_wxyz):
+    """V3.72: item centre from its body pose (origin = top centre, body z = up when the item lies normally)"""
+    it = SORT_ITEMS[name]
+    w, x, y, z = [float(v) for v in quat_wxyz]
+    ax = (2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y))
+    oz = it["cz"] - it["height"]
+    return [float(pos[i]) + oz * ax[i] for i in range(3)]
+
+
+def sort_world_xml(seed=None, bare=False, poses=None):
+    """V3.72: worldbody part of the scene; bare=True = bins + items only (the skills' headless twin has its own table)"""
+    poses = poses or sort_item_poses(seed)
+    items = "\n    ".join(sort_item_body_xml(n, *poses[n]) for n in SORT_ITEM_NAMES)
+    bins = "\n    ".join(f'<geom name="{n}" type="box" pos="{_f(*c)}" size="{_f(*h)}" rgba="{rgba}" '
+                          'friction="1.0 0.02 0.002" solref="0.006 1" solimp="0.95 0.99 0.001" contype="1" conaffinity="1"/>'
+                          for n, c, h, rgba in sort_bin_boxes())
+    legacy = "\n".join(
+        f'    <body name="{n}" pos="{-8 - 0.1 * i:.1f} -8 -8"><freejoint/><geom name="{n}_geom" type="sphere" size="0.001" '
+        f'mass="0.001" rgba="0 0 0 0" contype="0" conaffinity="0"/></body>' for i, n in enumerate(LEGACY_HIDDEN))
+    if bare:
+        return bins + "\n    " + items
+    return f"""
+    <!-- ============================================================
+         NERO V3.72 sort_items SCENE - table top z = 0, robot mount unchanged
+         ============================================================ -->
+    <geom name="v5_grid_floor" type="plane" pos="0 0 -0.28" size="6 6 0.1"
+          material="v343_floor_mat" friction="1.2 0.01 0.001" contype="1" conaffinity="1"/>
+    <geom name="play_table" type="box" pos="-0.385 0 -0.03" size="0.335 0.38 0.03" material="v343_table_mat"
+          friction="1.2 0.01 0.001" solref="0.008 1" solimp="0.96 0.995 0.0005" margin="0.001"
+          contype="1" conaffinity="1"/>
+    <geom name="nero_support_top" type="box" pos="-0.025 0 -0.008" size="0.025 0.085 0.008"
+          rgba="0.15 0.16 0.18 1" contype="0" conaffinity="0"/>
+    <!-- open red bin (robot's left) and open blue bin (robot's right) -->
+    {bins}
+    <!-- banana, apple, computer mouse, thick marker -->
+    {items}
+{legacy}
+    <light name="eggscene_key" pos="0.25 -0.65 2.20" dir="-0.30 0.22 -1" directional="true" castshadow="true"
+           diffuse="0.92 0.84 0.72" specular="0.22 0.20 0.18"/>
+    <light name="eggscene_fill" pos="-1.20 0.80 1.50" dir="0.55 -0.25 -1" directional="true" castshadow="false"
+           diffuse="0.34 0.40 0.48" specular="0.05 0.06 0.08"/>
+"""
+
+
+def make_sort_items_xml(original_xml_path, visual_quality=None):
+    """V3.72: same contract as make_store_in_safe_xml for the sort_items scene (SO-101 gripper always)"""
+    import re
+    import numpy as np
+    src = Path(original_xml_path).resolve()
+    xml = src.read_text(encoding="utf-8")
+    tex = src.parent / "_nero_v343_scene_textures"
+    tex.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(34301)
+    nz = rng.normal(0.0, 1.0, (256, 256))
+    nz = (nz + np.roll(nz, 3, 0) + np.roll(nz, 4, 1)) / 3.0
+    _png(tex / "floor_grey.png", np.clip(np.stack([102 + 6 * nz, 110 + 6 * nz, 127 + 6 * nz], -1), 0, 255))
+    _png(tex / "table_white.png", np.clip(np.stack([236 + 1.5 * nz, 236 + 1.5 * nz, 234 + 1.5 * nz], -1), 0, 255))
+    assets = f"""
+    <texture name="v343_sky" type="skybox" builtin="gradient" rgb1="0.54 0.64 0.76" rgb2="0.92 0.90 0.84"
+             width="512" height="3072"/>
+    <texture name="v343_floor_tex" type="2d" file="{(tex / 'floor_grey.png').as_posix()}"/>
+    <texture name="v343_table_tex" type="2d" file="{(tex / 'table_white.png').as_posix()}"/>
+    <material name="v343_floor_mat" texture="v343_floor_tex" texrepeat="7 7" reflectance="0.02" specular="0.16"
+              shininess="0.08"/>
+    <material name="v343_table_mat" texture="v343_table_tex" texrepeat="2.2 1.7" reflectance="0.05"
+              specular="0.25" shininess="0.2"/>
+"""
+    if re.search(r"<asset\b[^>]*/>", xml):
+        xml = re.sub(r"<asset\b[^>]*/>", "<asset>\n" + assets + "\n</asset>", xml, count=1)
+    elif "<asset" in xml:
+        xml = re.sub(r"(<asset\b[^>]*>)", lambda m: m.group(1) + "\n" + assets, xml, count=1)
+    else:
+        xml = xml.replace("<worldbody>", "<asset>\n" + assets + "\n</asset>\n\n<worldbody>", 1)
+    print("[V3.72 SCENE] sort_items: banana / apple / computer mouse / marker pen; open red bin (left) + blue bin "
+          "(right), SO-101 gripper", flush=True)
+    xml = xml.replace("<worldbody>", "<worldbody>\n" + sort_world_xml(), 1)
+    if visual_quality is not None:
+        xml = visual_quality(xml)
+    import NERO_V364_SO101_Gripper as _G364
+    xml = _G364.insert_into_model_xml(xml)
+    print(f"[V3.72 SCENE] sort_items: SO-101 gripper mounted on link7 {_G364.describe()}", flush=True)
+    eq = "\n        ".join(
+        f'<connect name="hold_{o}" body1="link7" body2="{o}" anchor="0 0 0" active="false" '
+        f'solref="0.008 1" solimp="0.98 0.995 0.001"/>' for o in hold_object_names())
+    if "</equality>" in xml:
+        xml = xml.replace("</equality>", "        " + eq + "\n    </equality>", 1)
+    else:
+        xml = xml.replace("</mujoco>", "    <equality>\n        " + eq + "\n    </equality>\n</mujoco>", 1)
+    out = src.with_name("_nero_motor_v343_sort_items_tmp.xml")
+    out.write_text(xml, encoding="utf-8")
+    return str(out)
+
+
+def item_in_bin(xyz, margin=0.004):
+    """V3.72: colour of the bin whose inner volume holds the point (item CENTRE, see sort_item_centre), else None"""
+    for col, b in SORT_BINS.items():
+        cx, cy = b["centre"]
+        if (abs(xyz[0] - cx) <= b["inner"][0] / 2.0 + margin and abs(xyz[1] - cy) <= b["inner"][1] / 2.0 + margin
+                and xyz[2] < b["wall_h"] + 0.02):
+            return col
+    return None
+
+
+def sort_task_state(poses):
+    """V3.72: {item: bin colour or None} from item centre positions"""
+    return {n: item_in_bin(p) for n, p in poses.items()}

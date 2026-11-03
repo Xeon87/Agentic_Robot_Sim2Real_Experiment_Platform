@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V3.71"
+VERSION = "V3.72"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -44,7 +44,8 @@ SIM_SCRIPT = os.environ.get("NERO_V312_SIM_SCRIPT", os.path.join(HERE, "start_ne
 SIM_SCENES = [("fill_egg_holder", "fill_egg_holder - 鸡蛋放入蛋托 (默认)"),
               ("store_in_safe", "store_in_safe - 物体放入保险箱 (RoboDojo)"),
               ("stack_cups", "stack_cups - 叠杯子 (RoboDojo)"),          # V3.61 STACK CUPS SCENE
-              ("stack_cups_so101", "stack_cups_so101 - 叠杯子 · SO-101 夹爪 (7 mm 转接环, 偏转 45°)")]  # V3.64 SO-101 GRIPPER ON NERO
+              ("stack_cups_so101", "stack_cups_so101 - 叠杯子 · SO-101 夹爪 (7 mm 转接环, 偏转 45°)"),  # V3.64 SO-101 GRIPPER ON NERO
+              ("sort_items", "sort_items - 物品分类放入红框 / 蓝框 · SO-101 夹爪（香蕉 / 苹果 / 鼠标 / 马克笔）")]  # V3.72 SORT ITEMS SCENE
 DEFAULT_SIM_SCENE = "fill_egg_holder"
 
 

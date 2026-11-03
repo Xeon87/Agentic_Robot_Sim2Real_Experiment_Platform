@@ -642,7 +642,8 @@ def _finger_xml(name, quat, axis, rng, pad):
             + "".join(studs) + "</body>")
 
 
-def twin_xml(cup_xy=None, gripper="official"):
+def twin_xml(cup_xy=None, gripper="official", world_xml=None, hold_names=None):
+    """V3.72 TWIN WORLD: world_xml / hold_names replace the two cups (sort_items twin); defaults = the cup twin"""
     xy = dict(SC.CUP_XY if cup_xy is None else cup_xy)
     if gripper == "so101":                   # V3.64: the same SO-101 gripper parts the scene module mounts
         import NERO_V364_SO101_Gripper as G
@@ -659,9 +660,10 @@ def twin_xml(cup_xy=None, gripper="official"):
                  'ctrlrange="0 0.05" ctrllimited="true"/><motor name="gripper_force" joint="gripper_joint1" gear="1" '
                  'ctrlrange="-50 50" ctrllimited="true" forcerange="-50 50" forcelimited="true"/>')
         g_contact = '<exclude body1="gripper_link1" body2="gripper_link2"/>'
-    cups = "\n".join(SC.cup_body_xml(n, xy[n], z0=0.0005, origin=SC.CUP_ORIGIN) for n in SC.CUP_NAMES)
+    cups = world_xml if world_xml is not None else \
+        "\n".join(SC.cup_body_xml(n, xy[n], z0=0.0005, origin=SC.CUP_ORIGIN) for n in SC.CUP_NAMES)
     holds = "".join(f'<connect name="hold_{n}" body1="link7" body2="{n}" anchor="0 0 0" active="false" '
-                    'solref="0.008 1" solimp="0.98 0.995 0.001"/>' for n in SC.CUP_NAMES)
+                    'solref="0.008 1" solimp="0.98 0.995 0.001"/>' for n in (hold_names or SC.CUP_NAMES))
     try:                                     # V3.63: the fixed stand D435i (same pose / fovy as the backend camera)
         import NERO_V308_Camera_Perception as P8
         cam = P8.camera_xml(P8.camera_config())
@@ -699,12 +701,14 @@ class TwinIO:
     """Headless MuJoCo twin of the backend's gripper + cups (see module docstring)."""
     name = "twin"
 
-    def __init__(self, log=None, cup_xy=None, start_tcp=None, pose_mode="truth", gripper="official"):
+    def __init__(self, log=None, cup_xy=None, start_tcp=None, pose_mode="truth", gripper="official", world_xml=None,
+                 hold_names=None):
         import mujoco
         self._pose_mode = pose_mode
         self._gripper = gripper
         self.mj = mujoco
-        self.m = mujoco.MjModel.from_xml_string(twin_xml(cup_xy, gripper))
+        self.hold_names = list(hold_names or SC.CUP_NAMES)          # V3.72 TWIN WORLD
+        self.m = mujoco.MjModel.from_xml_string(twin_xml(cup_xy, gripper, world_xml, hold_names))
         self.d = mujoco.MjData(self.m)
         self.log = log or (lambda s: None)
         self.mid = self.m.body("link7").mocapid[0]
@@ -840,7 +844,7 @@ class TwinIO:
         self.hold = name
 
     def _release_hold(self):
-        for n in SC.CUP_NAMES:
+        for n in self.hold_names:
             self.d.eq_active[self.m.equality("hold_" + n).id] = 0
         self.hold, self.hold_t, self.prev_rel, self.vlp = None, 0.0, None, 0.0
 

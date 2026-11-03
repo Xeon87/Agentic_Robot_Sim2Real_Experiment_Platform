@@ -66,13 +66,13 @@ except Exception:
 
 # ------------------------------------------------------------------ B1
 for m in (CON, RR, YP, W49, RT, YC, TR):
-    assert m.VERSION in ("V3.69", "V3.70", "V3.71"), (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.69", "V3.70", "V3.71")
+    assert m.VERSION in ("V3.69", "V3.70", "V3.71", "V3.72"), (m.__name__, m.VERSION)
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.69", "V3.70", "V3.71", "V3.72")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 for fn, h in (("NERO_V326_Wrist_Camera.py", "6b5c5d683073e4252b82c1c703ad664173960a179947f9e72775bb9683697d0a"),
               ("NERO_V2_7_1_Agent.py", "3e52d05ea84d94c8359d5875fa0fee8c2cc42d612b52e59109e1166912439696"),
               ("NERO_V325_Camera.py", "a58e69b363a5a861b3ad0806ba276c49601fc214ffdfc07ffba9bdc0c2c65797"),
-              ("NERO_V2_7_1_Unified_Backend.py", "bb9b7e5e927ed3fda9112b2edff0d99a482ade9ac3dc6a0b66901b70d257a04a"),
+              ("NERO_V2_7_1_Unified_Backend.py", "5be2136f84ec4ccdfe6f8bc8d8998410ff9b3b827af4d571ea44373dc427527e"),
               ("NERO_V363_Cup_Perception.py", "b9633693657127fccc101bd902ad38e6bbc014fc907c41bd54227c1711a732c5")):
     assert H((ROOT / fn).read_bytes()) == h, f"{fn} changed"
 for fn, mk in (("NERO_V362_Cup_Skills.py", "V3.69 CLEAR VIEW VERIFY"), ("NERO_V362_Cup_Skills.py", "V3.69 CAMERA DECIDES GRIP"),
