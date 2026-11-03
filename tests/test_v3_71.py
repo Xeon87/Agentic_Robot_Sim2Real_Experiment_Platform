@@ -19,7 +19,6 @@ C9  Twin (needs MuJoCo + OpenGL): the grasp offset is made 10 mm wrong after the
 C10 Live monitor: every task perception reaches the monitor overlay (time-stamped, "识别于 x s 前", old = dashed); GPU
     hint names CUDA_VISIBLE_DEVICES; start_nero.sh clears it; 「实测套叠增量」 field saved and passed to the profile.
 """
-import faulthandler
 import hashlib
 import json
 import math
@@ -32,8 +31,6 @@ import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-if os.environ.get("V371_DEBUG"):
-    faulthandler.dump_traceback_later(25, exit=True)
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 TMP = Path(tempfile.mkdtemp(prefix="nero_v371_"))
