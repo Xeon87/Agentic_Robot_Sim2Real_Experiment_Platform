@@ -115,7 +115,9 @@ def _seg_dets(tw):
     if len(masks) == 2:
         a, b = box(masks[0]), box(masks[1])
         ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
-        if ix > 0.3 * min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1])):
+        # V3.71: a cup held ABOVE the other one is its own instance (only a nested pair - rims within 6 cm - is one)
+        dz = abs(float(tw.cup_pose("cup_1")[0][2]) - float(tw.cup_pose("cup_2")[0][2]))
+        if ix > 0.3 * min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1])) and dz < 0.06:
             masks = [masks[0] | masks[1]]                   # nested pair: one YOLOE instance
     return [{"cls": 0, "name": "cup", "conf": 0.9, "box": box(mk), "mask": mk} for mk in masks]
 

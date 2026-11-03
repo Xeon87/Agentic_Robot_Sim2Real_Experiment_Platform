@@ -28,7 +28,7 @@ import time
 
 import numpy as np
 
-VERSION = "V3.70"
+VERSION = "V3.71"
 MARKER = "V3.65 NERO REAL CUP TASK"
 CALIB_DIR = os.environ.get("NERO_CALIB_DIR") or os.path.expanduser("~/Downloads/cameracalib")
 SETTINGS_NAME = "real_cup_task.json"
@@ -50,6 +50,13 @@ DEFAULT_CFG = {
     "descent_stop_mm": 10.0,        # two-stage descent: stop with the fingertips this far above the rim
     "seat_mm": None, "ring_mm": None, "roll_deg": None,      # None = NERO_V364 MOUNT (estimate)
     "tip_corr_mm": [0.0, 0.0, 0.0],  # fingertip correction in the SO-101 gripper frame (4-pose touch calibration)
+    # V3.71 ARRIVE AND SETTLE: a motion ends when the arm is really at the goal and still (not when the trajectory
+    # time is over); the V3.70 real log: at 4X the arm was still 80 deg away when the next step started
+    "arrive_timeout_min_s": 5.0,    # waiting time for the arrival: max(this, 3 x planned time + 2 s), <= 60 s
+    "still_deg": 0.3,               # "still" = every joint moved less than this within still_window_s
+    "still_window_s": 0.2,
+    "safe_z_m": 0.22,               # V3.71 RECOVER: straight up to this TCP height after a failed motion / fence detour
+    "nested_dz_mm": None,           # V3.71 STACK VERIFY: measured base-to-base height of a nested real pair (None = not measured)
 }
 # V3.69 SPEED MULTIPLIER: 1X = the base speeds of the fields; joint moves scale fully up to JOINT_CAP, straight
 # segments near the cups (descent / lift / lowering) only up to LINE_CAP; settle / dwell times shrink
@@ -109,12 +116,39 @@ def yolo_device(log=None):
             if log:
                 log(f"[OK] [V3.69 REAL] YOLOE 用 GPU：cuda:0（{name}）")
             return "cuda:0"
-        why = f"torch {torch.__version__} 看不到 CUDA（torch.cuda.is_available() = False）"
+        why = f"torch {torch.__version__} 看不到 CUDA（torch.cuda.is_available() = False）" + gpu_hint(torch)
     except Exception as exc:
         why = f"torch 不可用：{exc}"
     if log:
         log(f"[WARN] [V3.69 REAL] YOLOE 只能用 CPU（每帧约 1 s）：{why}")
     return None
+
+
+def gpu_hint(torch=None):
+    """V3.71 GPU REASON: what usually hides the GPU - CUDA_VISIBLE_DEVICES, no NVIDIA driver (nvidia-smi), driver
+    too old for the torch CUDA build"""
+    import shutil
+    import subprocess
+    parts = []
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cvd is not None:
+        parts.append(f"环境变量 CUDA_VISIBLE_DEVICES='{cvd}'（控制台从 start_nero.sh 启动会清掉它）")
+    cu = getattr(getattr(torch, "version", None), "cuda", None) if torch is not None else None
+    if cu:
+        parts.append(f"torch 编译的 CUDA {cu}")
+    smi = shutil.which("nvidia-smi")
+    if not smi:
+        parts.append("找不到 nvidia-smi（NVIDIA 驱动没装好或没加载）")
+    else:
+        try:
+            r = subprocess.run([smi, "--query-gpu=name,driver_version", "--format=csv,noheader"], capture_output=True,
+                               text=True, timeout=3.0)
+            out = (r.stdout or r.stderr or "").strip().splitlines()
+            parts.append(f"nvidia-smi：{out[0][:120]}" if out else f"nvidia-smi 无输出（rc={r.returncode}）")
+        except Exception as exc:
+            parts.append(f"nvidia-smi 失败：{str(exc)[:80]}")
+    return ("；" + "；".join(parts) + "。下一步：在同一终端跑 nvidia-smi 和 python3 -c \"import torch;print(torch.cuda.is_available())\""
+            "（驱动没加载就重启 / 检查 prime-select）") if parts else ""
 
 
 def real_mount(cfg=None):
@@ -179,7 +213,12 @@ def real_profile(CK, lift_settle_s=0.5, cfg=None):
                              # budget, start from the last good rim angles)
                              lenient_pick=True, wide_step_deg=30, plan_time_budget_s=15.0, remember_angles=True,
                              # V3.69: clear view before verifying, the camera decides whether the cup is held
-                             clear_view_before_verify=True, camera_decides_grip=True)
+                             clear_view_before_verify=True, camera_decides_grip=True,
+                             # V3.71: re-check the held cup above the target, stack verify by cluster, perception
+                             # retry, recover after a failed motion
+                             recheck_held_before_place=True, stack_by_cluster=True, perception_retries=2,
+                             recover_after_motion_failure=True,
+                             nested_dz_real_mm=(None if c.get("nested_dz_mm") in (None, "") else float(c["nested_dz_mm"])))
 
 
 def time_joint_path(path, vmax_joint_rad, tcp_pts=None, vmax_lin=None, ramp_frac=0.2, ramp_gain=1.5):
@@ -228,6 +267,8 @@ class RealIO:
         self.T_l7g = real_mount(self.cfg)[0]
         self.motion_log = []
         self.perc_times = []                           # V3.68: perception durations (task summary)
+        self.joint_cap_deg_s = None                    # V3.71 SPEED CAP: real joint speed learned from slow arrivals
+        self.on_perception = None                      # V3.71 LIVE OVERLAY: called with every perception result
 
     # -- basics
     def emit(self, s):
@@ -276,33 +317,116 @@ class RealIO:
     def _refuse(self, label, why, refused=True):
         return {"ok": False, "refused": refused, "label": label, "why": why, "error": why}
 
+    def joint_vmax_deg_s(self):
+        """V3.71 SPEED CAP: the speed the paths are timed with = speed setting, capped by the learned real speed"""
+        v = float(self.cfg["joint_vmax_deg_s"])
+        return min(v, self.joint_cap_deg_s) if self.joint_cap_deg_s else v
+
+    def wait_still(self, timeout_s=3.0, goal=None, tol_mm=None):
+        """V3.71 ARRIVE AND SETTLE: wait until the joints are still (and, with a goal, the TCP is within tol of it)
+        -> (ok, q, why)"""
+        win = float(self.cfg["still_window_s"])
+        lim = math.radians(float(self.cfg["still_deg"]))
+        tol = float(self.cfg["tcp_tol_mm"] if tol_mm is None else tol_mm) / 1000.0
+        T_goal = None if goal is None else self.fast.fk(np.asarray(goal, float))
+        t_end = time.time() + float(timeout_s)
+        q_prev, t_prev, q = None, None, None
+        why = "no joint feedback"
+        while True:
+            q = self.arm.q()
+            now = time.time()
+            if q is not None:
+                at = True
+                if T_goal is not None:
+                    err = float(np.linalg.norm(self.fast.fk(np.asarray(q, float))[:3, 3] - T_goal[:3, 3]))
+                    at = err <= tol
+                    why = f"TCP {err * 1000:.1f} mm from the goal"
+                if q_prev is None or now - t_prev >= win:
+                    if q_prev is not None:
+                        still = max(abs(a_ - b_) for a_, b_ in zip(q, q_prev)) < lim
+                        if still and at:
+                            return True, q, None
+                        if not still:
+                            why = (why + " · " if T_goal is not None else "") + "arm still moving"
+                    q_prev, t_prev = q, now
+            if now >= t_end or self.stop_ev.is_set():
+                return False, q, why
+            time.sleep(0.03)
+
     def _execute(self, label, path, tcp_pts, vmax_lin, slow):
-        """time + execute a joint path; afterwards compare the measured TCP with the path end"""
+        """time + execute a joint path; V3.71: start only with a still arm, then wait until the arm is REALLY at the
+        path end and still (timeout from the planned time); a slow arrival teaches the real joint speed cap"""
         if not self.motion_allowed:
             return {"ok": False, "label": label, "error": "MOTION_NOT_ALLOWED in this run mode"}
         if self.stop_ev.is_set():
             return {"ok": False, "label": label, "error": "STOPPED_BY_USER"}
+        ok0, q0, why0 = self.wait_still(3.0)
+        if not ok0:
+            return {"ok": False, "label": label, "error": f"ARM_NOT_STILL before {label}: {why0}"}
+        if q0 is not None and max(abs(a_ - b_) for a_, b_ in zip(q0, path[0])) > math.radians(1.0):
+            path = [list(q0)] + [list(p_) for p_ in path[1:]]     # start exactly where the arm is
         f = max(1.0, float(slow or 1.0))
-        times = time_joint_path(path, math.radians(float(self.cfg["joint_vmax_deg_s"])) / f, tcp_pts,
-                                (vmax_lin / f) if vmax_lin else None)
+        vj = self.joint_vmax_deg_s()
+        times = time_joint_path(path, math.radians(vj) / f, tcp_pts, (vmax_lin / f) if vmax_lin else None)
         t0 = time.time()
         r = dict(self.arm.exec_path(path, times, label) or {"ok": False, "error": "no result"})
-        self.motion_log.append({"label": label, "points": len(path), "planned_s": times[-1],
-                                "elapsed_s": round(time.time() - t0, 2), "ok": bool(r.get("ok")), "error": r.get("error")})
+        rec = {"label": label, "points": len(path), "planned_s": times[-1], "elapsed_s": round(time.time() - t0, 2),
+               "ok": bool(r.get("ok")), "error": r.get("error"), "joint_vmax_deg_s": round(vj / f, 1)}
+        self.motion_log.append(rec)
         if not r.get("ok"):
             return {"ok": False, "label": label, "error": r.get("error"), "fence_violation": r.get("fence_violation")}
+        wait = min(60.0, max(float(self.cfg["arrive_timeout_min_s"]), 3.0 * times[-1] + 2.0) - (time.time() - t0))
+        arrived, q, why = self.wait_still(max(0.5, wait), goal=path[-1])
         self.sleep(float(self.cfg["settle_s"]))
-        q = self.arm.q()
-        T_goal = self.fast.fk(np.asarray(path[-1], float))
+        t_arr = time.time() - t0
+        rec["arrived_s"] = round(t_arr, 2)
+        self._learn_speed(label, times[-1], t_arr, vj / f, arrived)
+        q = self.arm.q() or q
         if q is None:
             return {"ok": False, "label": label, "error": "no joint feedback after the motion"}
+        T_goal = self.fast.fk(np.asarray(path[-1], float))
         T_act = self.fast.fk(np.asarray(q, float))
         err = float(np.linalg.norm(T_act[:3, 3] - T_goal[:3, 3]))
         jerr = max(abs(math.degrees(a - b)) for a, b in zip(q, path[-1]))
-        return {"ok": err * 1000.0 <= float(self.cfg["tcp_tol_mm"]), "label": label, "tcp_error_mm": round(err * 1000, 1),
-                "joint_error_deg": round(jerr, 2), "kind": r.get("kind", "path"),
-                "error": None if err * 1000.0 <= float(self.cfg["tcp_tol_mm"]) else
-                f"TCP {err * 1000:.1f} mm from the goal after the motion"}
+        ok = err * 1000.0 <= float(self.cfg["tcp_tol_mm"]) and arrived
+        return {"ok": ok, "label": label, "tcp_error_mm": round(err * 1000, 1), "joint_error_deg": round(jerr, 2),
+                "kind": r.get("kind", "path"), "arrived_s": round(t_arr, 2), "planned_s": round(times[-1], 2),
+                "error": None if ok else (f"ARM_NOT_AT_GOAL: {why} {t_arr:.1f} s after the start (planned "
+                                          f"{times[-1]:.1f} s) - the arm did not reach the goal")}
+
+    def _learn_speed(self, label, planned_s, t_arr, v_used, arrived):
+        """V3.71 SPEED CAP: the arm needed much longer than planned -> its real joint speed is lower than the speed
+        setting (NERO driver speed_percent) -> time the following paths with the measured speed"""
+        if planned_s < 1.0 or t_arr <= planned_s * 1.3 + 0.5:
+            return
+        ratio = t_arr / planned_s
+        cap = round(max(2.0, v_used / ratio), 1)
+        if self.joint_cap_deg_s is None or cap < self.joint_cap_deg_s - 0.5:
+            self.joint_cap_deg_s = cap
+            self.emit(f"[WARN] [V3.71 REAL] 机械臂实际比设定慢：{label} 计划 {planned_s:.1f} s，实际 {t_arr:.1f} s"
+                      f"{'' if arrived else '（还没到位）'} → 之后的运动按实测关节速度 {cap:.1f} °/s 定时间。"
+                      "原因：实机参数 speed_percent 限制了真实速度；想更快请先调高 speed_percent（重启驱动）再用高速度档")
+
+    def move_up_to_safe(self, label, z=None):
+        """V3.71 RECOVER: straight up (path-checked) to the safe TCP height; nothing to do when already there"""
+        p, q = self.tcp_pose()
+        zz = float(self.cfg["safe_z_m"] if z is None else z)
+        if p[2] >= zz - 0.005:
+            return {"ok": True, "skipped": True}
+        return self.move_line(label, [p[0], p[1], zz], q, 0.05)
+
+    def recover_after_failure(self, label):
+        """V3.71 RECOVER: after a failed motion - wait for the arm to stop, then straight up to the safe height, so
+        the next tool starts from a clean posture (V3.70: the next task started next to the cups and clipped a wall)"""
+        ok, _q, why = self.wait_still(8.0)
+        if not ok:
+            self.emit(f"[WARN] [V3.71 REAL] {label}：机械臂 8 s 内没停稳（{why}）→ 不再自动移动，请检查")
+            return {"ok": False, "error": why}
+        r = self.move_up_to_safe(f"V3.71 recover after {label}")
+        self.emit(f"[{'OK' if r.get('ok') else 'WARN'}] [V3.71 REAL] 运动失败后收尾：已停稳"
+                  + ("，已在安全高度" if r.get("skipped") else
+                     ("，竖直升到安全高度" if r.get("ok") else f"，竖直上升没执行：{r.get('error') or r.get('why')}")))
+        return r
 
     def cartesian_path(self, xyz, quat):
         """straight TCP segment from the current pose: strict-continuity IK points (like TwinIO) -> (q list, tcp list)"""
@@ -346,7 +470,7 @@ class RealIO:
         r["kind"] = "line"
         return r
 
-    def move_joints(self, label, q, slow=None, speed=None):
+    def move_joints(self, label, q, slow=None, speed=None, detour=False):
         try:
             q0 = np.asarray(self.current_q(), float)
         except Exception as exc:
@@ -355,6 +479,19 @@ class RealIO:
         chk = self.CK.check_joint_path([list(q0), list(q1)], jump_deg=1e9)
         if not chk["ok"]:
             return {"ok": False, "label": label, "error": f"joint goal rejected: {chk['why']}"}
+        r = self._joint_line(label, q0, q1, slow)
+        if not r.get("ok") and (r.get("fence_violation") or "FENCE" in str(r.get("error") or "")) and not detour:
+            # V3.71 FENCE DETOUR: the straight joint path clips the fence (V3.70: 69 mm < 70 mm from a wall) ->
+            # straight up to the safe height first, then the joint path from there; still refused -> the error
+            up = self.move_up_to_safe(f"{label} (V3.71 detour up)")
+            if up.get("ok") and not up.get("skipped"):
+                self.emit(f"[INFO] [V3.71 REAL] {label}：关节直线路径擦到围栏 → 先竖直升到安全高度再过去")
+                r2 = self.move_joints(label, q, slow=slow, speed=speed, detour=True)
+                r2["detour"] = "up first"
+                return r2
+        return r
+
+    def _joint_line(self, label, q0, q1, slow):
         n = max(2, int(math.ceil(math.degrees(float(np.max(np.abs(q1 - q0)))) / float(self.cfg["joint_step_deg"]))))
         path = [list(q0 + (q1 - q0) * (i / n)) for i in range(n + 1)]
         r = self._execute(label, path, None, None, slow)
@@ -481,6 +618,11 @@ class RealIO:
         self.emit(f"[V3.66 REAL CUP YOLOE] {tag} | table z {res['table_z_m'] * 1000:+.0f} mm | YOLOE {res['n_2d']} 个 | "
                   + YC.summary(res) + f" | {dt:.2f} s（{YC.timing_text(res)}）"
                   + (f" · {res.get('device')}" if res.get("device") else ""))
+        if self.on_perception is not None:            # V3.71 LIVE OVERLAY: the monitor shows what the task sees
+            try:
+                self.on_perception(res)
+            except Exception:
+                pass
         return res
 
 
@@ -490,6 +632,7 @@ def make_skills(io, knobs=None, skill=None, log=None):
     if knobs is None or skill is None:
         knobs, skill = CK.cup_knobs()
     sk = CK.CupSkills(io, knobs, skill)
+    io.skills = sk                                     # V3.71 LIVE OVERLAY: the monitor names cups like the skill
     return sk
 
 
@@ -679,6 +822,15 @@ KIND_TEXT = {"occluded": ("被夹爪挡住", "#b0bec5"), "cup": ("单杯", "#00e
              "no_depth": ("没有深度", "#ff9100"), "rejected": ("剔除", "#9e9e9e")}
 
 
+OVERLAY_OLD_S = 4.0                    # V3.71 LIVE OVERLAY: contours older than this are marked old (dashed)
+
+
+def overlay_age_s(overlay, now=None):
+    """V3.71 LIVE OVERLAY: seconds since the perception shown on the monitor (None = never)"""
+    t = (overlay or {}).get("t")
+    return None if t is None else max(0.0, (time.time() if now is None else now) - float(t))
+
+
 def overlay_dets(res):
     """V3.66 REAL CUP YOLOE PERCEPTION: YOLOE contours + labels (image pixels) for the main monitor"""
     out = []
@@ -845,6 +997,8 @@ class RealCupTaskTabUI:
         self.v_ring = tk.StringVar(value=str(geo["ring_mm"] if geo.get("ring_mm") is not None else round(G_.MOUNT["ring_m"] * 1000, 1)))
         self.v_roll = tk.StringVar(value=str(geo["roll_deg"] if geo.get("roll_deg") is not None else G_.MOUNT["roll_deg"]))
         self.tip_corr = [float(v) for v in (geo.get("tip_corr_mm") or [0.0, 0.0, 0.0])]
+        # V3.71 STACK VERIFY: measured nested height (total height of the pair - height of one cup), empty = not measured
+        self.v_nested = tk.StringVar(value="" if geo.get("nested_dz_mm") in (None, "") else str(geo["nested_dz_mm"]))
         g0 = ttk.Frame(gf2)
         g0.pack(fill="x", padx=4, pady=2)
         for t_, v_ in (("固定指离杯壁 mm", self.v_clear), (" 对准高度 mm", self.v_align),
@@ -858,6 +1012,10 @@ class RealCupTaskTabUI:
             ttk.Entry(g1, textvariable=v_, width=6).pack(side="left")
         ttk.Button(g1, text="读取碰点标定（固定指尖）", command=self.on_tip_from_touch).pack(side="left", padx=(8, 2))
         ttk.Button(g1, text="清除指尖修正", command=self.on_tip_clear).pack(side="left")
+        g2 = ttk.Frame(gf2)
+        g2.pack(fill="x", padx=4, pady=2)
+        ttk.Label(g2, text="实测套叠增量 mm（两只套好总高 − 单杯高；空 = 未测）").pack(side="left")
+        ttk.Entry(g2, textvariable=self.v_nested, width=6).pack(side="left")
         # V3.68 FINGERTIP OVERLAY + ROLL SWEEP
         g2 = ttk.Frame(gf2)
         g2.pack(fill="x", padx=4, pady=2)
@@ -1055,15 +1213,21 @@ class RealCupTaskTabUI:
             if pc[2] <= 0.05:
                 return None
             return ((K["fx"] * pc[0] / pc[2] + K["ppx"]) * sx, (K["fy"] * pc[1] / pc[2] + K["ppy"]) * sy)
+        age = overlay_age_s(self.overlay)
+        old = age is not None and age > OVERLAY_OLD_S       # V3.71 LIVE OVERLAY: older contours are drawn dashed
         for d in self.overlay.get("dets") or []:           # V3.66 REAL CUP YOLOE PERCEPTION: YOLOE masks
             pts = []
             for u, v in d["contour"]:
                 pts += [u * sx, v * sy]
             if len(pts) >= 6:
-                self.cv.create_polygon(*pts, outline=d["color"], fill="", width=2)
+                self.cv.create_polygon(*pts, outline=d["color"], fill="", width=1 if old else 2,
+                                       dash=(4, 3) if old else None)
             if d.get("anchor"):
                 self.cv.create_text(d["anchor"][0] * sx, d["anchor"][1] * sy - 2, text=d["label"], fill=d["color"],
                                     anchor="s", font=("TkDefaultFont", 8, "bold"))
+        if age is not None and (self.overlay.get("dets") or self.overlay.get("cups")):
+            self.cv.create_text(6, self.DH - 4, text=f"识别于 {age:.1f} s 前" + ("（旧）" if old else ""),
+                                fill="#ffab40" if old else "#b2ff59", anchor="sw", font=("TkDefaultFont", 9, "bold"))
         for name, c in self.overlay.get("cups") or []:
             uv = proj(c["rim_xyz_m"])
             if uv:
@@ -1328,7 +1492,9 @@ class RealCupTaskTabUI:
             c = {"clearance_mm": float(self.v_clear.get()), "align_rotate_mm": float(self.v_align.get()),
                  "descent_stop_mm": float(self.v_stop.get()) if self.v_stop.get().strip() else None,
                  "seat_mm": float(self.v_seat.get()), "ring_mm": float(self.v_ring.get()),
-                 "roll_deg": float(self.v_roll.get()), "tip_corr_mm": list(self.tip_corr)}
+                 "roll_deg": float(self.v_roll.get()), "tip_corr_mm": list(self.tip_corr),
+                 "nested_dz_mm": (float(self.v_nested.get()) if hasattr(self, "v_nested") and self.v_nested.get().strip()
+                                  else None)}
         except ValueError:
             raise ValueError("夹爪几何 / 安全参数请填数字")
         if not (2.0 <= c["clearance_mm"] <= 15.0):
@@ -1337,6 +1503,8 @@ class RealCupTaskTabUI:
             raise ValueError("对准高度 0–120 mm（0 = 不单独转腕）")
         if c["descent_stop_mm"] is not None and not (3.0 <= c["descent_stop_mm"] <= 40.0):
             raise ValueError("两段下探停点 3–40 mm（或留空）")
+        if c["nested_dz_mm"] is not None and not (3.0 <= c["nested_dz_mm"] <= 40.0):
+            raise ValueError("实测套叠增量 3–40 mm（或留空）")
         for k_, (lo, hi) in MOUNT_LIMITS.items():
             if not (lo <= c[k_] <= hi):
                 raise ValueError(f"{k_} 超出 {lo}–{hi}")
@@ -1467,6 +1635,8 @@ class RealCupTaskTabUI:
         io = RealIO(arm, self.grip if self.grip.connected else None, lambda: camera_from_tab(self.cam_tab, yolo=ycfg),
                     log=self._log, cfg=mc, motion_allowed=(mode != "plan"))
         self.io = io
+        # V3.71 LIVE OVERLAY: every perception of the task (observe / pick / place / verify) goes to the monitor at once
+        io.on_perception = lambda res, io_=io: self._ui(lambda: self._apply_overlay(res, getattr(io_, "skills", None)))
         touch_ok = bool(self.grip.cfg.get("touch_calibrated"))
         geo = {k: mc.get(k) for k in ("roll_deg", "clearance_mm", "seat_mm", "ring_mm")}
         setup = (f"skill [{skill.get('code')}] · SO-101 偏转 {geo['roll_deg']:+.0f}° · 离杯壁 {geo['clearance_mm']:.0f} mm · "
@@ -1585,7 +1755,11 @@ class RealCupTaskTabUI:
                 raise err
         self._start(f"实机叠杯子 {mode}", job)
 
-    def _set_overlay(self, res, plan, sk=None):
+    def _apply_overlay(self, res, sk):
+        """V3.71 LIVE OVERLAY (Tk thread): contours + labels of this perception, cup names from the skill"""
+        self._set_overlay(res, getattr(sk, "plan", None) if sk is not None else None, sk, now=True)
+
+    def _set_overlay(self, res, plan, sk=None, now=False):
         cups = []
         named = {}
         if sk is not None and getattr(sk, "cam", None):          # the skill's own cup names (tracking)
@@ -1600,7 +1774,11 @@ class RealCupTaskTabUI:
         if plan and plan.get("_wps"):
             pl = {"grasp": plan["_wps"]["grasp"][0], "release": plan["_wps"]["release"][0]}
         dets = overlay_dets(res)
-        self._ui(lambda: self.overlay.update(cups=cups, plan=pl, dets=dets))
+        t_ = time.time()                               # V3.71 LIVE OVERLAY: age of the perception on the monitor
+        if now:
+            self.overlay.update(cups=cups, plan=pl, dets=dets, t=t_)
+        else:
+            self._ui(lambda: self.overlay.update(cups=cups, plan=pl, dets=dets, t=t_))
 
     def copy_log(self):
         try:

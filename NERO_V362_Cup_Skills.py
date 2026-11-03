@@ -185,7 +185,9 @@ class GripperProfile:
                  flips=(False, True), release_gap_max_mm=None, lift_settle_s=0.0,
                  release_tilt_max_deg=0.0, align_rotate_m=0.0, descent_stop_above_rim_m=None,
                  wide_search_below_deg=None, lenient_pick=False, wide_step_deg=15, plan_time_budget_s=None,
-                 remember_angles=False, clear_view_before_verify=False, camera_decides_grip=False):
+                 remember_angles=False, clear_view_before_verify=False, camera_decides_grip=False,
+                 recheck_held_before_place=False, stack_by_cluster=False, perception_retries=0,
+                 recover_after_motion_failure=False, nested_dz_real_mm=None):
         self.name, self.T_tcp_grasp, self.open_mm, self.label = name, np.asarray(T_tcp_grasp, float), float(open_mm), label
         # V3.64: a gripper with a FIXED jaw (SO-101) descends with this clearance between the fixed pad and the wall
         # (grasp frame moved along -y); clamping then slides the 10 g cup onto the fixed jaw
@@ -230,6 +232,17 @@ class GripperProfile:
         # V3.69 CAMERA DECIDES GRIP: after the lift the camera (cup gone from the table) decides; the servo angle only
         # warns (a 0.3-0.5 mm cup wall: clamped 2.62 mm vs empty 2.39 mm in the first real stack)
         self.camera_decides_grip = bool(camera_decides_grip)
+        # V3.71 HELD CUP RECHECK (real): the cup turns / slides a little in the jaws after the clamp -> above the target
+        # the fixed camera measures the HELD cup, the grasp offset is corrected, centred, then lowered
+        self.recheck_held_before_place = bool(recheck_held_before_place)
+        # V3.71 STACK VERIFY BY CLUSTER (real): one cup cluster on the target's place, taller than the target alone
+        # (measured before) = stacked; the model's 25.3 mm nested height is not the real cups' (V3.70: judged NOT_STACKED)
+        self.stack_by_cluster = bool(stack_by_cluster)
+        self.nested_dz_real_mm = None if nested_dz_real_mm in (None, "") else float(nested_dz_real_mm)
+        # V3.71 PERCEPTION RETRY (real): a cup YOLOE missed once (confidence near the threshold) -> look again
+        self.perception_retries = int(perception_retries)
+        # V3.71 RECOVER (real): after a failed motion the arm stops and goes straight up to a safe height
+        self.recover_after_motion_failure = bool(recover_after_motion_failure)
 
         Rg = self.T_tcp_grasp[:3, :3]
         if abs(np.linalg.det(Rg) - 1.0) > 1e-6 or np.abs(Rg.T @ Rg - np.eye(3)).max() > 1e-6:
@@ -1289,6 +1302,8 @@ class CupSkills:
         self.cam_stack = None          # {"upper", "lower", "height_mm", "base_dz_mm", "nested_full"} when nested
         self.cam_single_h = None       # measured height of a single cup (rim bead included) for the nested check
         self.placed = None             # (upper, lower) of the last release
+        self.single_h = {}             # V3.71 STACK VERIFY BY CLUSTER: measured height of each cup alone (before a release)
+        self.placed_xy = None          # V3.71: target cup base x-y at the release
 
     # -- helpers
     def _entry(self, base_xyz, tilt_deg, extra=None):
@@ -1342,6 +1357,8 @@ class CupSkills:
             else:
                 name = cand[0]
             new[name] = self._entry(b, c["tilt_deg"], {"height_mm": c["height_mm"], "fit_rms_mm": c.get("fit_rms_mm")})
+            if self.placed is None and c.get("height_mm"):
+                self.single_h[name] = float(c["height_mm"])
         for n, e in prev.items():                   # not seen now (occluded by the arm): keep the last estimate
             if n not in new:
                 new[n] = dict(e, stale=True)
@@ -1366,6 +1383,12 @@ class CupSkills:
                     "tilt_deg": 0.0, "source": "tcp + grasp offset"}
         if name not in self.cam:
             self._perceive(f"locate {name}")
+        for k_ in range(self.prof.perception_retries):
+            if name in self.cam:
+                break
+            # V3.71 PERCEPTION RETRY: YOLOE missed the cup in this frame (confidence near the threshold) -> look again
+            self.io.emit(f"[INFO] [V3.71 CUP] {name} 这一帧没认出来 → 再识别一次（{k_ + 1}/{self.prof.perception_retries}）")
+            self._perceive(f"locate {name} (retry {k_ + 1})")
         if name not in self.cam:
             raise self._Abort("CUP_NOT_PERCEIVED", {"cup": name, "detail": "the fixed camera does not see this cup"})
         return self.cam[name]
@@ -1489,13 +1512,20 @@ class CupSkills:
         largest joint margin wins (V3.68 kept a 4.9 deg wide result although the narrow search had 6.1 deg)"""
         t0 = time.time()
         dead = t0 + float(self.prof.plan_time_budget_s)
+        enough = max(MIN_MARGIN_RELAXED_DEG, self.prof.wide_search_below_deg or 0.0, MIN_MARGIN_DEG)
         cands = []
+
+        def _good_enough():
+            # V3.71 PLAN EARLY STOP: a candidate with the preferred margin is taken at once (V3.70: every plan used
+            # the whole 15 s budget although the first candidate already had 8 deg)
+            return any(c[1].get("ok") and c[1]["min_joint_margin_deg"] >= enough for c in cands)
         if last is not None:
             k2 = dict(self.k, cup_grasp_rim_angle_deg=last[0], cup_place_rim_angle_deg=last[1])
             cands.append(("last", plan_cup_stack(k2, s["rim"], s["quat"], t["rim"], t["quat"], q_start=q_now,
                                                  profile=self.prof, allow_wide=False, deadline=dead)))
-        cands.append(("narrow", plan_cup_stack(self.k, s["rim"], s["quat"], t["rim"], t["quat"], q_start=q_now,
-                                               profile=self.prof, allow_wide=False, deadline=dead)))
+        if not _good_enough():
+            cands.append(("narrow", plan_cup_stack(self.k, s["rim"], s["quat"], t["rim"], t["quat"], q_start=q_now,
+                                                   profile=self.prof, allow_wide=False, deadline=dead)))
         good = [c for c in cands if c[1].get("ok")]
         best_m = max((c[1]["min_joint_margin_deg"] for c in good), default=-1.0)
         if best_m < max(MIN_MARGIN_RELAXED_DEG, self.prof.wide_search_below_deg or 0.0) and time.time() < dead:
@@ -1644,6 +1674,16 @@ class CupSkills:
                 nxt = ["stop_and_report"]
         elif e.reason in ("SAFETY_LATCH_NOT_CLEARED", "TARGET_UNREACHABLE"):
             nxt = ["stop_and_report"]
+        if (self.prof.recover_after_motion_failure and e.reason in ("MOTION_FAILED", "TARGET_UNREACHABLE")
+                and hasattr(self.io, "recover_after_failure")):
+            # V3.71 RECOVER: stop, then straight up to a safe height before the agent decides (V3.70: the next task
+            # started next to the cups, its first joint path clipped a fence wall)
+            try:
+                rr = self.io.recover_after_failure(f"{tool}: {e.info.get('during') or e.reason}")
+                v["recovered"] = bool(rr.get("ok"))
+            except Exception as exc:
+                v["recovered"] = False
+                v["recover_error"] = str(exc)[:200]
         return self._res(tool, False, v, reason=e.reason, nxt=nxt)
 
     def pick_cup(self, source_cup="cup_1", **_):
@@ -1901,6 +1941,8 @@ class CupSkills:
                           free_fallback=True, q_hint=self.plan["_q"].get("above_target"))
             if self.prof.lift_settle_s > 0:                # V3.64 LIFT SETTLE: the carry swings the cup on the hold too
                 self.io.sleep(self.prof.lift_settle_s)
+            if self.camera and self.prof.recheck_held_before_place:
+                v["held_recheck"] = self._recheck_held(src, target_cup, R_p)
             # 3. lower to the release height; the remaining error (if >= 3 mm) is folded into the same move
             d, s, t = self._centre_error(src, target_cup)
             v["centre_error_high_mm"] = round(float(np.linalg.norm(d)) * 1000, 1)
@@ -1934,12 +1976,69 @@ class CupSkills:
         self.io.sleep(1.5)
         self.held = None
         self.grip_offset = None
+        self.placed_xy = [float(t["base"][0]), float(t["base"][1])]
         self.placed = (src, target_cup)
         self.stage = "RELEASED"
         self._retreat_up()
         st = self._state(src, target_cup)
         v["after_release"] = st
         return self._res(tool, True, v, nxt=["verify_stack"], warnings=warn)
+
+    def _held_measured(self, src, tag):
+        """V3.71 HELD CUP RECHECK: fixed-camera measurement of the cup in the jaws (NERO_V366 'lifted' entry with the
+        cone axis of its lower wall) -> (base x-y, tilt or None, entry) or (None, None, None)"""
+        self._perceive(tag)
+        est = self._cup(src)["base"]
+        best, dmin = None, 1e9
+        for e in (getattr(self, "cam_raw", None) or {}).get("dets") or []:
+            hb = e.get("held_base_xyz_m")
+            if e.get("kind") != "lifted" or not hb:
+                continue
+            d = float(np.hypot(hb[0] - est[0], hb[1] - est[1]))
+            if d < dmin:
+                best, dmin = e, d
+        if best is None:
+            return None, None, None
+        tilt = best.get("held_tilt_deg") if best.get("held_tilt_reliable") else None
+        return np.asarray(best["held_base_xyz_m"][:2], float), tilt, best
+
+    def _recheck_held(self, src, dst, R_p, max_corr_m=0.025, n_max=2):
+        """V3.71 HELD CUP RECHECK: above the target (both cups visible, the held one clear of the target rim) measure
+        the held cup, fold the difference into the grasp offset, centre over the target, measure once more"""
+        out = {"checks": []}
+        for k_ in range(n_max):
+            meas, tilt, e = self._held_measured(src, f"recheck held {src} above {dst} ({k_ + 1})")
+            if meas is None:
+                out["note"] = "夹着的杯子没测到（被挡住 / 点太少）→ 沿用夹取时的偏移"
+                self.io.emit(f"[WARN] [V3.71 CUP] 放置前复查：{out['note']}")
+                break
+            est = np.asarray(self._cup(src)["base"][:2], float)
+            d = meas - est
+            row = {"offset_mm": round(float(np.linalg.norm(d)) * 1000.0, 1), "tilt_deg": tilt,
+                   "fit_rms_mm": e.get("held_axis_rms_mm"), "points": e.get("held_n_wall")}
+            if float(np.linalg.norm(d)) > max_corr_m:
+                row["applied"] = False
+                out["checks"].append(row)
+                self.io.emit(f"[WARN] [V3.71 CUP] 放置前复查：测得夹着的杯子偏 {row['offset_mm']} mm（> "
+                             f"{max_corr_m * 1000:.0f} mm，不可信）→ 不修正，沿用夹取时的偏移")
+                break
+            tcp, qt = self.io.tcp_pose()
+            Rt = quat_xyzw_to_R(qt)
+            self.grip_offset = self.grip_offset + Rt.T @ np.array([d[0], d[1], 0.0])
+            row["applied"] = True
+            out["checks"].append(row)
+            dd, _s, _t = self._centre_error(src, dst)
+            self.io.emit(f"[INFO] [V3.71 CUP] 放置前复查 {k_ + 1}：夹着的 {src} 比夹取时的估计偏 {row['offset_mm']} mm"
+                         + (f"，倾斜 {tilt:.1f}°" if tilt is not None else "") + f" → 偏移已修正；离 {dst} 中心 "
+                         f"{float(np.linalg.norm(dd)) * 1000:.1f} mm")
+            if tilt is not None:
+                out["held_tilt_deg"] = round(float(tilt), 1)
+            if float(np.linalg.norm(dd)) < SMALL_CORRECTION_M:
+                break
+            tcp, _q = self.io.tcp_pose()
+            self._go_line(f"centre {src} over {dst} (V3.71 vision)", [tcp[0] + dd[0], tcp[1] + dd[1], tcp[2]], R_p,
+                          PLACE_SPEED)
+        return out
 
     def _release_sidestep(self, dist_m=0.008):
         """V3.64 RELEASE SIDESTEP (fixed-jaw grippers): the released cup slides down along the FIXED pad and its
@@ -1966,11 +2065,47 @@ class CupSkills:
                 return {"xy_offset_mm": 0.0, "base_dz_mm": st["base_dz_mm"], "tilt_cup1_deg": self.cam[upper]["tilt_deg"],
                         "tilt_cup2_deg": self.cam[lower]["tilt_deg"], "stacked": True, "nested_full": st["nested_full"],
                         "nested": True, "success": True, "source": "fixed camera (one nested cluster)"}
+            if self.prof.stack_by_cluster:
+                byc = self._stack_by_cluster(upper, lower)
+                if byc is not None:
+                    return byc
             return {"stacked": False, "nested_full": False, "nested": False, "success": False,
                     "source": "fixed camera", "clusters": [(c["kind"], c["height_mm"]) for c in
                                                           (getattr(self, "cam_raw", {}) or {}).get("cups", [])]}
         a, b = self._cup(upper), self._cup(lower)
         return SC.cup_task_state(a["rim"], a["quat"], b["rim"], b["quat"], origin="rim")
+
+    def _stack_by_cluster(self, upper, lower, near_m=0.035, min_dz_mm=4.0, max_dz_mm=40.0):
+        """V3.71 STACK VERIFY BY CLUSTER: after the release exactly one cup cluster on the target's place, taller than
+        the target cup alone (measured before the task moved anything) by 4..40 mm (or measured nested height + 8 mm)
+        = stacked; the model's nested-height classes do not fit the real cups (V3.70: nested pair read as one cup)"""
+        if self.placed != (upper, lower) or self.placed_xy is None:
+            return None
+        cups = [c for c in (getattr(self, "cam_raw", None) or {}).get("cups") or []
+                if c.get("base_xyz_m") and c.get("kind") in ("cup", "stack", "unknown")]
+        near = [c for c in cups if math.hypot(c["base_xyz_m"][0] - self.placed_xy[0],
+                                              c["base_xyz_m"][1] - self.placed_xy[1]) <= near_m]
+        h0 = self.single_h.get(lower)
+        info = {"source": "fixed camera (V3.71 one cluster on the target's place)", "near_clusters": len(near),
+                "target_alone_height_mm": h0}
+        if len(near) != 1 or h0 is None or near[0].get("height_mm") is None:
+            return None
+        nd = self.prof.nested_dz_real_mm
+        dz = float(near[0]["height_mm"]) - float(h0)
+        hi = (nd + 8.0) if nd is not None else max_dz_mm
+        others = [c for c in cups if c is not near[0] and c.get("kind") == "cup"]
+        info.update(height_mm=near[0]["height_mm"], base_dz_mm=round(dz, 1),
+                    nested_dz_real_mm=nd, other_single_cups=len(others))
+        if not (min_dz_mm <= dz <= hi) or others:
+            self.io.emit(f"[INFO] [V3.71 CUP] 叠好判断：目标位置的簇高 {near[0]['height_mm']} mm，比 {lower} 单独时 "
+                         f"{h0:.0f} mm 高 {dz:+.1f} mm（要求 {min_dz_mm:.0f}–{hi:.0f} mm）"
+                         + (f"，桌上还有 {len(others)} 只单杯" if others else "") + " → 不算叠好")
+            return dict(info, stacked=False, nested_full=False, nested=False, success=False)
+        full = None if nd is None else bool(dz <= nd + 5.0)
+        self.io.emit(f"[OK] [V3.71 CUP] 叠好判断：目标位置只剩一个簇，高 {near[0]['height_mm']} mm，比 {lower} 单独时高 "
+                     f"{dz:+.1f} mm → 已叠好" + ("" if nd is not None else "（实测套叠增量未填，是否完全套到底不判断）"))
+        return dict(info, xy_offset_mm=0.0, tilt_cup1_deg=None, tilt_cup2_deg=None, stacked=True, nested_full=full,
+                    nested=True, success=True)
 
     def verify_stack(self, upper_cup="cup_1", lower_cup="cup_2", **_):
         if upper_cup not in CUPS or lower_cup not in CUPS or upper_cup == lower_cup:

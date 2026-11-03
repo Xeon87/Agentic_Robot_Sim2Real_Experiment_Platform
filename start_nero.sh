@@ -64,6 +64,13 @@ PY="${NERO_CONSOLE_PYTHON:-/usr/bin/python3}"
 "$PY" -c "import tkinter" 2>/dev/null || die "tkinter missing for $PY (sudo apt install python3-tk), or run the simulation directly: ./start_nero.sh --sim"
 bash -n "$SIM" || die "syntax error in $SIM"
 
+# V3.71 GPU ENV: an inherited CUDA_VISIBLE_DEVICES (e.g. empty) hides the GPU from YOLOE in the console - the
+# simulation launcher already clears it the same way
+if [[ -n "${CUDA_VISIBLE_DEVICES+x}" ]]; then
+  echo "[INFO] V3.71: clearing inherited CUDA_VISIBLE_DEVICES='${CUDA_VISIBLE_DEVICES}' (YOLOE GPU)"
+  unset CUDA_VISIBLE_DEVICES
+fi
+
 ARGS=()
 [[ "${1:-}" == "--real" ]] && ARGS+=(--real)
 cd "$HERE"

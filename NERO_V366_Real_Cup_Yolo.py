@@ -28,7 +28,7 @@ import math
 import os
 import sys
 
-VERSION = "V3.69"
+VERSION = "V3.71"
 MARKER = "V3.66 REAL CUP YOLOE PERCEPTION"
 MARKER_V367 = "V3.67 PERCEPTION ROBUSTNESS"
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -224,6 +224,37 @@ def _tilt(wall, z0, cam_xy, g, top_d):
     return t, True, None
 
 
+def held_geometry(P, T, g, robot_boxes=None):
+    """V3.71 HELD CUP RECHECK: geometry of a cup in the jaws from its mask's depth points (gripper pixels already
+    removed): bottom edge = 1st percentile height, cone axis fitted to the LOWER wall (the jaws hold the rim), tilt
+    from a low and a high band when reliable -> {held_base_xyz_m, held_axis_rms_mm, held_tilt_deg, ...} or {}"""
+    import NERO_V363_Cup_Perception as CP
+    if P is None or len(P) < MIN_PTS:
+        return {}
+    if robot_boxes:
+        keep = ~CP._inside_boxes(P, robot_boxes)
+        if keep.sum() >= MIN_PTS:
+            P = P[keep]
+    zb = float(np.percentile(P[:, 2], 1))
+    wall = P[(P[:, 2] > zb + 0.006) & (P[:, 2] < zb + g["h"] - 0.025)]
+    if len(wall) < MIN_PTS:
+        return {"held_note": f"杯壁点太少（{len(wall)}）"}
+    if len(wall) > FIT_MAX_PTS:
+        wall = wall[np.linspace(0, len(wall) - 1, FIT_MAX_PTS).astype(int)]
+    cam_xy = np.asarray(T, float)[:2, 3]
+    c, rms = CP.fit_axis(wall, zb, cam_xy, g)
+    top_d = min(float(np.percentile(P[:, 2], 98)) - zb, g["h"])
+    tilt, t_ok, t_why = _tilt(wall, zb, cam_xy, g, top_d)
+    out = {"held_base_xyz_m": [round(float(c[0]), 4), round(float(c[1]), 4), round(zb, 4)],
+           "held_axis_rms_mm": round(rms * 1000.0, 2), "held_n_wall": int(len(wall)),
+           "held_tilt_deg": round(float(tilt), 1), "held_tilt_reliable": bool(t_ok and rms <= 0.008)}
+    if not t_ok:
+        out["held_tilt_note"] = t_why
+    if rms > 0.008:
+        out["held_note"] = f"锥面拟合残差 {rms * 1000:.1f} mm"
+    return out
+
+
 def cup_from_mask(mask, depth, K, T, z0, g, ndz_m, robot_boxes=None, fence_poly=None, hull=None):
     """cup geometry of one YOLOE instance mask -> dict (kind, base / rim, heights, tilt, reason)"""
     import NERO_V363_Cup_Perception as CP
@@ -257,6 +288,7 @@ def cup_from_mask(mask, depth, K, T, z0, g, ndz_m, robot_boxes=None, fence_poly=
             <= LIFT_NEAR_M
         if near:
             out.update(kind="lifted", reason="杯子离开桌面（在夹爪里）", n_points=int(n_all))
+            out.update(held_geometry(P, T, g, robot_boxes))
             return out
         out["warnings"].append("杯底附近没有深度（不在夹爪旁，不算被夹起）")
     P = P[(P[:, 2] > z0 + 0.003) & (P[:, 2] < z0 + g["h"] + ndz_m + 0.05)] if len(P) else P
@@ -470,7 +502,7 @@ def summary(res):
     for e in res.get("dets") or []:
         h = e.get("height_mm")
         hd = e.get("height_depth_mm")
-        xy = e.get("base_xyz_m")
+        xy = e.get("base_xyz_m") or e.get("held_base_xyz_m")     # V3.71: the held cup's measured position too
         parts.append(f"{e['det_id']} {e['kind']}" + (f"@({xy[0]:+.3f},{xy[1]:+.3f})" if xy else "")
                      + (f" h={h:.0f}mm" if h is not None else "") + (f"(深度 {hd:.0f})" if hd is not None else "")
                      + f" conf {e.get('conf', 0):.2f}" + (f" [{e['reason']}]" if e.get("reason") else ""))
