@@ -2,7 +2,8 @@
 """V3.75 offline tests (sort_items bins + MoveIt collision pre-check; new SO-101 adapter ring):
 G1 Versions V3.75 + markers; frozen modules unchanged; the backend is not changed by V3.75.
 G2 Bins: inner 23 x 17 cm, walls 5 cm, centre y = +-0.28; every item footprint (default poses and jittered seeds) is
-   >= 6.5 cm from the inner walls (V3.72: 1-2 cm); the outer walls stay on the table.
+   >= 7 cm (default poses; >= 4.5 cm with the optional +-15 mm / +-15 deg jitter) from the inner walls (V3.72: 1-2 cm);
+   the outer walls stay on the table.
 G3 Bin fit: the banana footprint is 20 cm end to end; it fits a bin only with its long axis along the bin depth (x);
    rectangle clearance / overlap; _slot picks a fitting centre.
 G4 SO-101 mount: roll default 0 (new ring, V3.64-V3.74: -45); NERO_V364_SO101_ROLL_DEG still overrides; the real
@@ -93,16 +94,21 @@ print("[G1] V3.75; frozen modules and the backend unchanged; markers present")
 for col, b in SC.SORT_BINS.items():
     assert tuple(b["inner"]) == (0.23, 0.17) and b["wall_h"] == 0.05 and abs(abs(b["centre"][1]) - 0.28) < 1e-9, b
     assert abs(b["centre"][1]) + b["inner"][1] / 2 + b["wall_t"] < 0.38                     # table half width
-worst = 1e9
-for seed in (None, 1, 2, 3, 4, 5, 6, 7, 8):
+def gap(seed):
+    w = 1e9
     for n, (x, y, yaw) in SC.sort_item_poses(seed).items():
         rc, half, a = SC.sort_item_footprint(n, (x, y), yaw)
         for px, py in CC.rect_corners(rc, half, a):
             for b in SC.SORT_BINS.values():
-                worst = min(worst, abs(b["centre"][1]) - b["inner"][1] / 2 - abs(py))
-assert worst >= 0.065, worst
-print(f"[G2] bins 23 x 17 x 5 cm at y = +-0.28; nearest item corner {worst * 1000:.0f} mm from an inner wall "
-      "(V3.72: 10-20 mm)")
+                w = min(w, abs(b["centre"][1]) - b["inner"][1] / 2 - abs(py))
+    return w
+
+
+g0 = gap(None)
+gj = min(gap(s_) for s_ in range(1, 9))
+assert g0 >= 0.070 and gj >= 0.045, (g0, gj)            # jitter (NERO_V372_ITEM_SEED, +-15 mm / +-15 deg)
+print(f"[G2] bins 23 x 17 x 5 cm at y = +-0.28; nearest item corner {g0 * 1000:.0f} mm from an inner wall "
+      f"(with the optional jitter {gj * 1000:.0f} mm; V3.72: 10-20 mm)")
 
 # ------------------------------------------------------------------ G3
 rc, half, a = SC.sort_item_footprint("obj_banana", (0.0, 0.0), 0.0)

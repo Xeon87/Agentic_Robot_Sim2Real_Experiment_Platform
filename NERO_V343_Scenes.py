@@ -617,7 +617,7 @@ SORT_ITEM_NAMES = tuple(SORT_ITEMS)
 # two open bins; the robot faces -x, so y < 0 is the robot's left
 # V3.75 SMALLER BINS FARTHER OUT (user, V3.74 run: "bin 太大，都贴到物体上了"): V3.72 inner 24 x 24 cm at y = +-0.25 left
 # only 1-2 cm between the inner walls (|y| = 0.125) and the items (|y| up to 0.115); now inner 23 (x, depth) x 17 (y) cm,
-# walls 5 cm, centre y = +-0.28 -> inner walls at |y| = 0.195 (>= 7 cm from every item), outer walls 9 mm inside the table
+# walls 5 cm, centre y = +-0.28 -> inner walls at |y| = 0.195 (>= 7 cm from every item; ~5 cm with the seed jitter), outer walls 9 mm inside the table
 # edge.  23 cm depth: the banana is 20 cm end to end (chord 16.7 cm + the 17 mm capsule radius at each end) and lies
 # along x in the bin; 17 cm width: two items side by side (banana 6.4 + apple 7.4 cm).
 SORT_BINS = {
