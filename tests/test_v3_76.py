@@ -19,6 +19,9 @@ I9  Launcher timed stop: v376_stop ends processes that ignore INT / TERM (and th
 I10 Twin 4/4 and the backend path with the MoveIt emulation 4/4 with the -90 mount and soft pads; the held carry is
     stretched HELD_SLOW x.
 I11 Release folder unchanged.
+I12 -90 mount place planning: pick_object has a `box` argument (strict schema, red / blue / any); the pick reports the
+    box it planned for; in the default layout the banana is laid exactly lengthwise (item yaw 0 / 180 deg) and the
+    apple still fits next to it (4/4, I10); one place planner (_plan_place) is used by the pick-time check too.
 """
 import hashlib
 import math
@@ -276,6 +279,19 @@ if HAVE_MJ:
           f"stretched {S.HELD_SLOW}x)")
 else:
     print("[I5-I10 MuJoCo parts] skipped: MuJoCo not installed")
+
+# ------------------------------------------------------------------ I12
+pk = [t_ for t_ in S.SORT_TOOLS if t_["name"] == "pick_object"][0]["parameters"]
+assert pk["required"] == ["item_id", "box"] and pk["properties"]["box"]["enum"] == ["red", "blue", "any"]
+assert "pick_object(item_id, box)" in S.SORT_SYSTEM_INSTRUCTIONS
+src72 = (ROOT / "NERO_V372_Sort_Skills.py").read_text(encoding="utf-8")
+assert src72.count("self._plan_place(") == 2 and "V3.76 ONE PLACE PLANNER" in src72 and "V3.76 EXACT LENGTHWISE" in src72
+if HAVE_MJ:
+    pv = [o for o in out if o.get("tool") == "pick_object"][0]["physical_verification"]
+    assert pv.get("planned_for_box") == "red", pv
+    pb = [o for o in out if o.get("tool") == "place_in_box"][0]["physical_verification"]
+    assert abs(math.sin(math.radians(pb["item_yaw_deg"]))) < 0.02, pb
+    print(f"[I12] pick_object(item_id, box); banana planned for the red bin, laid at {pb['item_yaw_deg']} deg (lengthwise)")
 
 SNAP1 = snapshot()
 assert SNAP1 == SNAP0, [k_ for k_ in SNAP0 if SNAP0[k_] != SNAP1.get(k_)]
