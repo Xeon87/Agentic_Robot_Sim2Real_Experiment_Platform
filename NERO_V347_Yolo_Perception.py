@@ -33,7 +33,7 @@ import os
 import threading
 import time
 
-VERSION = "V3.72"
+VERSION = "V3.73"
 HERE = os.path.dirname(os.path.realpath(__file__))
 DEFAULT_MODEL_DIR = os.environ.get("NERO_YOLO_DIR") or os.path.expanduser("~/Downloads/objectmodels")
 DEFAULT_MODEL = "yoloe-26s-seg.pt"

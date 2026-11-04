@@ -17,8 +17,16 @@ FRUIT_WORDS = ("banana", "apple", "orange", "pear", "grape")
 
 
 class SortCore(HB.FakeCore):
+    """V3.73: object_pose exactly like the backend (NERO_V71 skill core): TF frame "sim_obj_" + name, published for
+    "sim_" + every key of NERO_V343_Scenes.tf_body_map() -> an unknown frame raises the backend's TF error"""
     def object_pose(self, name):
-        p, qw = self.tw.object_pose(name)
+        frame = f"sim_obj_{name}"
+        bmap = SC.tf_body_map()
+        key = frame[len("sim_"):]
+        if key not in bmap:
+            raise RuntimeError(f"TF unavailable: base_link -> {frame}: \"{frame}\" passed to lookupTransform argument "
+                               "source_frame does not exist. ")
+        p, qw = self.tw.object_pose(bmap[key])
         return p, [qw[1], qw[2], qw[3], qw[0]]
 
 

@@ -39,7 +39,7 @@ import numpy as np                           # noqa: E402
 import NERO_V343_Scenes as SC                # noqa: E402
 import NERO_V362_Cup_Skills as CK            # noqa: E402
 
-VERSION = "V3.72"
+VERSION = "V3.73"
 MARKER = "V3.72 SORT ITEMS AGENT"
 SCENE = "sort_items"
 ITEM_IDS = {f"item_{i + 1}": n for i, n in enumerate(SC.SORT_ITEM_NAMES)}
@@ -64,6 +64,11 @@ ABOVE_WALL_M = 0.035         # item bottom this far above the bin walls while ca
 SLOT_DX_M = 0.045            # slots: bin centre -+ 45 mm along the closing direction (items lie side by side)
 JAW_CLEAR_M = 0.008          # open jaws keep this from every other item (candidate filter)
 PREFERRED_MARGIN_DEG = 8.0
+
+
+def tf_name(body):
+    """V3.73 TF NAME: MuJoCo body "obj_banana" -> the name the backend's object_pose() expects ("banana")"""
+    return body[4:] if body.startswith("obj_") else body
 
 
 def grasp_R(phi):
@@ -100,7 +105,10 @@ class SortBackendIO(CK.BackendIO):
     """the V3.62 backend adapter + item poses from TF (sim_obj_*) + the SO-101 profile"""
 
     def object_pose(self, body):
-        p, q = self.core.object_pose(body)
+        # V3.73 TF NAME: the backend's object_pose(name) looks up TF "sim_obj_" + name and the scene publishes
+        # "sim_" + body ("sim_obj_banana") -> pass the name WITHOUT "obj_" (V3.72 sent "obj_banana" ->
+        # "sim_obj_obj_banana" does not exist: observe_scene failed in the first simulation run)
+        p, q = self.core.object_pose(tf_name(body))
         return [float(v) for v in p], [float(q[3]), float(q[0]), float(q[1]), float(q[2])]
 
     def gripper_profile(self):
@@ -115,7 +123,11 @@ class SortSkills(CK.CupSkills):
     STAGES = ("IDLE", "OBSERVED", "HOLDING", "PLACED", "DONE")
 
     def __init__(self, io, skill=None):
-        super().__init__(io, None, skill or {"code": "SI", "short_name": "Sort Items", "skill_id": "sort_items_top_grasp"})
+        # V3.73: the cup knobs are not used here; a release gap at the SO-101 cap keeps the cup message
+        # "[V3.64 CUP] so101: release gap capped ..." out of the sorting log
+        cap = getattr(io, "gripper_profile", lambda: CK.OFFICIAL_PROFILE)().release_gap_max_mm
+        knobs = dict(CK.CUP_KNOB_DEFAULTS, **({"cup_release_gap_mm": float(cap)} if cap is not None else {}))
+        super().__init__(io, knobs, skill or {"code": "SI", "short_name": "Sort Items", "skill_id": "sort_items_top_grasp"})
         self.skill = skill or {"code": "SI", "short_name": "Sort Items", "skill_id": "sort_items_top_grasp"}
         self.held = None                 # item id
         self.held_off = None             # item centre in the TCP frame (measured after the lift)
@@ -483,10 +495,16 @@ Procedure:
 
 
 def _score(history, elapsed_s, rounds, skill, task):
-    """s = share of the items that the agent put into a bin and that check_bins / the last state shows in that bin"""
-    placed = {}
+    """V3.73 SCORE BY THE AGENT'S ITEMS: s = items the agent put into a bin AND still there (last check_bins) /
+    items the agent decided to move (every item it called pick_object for).  V3.72 divided by all 4 items, so a task
+    that sorts only the fruit could never reach 1.0."""
+    placed, tried = {}, []
     for h in history:
         r = h["result"] if isinstance(h["result"], dict) else {}
+        if h["tool"] == "pick_object":
+            iid = (r.get("physical_verification") or {}).get("item") or (h.get("args") or {}).get("item_id")
+            if iid in ITEM_IDS and iid not in tried:
+                tried.append(iid)
         if h["tool"] == "place_in_box" and r.get("ok"):
             pv = r.get("physical_verification") or {}
             placed[pv.get("item")] = pv.get("box")
@@ -495,16 +513,18 @@ def _score(history, elapsed_s, rounds, skill, task):
         if h["tool"] == "check_bins" and isinstance(h["result"], dict) and h["result"].get("ok"):
             last = (h["result"].get("physical_verification") or {}).get("items")
     good = sum(1 for k, b in placed.items() if last is None or (last.get(k) or {}).get("in_bin") == b)
-    s = good / float(len(ITEM_IDS))
+    total = len(tried)
+    s = good / float(total) if total else 0.0
     t_min = max(0.0, float(elapsed_s)) / 60.0
     z = int(rounds)
     y = s / (t_min * z) * 100.0 if t_min > 0 and z > 0 else 0.0
     line = (f"[V3.72 SKILL SCORE] skill={skill.get('code')} {skill.get('short_name')} | scene=sort_items | "
-            f"s={s:.2f} ({good}/{len(ITEM_IDS)} items in the bin the agent chose) | t={t_min:.2f} min | "
+            f"s={s:.2f} ({good}/{total} items the agent moved are in the bin it chose) | t={t_min:.2f} min | "
             f"z={z} LLM rounds | Y = s/(t*z)*100 = {y:.3f}")
     return {"skill_code": skill.get("code"), "skill_name": skill.get("short_name"), "skill_id": skill.get("skill_id"),
-            "s": s, "done": good, "total": len(ITEM_IDS), "basis": "items in the chosen bin", "t_min": round(t_min, 4),
-            "z": z, "Y": round(y, 4), "status": "SUCCESS" if good == len(ITEM_IDS) else ("PARTIAL" if good else "FAILED"),
+            "s": s, "done": good, "total": total, "basis": "items the agent moved, in the chosen bin",
+            "t_min": round(t_min, 4), "z": z, "Y": round(y, 4),
+            "status": "SUCCESS" if total and good == total else ("PARTIAL" if good else "FAILED"),
             "line": line}
 
 
@@ -576,7 +596,7 @@ def run_sort_task(agent, skills, task, model, api_key="", reasoning_effort="low"
                     res = skills.run_tool(name, args)
                 emit(f"[LLM TOOL RESULT #{steps}] {name} | elapsed={time.perf_counter() - t_tool:.2f}s | "
                      + json.dumps({k: v for k, v in res.items() if k != "scene"}, ensure_ascii=False)[:1500])
-                history.append({"tool": name, "result": res})
+                history.append({"tool": name, "args": args, "result": res})
                 outs.append({"type": "function_call_output", "call_id": str(call.get("call_id", "")),
                              "output": json.dumps(res, ensure_ascii=False, default=str)})
             payload = {"model": str(model), "instructions": SORT_SYSTEM_INSTRUCTIONS,

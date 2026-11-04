@@ -1,3 +1,12 @@
+## V3.73 (2026-11-04) — sort_items 仿真首跑失败修复（TF 帧名）+ 测试替身按后端真实规则查 TF + 得分按 Agent 处理的物体
+- **失败原因**：后端查物体位姿时会在名字前加 `sim_obj_`（`NERO_V71_Hybrid_GPU_Planner_Core.object_pose` → `sim_obj_{name}`），场景发布的帧是 `sim_obj_banana`；V3.72 的 `SortBackendIO` 传了带前缀的 `obj_banana`，查的是不存在的 `sim_obj_obj_banana`，`observe_scene` 两次失败，任务停止。你用 `tf2_echo base_link sim_obj_banana` 确认了正确帧名（香蕉在 (-0.310, -0.085, 0.035)）。
+- **修复**：`SortBackendIO.object_pose` 先去掉 `obj_` 前缀（`tf_name("obj_banana") = "banana"`）。
+- **测试漏洞修复**：`tests/v372_backend_twin.py` 的假后端原来直接按物体全名查，没有模拟后端加前缀的规则，所以替身里 4/4 而真实仿真失败。现在它严格按后端规则拼 `sim_obj_<名字>`、再按场景的 TF 表找物体，找不到就抛和后端一样的 TF 错误；`test_v3_73` E2 先用 V3.72 的名字重现你的失败，再验证修复。
+- **日志**：分类任务不再打印叠杯子的 `[V3.64 CUP] so101: release gap capped ...`。
+- **得分**：s = Agent 处理过（调用过 pick_object）的物体中、最后留在它所选框里的比例。V3.72 固定除以 4，只分水果的任务最高只能 0.5。
+- **测试**：新增 `tests/test_v3_73.py`（E1–E5）；老测试版本白名单加 V3.73。
+- **只在替身里验证过，完整仿真链路待你复测**（同样的任务再跑一次，`observe_scene` 应返回 4 个物体）。
+
 ## V3.72 (2026-11-03) — 第 5 个仿真场景 sort_items：物品分类放入红框 / 蓝框（SO-101 夹爪 + LLM Agent 按提示词分类）
 - **场景**（`NERO_V343_Scenes.py`，控制台场景下拉框选 `sort_items`）：桌上一根香蕉、一个苹果、一个电脑鼠标、一支粗马克笔；机械臂左侧（y < 0）一个红色敞口框、右侧一个蓝色敞口框（内尺寸 24 × 24 cm、壁高 6 cm）。夹爪固定为 SO-101（与 stack_cups_so101 同一套模型和安装参数）。框壁 / 框底进 MoveIt 碰撞体，并和保险箱墙一样受保护（机械臂碰到即触发安全停）。`NERO_V372_ITEM_SEED` 可给物体位置加 ±15 mm / ±15° 扰动。
 - **Agent 技能**（新模块 `NERO_V372_Sort_Skills.py`，复用叠杯子技能的运动 / 安全 / 夹爪档案代码）：

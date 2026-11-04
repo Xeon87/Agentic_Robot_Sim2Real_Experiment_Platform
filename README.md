@@ -1,4 +1,11 @@
-# NERO V3.72 — single-folder release
+# NERO V3.73 — single-folder release
+
+**V3.73**（sort_items 首跑失败修复）
+1. 修复分类场景查物体位姿用错 TF 帧名（`sim_obj_obj_banana` → `sim_obj_banana`），`observe_scene` 不再失败。
+2. 测试替身改为按后端真实规则查 TF，同类错误以后会在测试里直接暴露。
+3. 分类任务不再打印叠杯子的提示；得分按 Agent 实际处理的物体计算。
+4. **只在替身里验证过，完整仿真链路待复测**。
+
 
 **V3.72**（第 5 个仿真场景：物品分类放入红框 / 蓝框 · SO-101 夹爪）
 1. 控制台仿真页的场景下拉框选 `sort_items`：桌上有香蕉、苹果、鼠标、粗马克笔，左边红框、右边蓝框。
