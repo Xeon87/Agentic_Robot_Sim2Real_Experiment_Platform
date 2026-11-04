@@ -1041,6 +1041,7 @@ class NeroLLMAgent:
         self._last_final_text = ""
         t_task = time.perf_counter()
         tool_count = 0
+        v360_rounds = 0          # V3.60 SKILL SCORE: z = completed LLM request/response round trips of this task
         multi_object_guard_nudges = 0
         v305_exec_fault_streak = 0
         v305_exec_halt = None
@@ -1219,6 +1220,7 @@ class NeroLLMAgent:
                 )
                 t_req = time.perf_counter()
                 response = self._post_responses(payload, api_key)
+                v360_rounds += 1
                 self._log_usage(response, model)
                 self._last_response_id = response.get("id")
                 calls = self._function_calls(response)
@@ -1483,6 +1485,19 @@ class NeroLLMAgent:
                                       v342_ext, model)
             except Exception as _st342:
                 self.emit(f"[V3.42 TASK STATS] could not be computed: {_st342}")
+            try:                 # V3.60 SKILL SCORE (after the task summary + stats)
+                try:
+                    _req360 = self._task_object_names(task, None) or []
+                except Exception:
+                    _req360 = []
+                _tn360 = str(task).lower().replace(" ", "_")
+                _named360 = [n for n in _req360 if str(n).startswith("egg_") and n in _tn360]
+                _sc360 = _v360_skill_score(v29_tool_history, time.perf_counter() - t_task, v360_rounds,
+                                           requested=_req360, status=_status342, named=_named360)
+                self.emit(_sc360["line"])
+                _v360_append_score(_sc360, task, model)
+            except Exception as _e360:
+                self.emit(f"[V3.60 SKILL SCORE] could not be computed: {_e360}")
             try:
                 if (not str(_status342).startswith("SUCCESS")
                         and os.environ.get("NERO_V342_FAILURE_ANALYSIS", "1") != "0"):
@@ -1572,6 +1587,78 @@ def _v342_failure_analysis(self, task, model, api_key, effort, history, final_te
 
 NeroLLMAgent._v342_emit_stats = _v342_emit_stats
 NeroLLMAgent._v342_failure_analysis = _v342_failure_analysis
+
+
+# ============================================================
+# V3.60 SKILL SCORE
+# ------------------------------------------------------------
+# One dimensionless reference value per simulation task for the skill (strategy profile) it ran with:
+#   s = task success fraction = eggs verified in a slot / task eggs, e.g. 3 of 4 -> 0.75.  Task eggs = the eggs named
+#       in the task ("egg_1 and egg_3"), otherwise ("all eggs") the eggs outside the holder at the first observe_scene,
+#       t = task duration in minutes (start of run_task -> end, success or not),
+#   z = number of LLM request/response round trips,   Y = s / (t * z) * 100   (Y = 0 when t*z = 0).
+# The skill comes from NERO_V360_SKILL_CODE / _NAME / _ID set by the console at simulation start.
+# ============================================================
+def _v360_skill_score(history, elapsed_s, rounds, requested=(), status=None, named=()):
+    verified = set()
+    first_eggs = None
+    for item in history or []:
+        tool = str((item or {}).get("tool", ""))
+        res = (item or {}).get("result") or {}
+        if not isinstance(res, dict):
+            continue
+        if tool == "observe_scene" and first_eggs is None and isinstance(res.get("scene"), dict):
+            objs = res["scene"].get("objects") or {}
+            eggs = [str(n) for n, o in objs.items()
+                    if isinstance(o, dict) and (o.get("category") == "egg" or str(n).startswith("egg"))
+                    and not str(o.get("location") or "").startswith("egg_holder")]
+            if eggs or objs:
+                first_eggs = eggs
+        if tool in ("verify_object_in_slot", "verify_object_in_bin") and res.get("ok"):
+            pv = res.get("physical_verification") if isinstance(res.get("physical_verification"), dict) else {}
+            obj = res.get("object_name") or pv.get("object_name") or pv.get("object")
+            if obj:
+                verified.add(str(obj))
+    req = [str(x) for x in (requested or []) if x and not str(x).startswith("<")]
+    named = [str(x) for x in (named or [])]
+    if named:
+        total, done, basis = len(named), len(verified & set(named)), "named eggs"
+    elif first_eggs:
+        total, done, basis = len(first_eggs), len(verified & set(first_eggs)), "eggs"
+    elif req:
+        total, done, basis = len(req), len(verified & set(req)), "requested objects"
+    else:
+        ok_ = str(status or "").startswith("SUCCESS")
+        total, done, basis = 1, (1 if ok_ else 0), f"task status {status}"
+    s_frac = done / float(total) if total else 0.0
+    t_min = max(0.0, float(elapsed_s)) / 60.0
+    z = int(rounds or 0)
+    y = (s_frac / (t_min * z) * 100.0) if (t_min > 0.0 and z > 0) else 0.0
+    code = os.environ.get("NERO_V360_SKILL_CODE") or "EB"
+    name = os.environ.get("NERO_V360_SKILL_NAME") or "Egg Baseline"
+    sid = os.environ.get("NERO_V360_SKILL_ID") or "egg_grasp_v345_baseline"
+    injected = bool(os.environ.get("NERO_V360_SKILL_CODE"))
+    line = (f"[V3.60 SKILL SCORE] skill={code} {name}{'' if injected else ' (not injected: backend defaults = EB)'} | "
+            f"s={s_frac:.2f} ({done}/{total} {basis}) | t={t_min:.2f} min | z={z} LLM rounds | "
+            f"Y = s/(t*z)*100 = {y:.3f}" + ("" if (t_min > 0.0 and z > 0) else " (t*z = 0 -> Y = 0)"))
+    return {"skill_code": code, "skill_name": name, "skill_id": sid, "skill_injected": injected,
+            "s": round(s_frac, 4), "done": done, "total": total, "basis": basis,
+            "t_min": round(t_min, 4), "z": z, "Y": round(y, 4), "status": str(status), "line": line}
+
+
+def _v360_append_score(score, task, model):
+    """append one JSON line to logs/v360_skill_scores.jsonl (runtime folder, never part of the release)."""
+    try:
+        d = os.path.join(os.path.dirname(os.path.realpath(__file__)), "logs")
+        os.makedirs(d, exist_ok=True)
+        rec = dict(score)
+        rec.pop("line", None)
+        rec.update({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "task": str(task)[:300], "model": str(model),
+                    "scene": os.environ.get("NERO_SCENE", "fill_egg_holder")})
+        with open(os.path.join(d, "v360_skill_scores.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 # Backward compatibility for private/local V2-5.x launchers that imported the
 # historical class name.  New public code should import ``NeroLLMAgent``.

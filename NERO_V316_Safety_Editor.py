@@ -88,6 +88,7 @@ class SafetyEditorUI(CS._WorkerMixin):
         self._build(parent)
         self._fill_fields()
         pipe.safety_fn = self.safety
+        pipe.apply_walls_fn = lambda walls=None, wait=True: self.on_apply(walls=walls, wait=wait)
         if self.opened_last:
             self.log(f"[OK] [V3.19 safety] 已打开上次使用的安全区文件：{self.opened_last}")
         if self.ws.get("migrated_from"):
@@ -1259,10 +1260,21 @@ class SafetyEditorUI(CS._WorkerMixin):
                     self.pipe.log(f"[INFO] [V3.22 teach] 先竖直抬起工具点到桌面上方 {(z_up - f['z_table']) * 1000:.0f} mm")
                     r1 = self.pipe.move_and_settle(model, q1, speed, label="退出示教 抬起")
                     if not r1.get("ok"):
-                        return r1
+                        self.pipe.log(f"[WARN] [V3.53 teach] 竖直抬起受限（{r1.get('error')}）→ 改直接回零位")
                 else:
                     self.pipe.log(f"[WARN] [V3.22 teach] 竖直抬起 IK 失败（{(err or 0) * 1000:.0f} mm）→ 直接回零位")
-        return self.pipe.move_and_settle(model, [0.0] * 7, speed, label="退出示教回零")
+        r_home = self.pipe.move_and_settle(model, [0.0] * 7, speed, label="退出示教回零")
+        if not r_home.get("ok"):
+            self.pipe.log("[INFO] [V3.53 teach] 起点靠近围墙 → 临时撤下 XY 围墙回零位（保留桌面防碰）")
+            walls_off = f.get("rule") == "A" and f.get("walls_to_moveit", True) and bool(CS.wall_boxes(self.valid_ws))
+            if walls_off:
+                self.on_apply(walls=False, wait=True)
+            try:
+                r_home = self.pipe.move_and_settle(model, [0.0] * 7, speed, label="退出示教回零", ignore_xy_fence=True)
+            finally:
+                if walls_off:
+                    self.on_apply(wait=True)
+        return r_home
 
     # ================================================================ V3.19 zone files
     def _zone_dir(self):

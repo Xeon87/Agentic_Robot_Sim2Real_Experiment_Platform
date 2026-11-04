@@ -101,17 +101,37 @@ restore_kinematics(){
     KIN_BACKED_UP=0
   fi
 }
+# V3.76 TIMED STOP: the backend only shuts its ROS context down on SIGTERM (rclpy) and keeps its GUI open, so the V3.12
+# cleanup waited for it until the console's 25 s SIGKILL.  Now every process (group) gets INT, then TERM, then KILL,
+# each step bounded (NERO_V376_STOP_STEP_S, default 2.5 s) -> the whole stop takes <= ~8 s.
+v376_alive(){ local p; for p in "$@"; do [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null && return 0; done; return 1; }
+v376_stop(){                      # v376_stop <label> <pid> [group]  (group=1: signal the whole process group -pid)
+  local label="$1" pid="$2" grp="${3:-0}" sig t step="${NERO_V376_STOP_STEP_S:-2.5}"
+  [[ -z "$pid" ]] && return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  local kids; kids="$(pgrep -P "$pid" 2>/dev/null | tr '\n' ' ')"     # e.g. the backend's camera processes
+  for sig in INT TERM KILL; do
+    if [[ "$grp" == "1" ]]; then kill -s "$sig" -- "-$pid" 2>/dev/null || kill -s "$sig" "$pid" 2>/dev/null
+    else kill -s "$sig" "$pid" 2>/dev/null; fi
+    t=0
+    while kill -0 "$pid" 2>/dev/null && awk "BEGIN{exit !($t < $step)}"; do sleep 0.1; t=$(awk "BEGIN{print $t+0.1}"); done
+    kill -0 "$pid" 2>/dev/null || { [[ "$sig" != "INT" ]] && echo "[V3.76 STOP] $label stopped after SIG$sig"; break; }
+  done
+  [[ "$grp" == "1" ]] && kill -s KILL -- "-$pid" 2>/dev/null     # leftovers of the group (rviz2, move_group, ...)
+  [[ -n "$kids" ]] && kill -s KILL $kids 2>/dev/null              # children of a single process (not a group)
+  wait "$pid" 2>/dev/null
+  return 0
+}
 cleanup(){
   set +e
-  status INFO "Shutdown: stopping NERO processes"
-  [[ -n "$TRAC_MOVEIT_PID" ]] && { kill -- "-$TRAC_MOVEIT_PID" 2>/dev/null || kill "$TRAC_MOVEIT_PID" 2>/dev/null; }
-  [[ -n "$BIO_MOVEIT_PID" ]] && { kill -- "-$BIO_MOVEIT_PID" 2>/dev/null || kill "$BIO_MOVEIT_PID" 2>/dev/null; }
-  [[ -n "$BACKEND_PID" ]] && kill "$BACKEND_PID" 2>/dev/null
-  [[ -n "$GPU_PID" ]] && kill "$GPU_PID" 2>/dev/null
-  for p in "$TRAC_MOVEIT_PID" "$BIO_MOVEIT_PID" "$BACKEND_PID" "$GPU_PID"; do
-    [[ -n "$p" ]] && wait "$p" 2>/dev/null
-  done
+  status INFO "Shutdown: stopping NERO processes (V3.76 timed stop: INT -> TERM -> KILL)"
+  v376_stop "TRAC MoveIt" "$TRAC_MOVEIT_PID" 1 &
+  v376_stop "BioIK MoveIt + RViz" "$BIO_MOVEIT_PID" 1 &
+  v376_stop "backend (MuJoCo + GUI)" "$BACKEND_PID" 0 &
+  v376_stop "cuRobo GPU server" "$GPU_PID" 0 &
+  wait
   restore_kinematics
+  status INFO "V3.76 stop complete"
 }
 # V3.12: INT/TERM exit, EXIT runs cleanup once.  (The console stops the sim by
 # sending SIGINT to this script only; with the old "trap cleanup INT" bash ran
@@ -146,13 +166,29 @@ else
   fi
 fi
 python3 -m py_compile "$BACKEND" "$AGENT" "$CORE" "$CLIENT" "$GPU_SERVER" "$CAMERA" "$WRIST" "$FIXED331" "$SCENES343" || fatal "py_compile failed"
+# V3.60 SIM SKILL TAB: the simulation GUI imports the skill module (and the console's fixed-label helper)
+python3 -m py_compile "$HERE/NERO_V359_Strategy.py" "$HERE/NERO_V314_Joint_Control.py" || fatal "py_compile failed: NERO_V359_Strategy.py / NERO_V314_Joint_Control.py (V3.60 SIM SKILL TAB)"
+# V3.62 STACK CUPS AGENT: RUN TASK in the stack_cups scene imports the cup skills (+ the URDF IK planner they use)
+python3 -m py_compile "$HERE/NERO_V362_Cup_Skills.py" "$HERE/NERO_V361_Cup_Stack.py" "$HERE/NERO_V315_Consistency_Safety.py" || fatal "py_compile failed: NERO_V362_Cup_Skills.py / NERO_V361_Cup_Stack.py / NERO_V315_Consistency_Safety.py (V3.62 STACK CUPS AGENT)"
+# V3.63 FIXED D435i CUP PERCEPTION: the fixed camera process imports the cup perception in the stack_cups scene
+python3 -m py_compile "$HERE/NERO_V363_Cup_Perception.py" || fatal "py_compile failed: NERO_V363_Cup_Perception.py (V3.63 FIXED D435i CUP PERCEPTION)"
 status OK "py_compile PASS"
 status INFO "MuJoCo model (external): $MODEL_FILE sha256=$(sha256sum "$MODEL_FILE" | cut -c1-16)"
 # V3.44 MUJOCO SCENE: chosen before start (NERO console drop-down -> NERO_SCENE); unset = fill_egg_holder
 SCENE344="${NERO_SCENE:-fill_egg_holder}"
 case "$SCENE344" in
-  fill_egg_holder|store_in_safe) ;;
-  *) fatal "Unknown NERO_SCENE='$SCENE344' (known: fill_egg_holder, store_in_safe)";;
+  fill_egg_holder|store_in_safe|stack_cups) ;;   # V3.61 STACK CUPS SCENE
+  stack_cups_so101)                              # V3.64 SO-101 GRIPPER ON NERO (variant of stack_cups)
+    python3 -m py_compile "$HERE/NERO_V364_SO101_Gripper.py" || fatal "py_compile failed: NERO_V364_SO101_Gripper.py (V3.64 SO-101 GRIPPER)"
+    for f364 in wrist_roll_follower_so101_v1.stl moving_jaw_so101_v1.stl sts3215_03a_v1.stl; do
+      [[ -f "$HERE/assets/so101/$f364" ]] || fatal "Missing SO-101 mesh assets/so101/$f364 (V3.64 SO-101 GRIPPER)"
+    done ;;
+  sort_items)                                    # V3.72 SORT ITEMS SCENE (SO-101 gripper, skills NERO_V372_Sort_Skills.py)
+    python3 -m py_compile "$HERE/NERO_V364_SO101_Gripper.py" "$HERE/NERO_V372_Sort_Skills.py" "$HERE/NERO_V375_Collision_Check.py" || fatal "py_compile failed: NERO_V364_SO101_Gripper.py / NERO_V372_Sort_Skills.py / NERO_V375_Collision_Check.py (V3.72 SORT ITEMS, V3.75 COLLISION PRE-CHECK)"
+    for f364 in wrist_roll_follower_so101_v1.stl moving_jaw_so101_v1.stl sts3215_03a_v1.stl; do
+      [[ -f "$HERE/assets/so101/$f364" ]] || fatal "Missing SO-101 mesh assets/so101/$f364 (V3.72 SORT ITEMS)"
+    done ;;
+  *) fatal "Unknown NERO_SCENE='$SCENE344' (known: fill_egg_holder, store_in_safe, stack_cups, stack_cups_so101, sort_items)";;
 esac
 export NERO_SCENE="$SCENE344"
 status INFO "V3.44 MuJoCo scene: $SCENE344 (chosen in the NERO console before start; default fill_egg_holder)"

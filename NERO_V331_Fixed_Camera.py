@@ -82,6 +82,17 @@ def fixed_camera_process_main(qpos_arr, meta_arr, model_path_arr, trig_seq, trig
     P8.BASKET = {"center_xy_m": [0.0, 0.0], "radius_m": 0.0}
     holder_best = None
     prev_dets = []
+    # V3.63 FIXED D435i CUP PERCEPTION: in the stack_cups scene the same camera perceives the cups (RGB-D only)
+    cup_scene = False
+    try:
+        import NERO_V343_Scenes as _SC363
+        cup_scene = _SC363.active_scene() == "stack_cups"
+        if cup_scene:
+            import NERO_V363_Cup_Perception as CP
+            print(f"{prefix} V3.63 stack_cups scene: perceiving cups (red mask + depth cone fit), no eggs", flush=True)
+    except Exception as exc_cs:
+        print(f"{prefix} V3.63 cup perception unavailable: {exc_cs}", flush=True)
+        cup_scene = False
     capture_no = 0
     last_seq = int(trig_seq.value)
     status.value = 1
@@ -115,6 +126,21 @@ def fixed_camera_process_main(qpos_arr, meta_arr, model_path_arr, trig_seq, trig
             n_fr = int(cfg["depth_frames"]) if float(cfg["depth_noise_k"]) > 0 else 1
             depth = P8.temporal_fuse([P8._depth_postprocess(raw_depth, cfg, rng) for _ in range(n_fr)])
             boxes = P8._robot_boxes(model, data, robot_geoms)
+            if cup_scene:      # V3.63 FIXED D435i CUP PERCEPTION: stack_cups scene -> cups instead of eggs
+                cres = CP.perceive_cups(rgb, depth, K, T, robot_boxes=boxes)
+                capture_no += 1
+                elapsed = time.perf_counter() - t0
+                cdir = writer.write(capture_no, tag, sim_time, rgb, depth, q, [], {}, [], [],
+                                    {"detected": 0, "truth": 0, "false_positives": 0, "err_xy_mm": None},
+                                    {"camera": "fixed_d435i_cups", "cups": cres}, K, T, elapsed)
+                P8._post_result(res_seq, res_buf, cur, W.json_safe({
+                    "seq": cur, "capture": capture_no, "tag": tag, "sim_time_s": round(sim_time, 3),
+                    "elapsed_s": round(elapsed, 3), "objects": {}, "n_detections": len(cres["cups"]),
+                    "dir": cdir.name, "camera": "fixed_d435i", "cups": cres}))
+                print(f"[V3.63 FIXED CUP PERCEPTION] #{capture_no} {tag} | {len(cres['cups'])} cluster(s) "
+                      + " ".join(f"{c['kind']}@({c['base_xyz_m'][0]:+.3f},{c['base_xyz_m'][1]:+.3f}) h={c['height_mm']:.0f}mm"
+                                 for c in cres["cups"]) + f" | table z={cres['table_z_m']:+.4f} | {elapsed:.2f}s", flush=True)
+                continue
             prior = [d for d in prev_dets if d.get("trusted")] if os.environ.get("NERO_V310_WARM_START", "1") != "0" else []
             dets, diag = P8.perceive_eggs(rgb, depth, K, T, robot_boxes=boxes, prior=prior)
             diag["depth_frames_fused"] = n_fr

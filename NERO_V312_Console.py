@@ -24,14 +24,28 @@ import sys
 import threading
 import time
 
-VERSION = "V3.47.1"
+VERSION = "V3.76"
+# V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
+# V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
+# V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
+# V3.51 WORKFLOW STATUS LAMP BAR ABOVE LOG
+# V3.52 TEACH MODE BUTTONS LEFT OF COPY LOG
+# V3.53 TEACH EXIT & PARK FIX + ALIGNED TEACH BUTTONS + DEFAULT 1280x720 DEPTH
+# V3.54 FIRMWARE V1.2.1 (v121 DEFAULT) + FOLLOWER MODE TEACH EXIT + STEP 3 PUSH RECOVERY
+# V3.55 FAST MAIN CAMERA HAND-EYE CALIB + UNIFIED PNP/DEPTH SOURCE + LOO OUTLIER REJECTION
+# V3.56 FAST WRIST EYE-IN-HAND CALIB + LOOK-AT DOME PLANNER + FULL-RES ROI ARUCO + SCALE/LEVER-ARM SOLVER
+# V3.57 AUTO TABLETOP CHARUCO INTRINSICS + CHARUCO EIH + 2D FOCAL/SCALE SELF-CALIB
+# V3.58 KINEMATIC-ANCHORED WIDE-ANGLE INTRINSICS + FULL-QUADRANT TILT + ROBUST CHARUCO EIH
 HERE = os.path.dirname(os.path.realpath(__file__))
 SIM_SCRIPT = os.environ.get("NERO_V312_SIM_SCRIPT", os.path.join(HERE, "start_nero_sim.sh"))
 
 # V3.44 SCENE SELECT: the MuJoCo scene is chosen here before the simulation starts and passed to
 # start_nero_sim.sh as NERO_SCENE.  Every console start defaults to the egg scene.
 SIM_SCENES = [("fill_egg_holder", "fill_egg_holder - 鸡蛋放入蛋托 (默认)"),
-              ("store_in_safe", "store_in_safe - 物体放入保险箱 (RoboDojo)")]
+              ("store_in_safe", "store_in_safe - 物体放入保险箱 (RoboDojo)"),
+              ("stack_cups", "stack_cups - 叠杯子 (RoboDojo)"),          # V3.61 STACK CUPS SCENE
+              ("stack_cups_so101", "stack_cups_so101 - 叠杯子 · SO-101 夹爪 (7 mm 转接环, 偏转 45°)"),  # V3.64 SO-101 GRIPPER ON NERO
+              ("sort_items", "sort_items - 物品分类放入红框 / 蓝框 · SO-101 夹爪（香蕉 / 苹果 / 鼠标 / 马克笔）")]  # V3.72 SORT ITEMS SCENE
 DEFAULT_SIM_SCENE = "fill_egg_holder"
 
 
@@ -149,6 +163,7 @@ class SimRunner:
         self.log_path = log_path
         self._stop_requested = False
         self.exit_code = None
+        self.strategy_env = {}               # V3.60 SIM ENV INJECTION: set by the console before start()
 
     def running(self):
         return self.proc is not None and self.proc.poll() is None
@@ -160,6 +175,7 @@ class SimRunner:
         env["NERO_NO_FAIL_PAUSE"] = "1"      # never block on "Press Enter" when started from the console
         env["PYTHONUNBUFFERED"] = "1"
         env.update(extra_env or {})
+        env.update(getattr(self, "strategy_env", None) or {})     # V3.60: applied skill -> backend env (only diffs)
         self._stop_requested = False
         self.exit_code = None
         self.proc = subprocess.Popen(
@@ -247,6 +263,73 @@ def _v312_pick_cjk_font(root):
         pass
 
 
+# V3.70 CRASH LOG: a hard crash (segfault in Tk / X11 / a C extension) used to kill the console together with its
+# terminal and left nothing behind.  faulthandler writes the Python stack of every thread into logs/crash.log at the
+# moment of the crash; uncaught Python exceptions (main thread, worker threads, Tk callbacks) are appended there too.
+_V370_CRASH = {"fh": None, "path": None}
+
+
+def v370_crash_write(title, exc_type, exc, tb):
+    import traceback
+    path = _V370_CRASH.get("path")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"\n===== [V3.70 CRASH LOG] {time.strftime('%Y-%m-%d %H:%M:%S')} {VERSION} pid {os.getpid()} "
+                    f"· {title} =====\n")
+            f.write("".join(traceback.format_exception(exc_type, exc, tb)))
+    except Exception:
+        pass
+
+
+def install_crash_log(log_dir, root=None):
+    import faulthandler
+    import threading as _th
+    os.makedirs(log_dir, exist_ok=True)
+    path = os.path.join(log_dir, "crash.log")
+    if _V370_CRASH["fh"] is None or _V370_CRASH["path"] != path:
+        fh = open(path, "a", encoding="utf-8")         # kept open for the whole run: faulthandler needs a live fd
+        fh.write(f"----- [V3.70 CRASH LOG] console start {time.strftime('%Y-%m-%d %H:%M:%S')} {VERSION} "
+                 f"pid {os.getpid()} (nothing below this line = no crash) -----\n")
+        fh.flush()
+        faulthandler.enable(file=fh, all_threads=True)
+        _V370_CRASH.update(fh=fh, path=path)
+        prev_sys = sys.excepthook
+
+        def _sys_hook(t, e, tb):
+            v370_crash_write("uncaught exception (main thread)", t, e, tb)
+            prev_sys(t, e, tb)
+        sys.excepthook = _sys_hook
+        prev_th = _th.excepthook
+
+        def _th_hook(a):
+            v370_crash_write(f"uncaught exception in thread {getattr(a.thread, 'name', '?')}",
+                             a.exc_type, a.exc_value, a.exc_traceback)
+            prev_th(a)
+        _th.excepthook = _th_hook
+    if root is not None:
+        def _tk_hook(t, e, tb):
+            v370_crash_write("exception in a Tk callback", t, e, tb)
+            import traceback
+            traceback.print_exception(t, e, tb)
+        root.report_callback_exception = _tk_hook
+    return path
+
+
+def v370_mirror_lines(path, lines):
+    """V3.70 CONSOLE LOG MIRROR: real-page [V3.xx ...] lines (real NERO, Camera, skills, real task tabs) also go into
+    logs/console.log so one file holds the whole story (the subprocess output is already written there)."""
+    if not path or not lines:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            for ln in lines:
+                f.write(f"[{time.strftime('%H:%M:%S')} REAL] {ln}\n")
+    except Exception:
+        pass
+
+
 def run_console(initial_tab="sim"):
     import tkinter as tk
     from tkinter import ttk, messagebox
@@ -257,6 +340,7 @@ def run_console(initial_tab="sim"):
     open(console_log, "w").close()
 
     root = tk.Tk()
+    install_crash_log(log_dir, root)                  # V3.70 CRASH LOG
     _v312_pick_cjk_font(root)
     root.title(f"NERO {VERSION} 控制台")
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
@@ -452,13 +536,14 @@ def run_console(initial_tab="sim"):
     btn_params.configure(command=toggle_params)
     v_port = tk.StringVar(value=RR.CAN_PORT_DEFAULT)
     v_eff = tk.StringVar(value="none")
-    v_fw = tk.StringVar(value="v111")
+    v_fw = tk.StringVar(value=RR.DEFAULT_FW_VERSION)
     v_speed = tk.IntVar(value=10)
     v_unlock = tk.BooleanVar(value=False)
     v_gate = tk.BooleanVar(value=False)
     v_follow = tk.BooleanVar(value=True)
     v_rviz = tk.BooleanVar(value=True)
     v_domain = tk.StringVar(value=str(RR.DEFAULT_DOMAIN_ID))
+    v_payload = tk.StringVar(value=RR.DEFAULT_TEACH_PAYLOAD)      # V3.70 TEACH PAYLOAD
     r0 = ttk.Frame(pf)
     r0.pack(fill="x", padx=6, pady=3)
     ttk.Label(r0, text="can_port").pack(side="left")
@@ -468,9 +553,12 @@ def run_console(initial_tab="sim"):
     cb_eff = ttk.Combobox(r0, textvariable=v_eff, values=["none", "agx_gripper"], width=11, state="readonly")
     cb_eff.pack(side="left", padx=(2, 10))
     ttk.Label(r0, text="fw_version").pack(side="left")
-    ttk.Combobox(r0, textvariable=v_fw, values=["v111", ""], width=6, state="readonly").pack(side="left", padx=(2, 10))
+    ttk.Combobox(r0, textvariable=v_fw, values=["v121", "v120", "v112", "v111", "default", ""], width=7, state="readonly").pack(side="left", padx=(2, 10))
     ttk.Label(r0, text="ROS_DOMAIN_ID").pack(side="left")
     ttk.Entry(r0, textvariable=v_domain, width=4).pack(side="left", padx=(2, 10))
+    ttk.Label(r0, text="示教负载").pack(side="left")             # V3.70: gravity compensation class for teach mode
+    ttk.Combobox(r0, textvariable=v_payload, values=list(RR.PAYLOAD_CHOICES) + ["不设置"], width=6,
+                 state="readonly").pack(side="left", padx=(2, 10))
     r1 = ttk.Frame(pf)
     r1.pack(fill="x", padx=6, pady=3)
     ttk.Label(r1, text="speed_percent").pack(side="left")
@@ -497,9 +585,9 @@ def run_console(initial_tab="sim"):
         except Exception:
             dom = int(RR.DEFAULT_DOMAIN_ID)
         return {"can_port": v_port.get().strip() or "can0", "effector_type": v_eff.get(), "fw_version": v_fw.get(),
-                "push_fw": v_fw.get() or "v111", "speed_percent": int(v_speed.get()), "speed_unlocked": bool(v_unlock.get()),
+                "push_fw": v_fw.get() or RR.DEFAULT_FW_VERSION, "speed_percent": int(v_speed.get()), "speed_unlocked": bool(v_unlock.get()),
                 "auto_control_gate": bool(v_gate.get()), "follow": bool(v_follow.get()), "use_rviz": bool(v_rviz.get()),
-                "domain_id": dom}
+                "domain_id": dom, "teach_payload": v_payload.get()}
 
     def refresh_preview(*_a):
         preview.set(f"ROS_DOMAIN_ID={real_cfg()['domain_id']}  " + RR.launch_command(real_cfg()))
@@ -542,17 +630,26 @@ def run_console(initial_tab="sim"):
             if suffix == "park":                           # V3.24: park pose D before 去使能 / power off
                 jpanel.go_park()
                 return
-            if suffix == "exit_teach_mode":                # V3.19: service + pyAgxArm normal mode + enable
-                if not messagebox.askyesno("退出示教模式", "NERO 切回正常控制（先保持当前位置），然后以 10% 速度经 MoveIt "
-                                                       "回零位。\n请扶稳机械臂、手在急停上。继续？"):
+            if suffix == "exit_teach_mode":                # V3.19/V3.53: service + pyAgxArm normal mode + enable (hold current pose)
+                if not messagebox.askyesno("退出示教模式", "NERO 将退出示教模式并切回正常控制（直接保持并锁在当前姿态，不强制回零位；如需回零可点旁边「回 Home⚠」）。\n请扶稳机械臂、手在急停上。继续？"):
                     return
                 if safe_tab.mode == "teach":
+                    safe_tab._teach_exiting = True
                     safe_tab.v_mode.set("edit")
                     safe_tab.on_mode()
+                    safe_tab._teach_exiting = False
+                try:
+                    cam_tab.stop_flag = True
+                except Exception:
+                    pass
                 start_job("退出示教模式", lambda: pipe.set_teach_mode(False, home_model=getattr(jpanel, "model", None),
-                                                                 home_fn=safe_tab.exit_home))
+                                                                 home_fn=safe_tab.exit_home, return_home=False), force=True)
                 return
             if warn and not messagebox.askyesno(t_, warn):
+                return
+            if suffix == "enable_agx_arm" and val is True and (pipe.teach_mode or pipe.leader_active() or not pipe.monitor.running()):
+                start_job("使能（退出示教）", lambda: pipe.set_teach_mode(False, home_model=getattr(jpanel, "model", None),
+                                                                      home_fn=safe_tab.exit_home, return_home=False), force=True)
                 return
             pipe.call_service(suffix, val)
         b_ = ttk.Button(ob, text=t_, command=_op)
@@ -567,9 +664,12 @@ def run_console(initial_tab="sim"):
     real_nb.add(jp_holder, text="关节控制")
     real_nb.add(cons_holder, text="一致性测试")
     real_nb.add(safe_holder, text="工作区安全")
+    real_wf_bar = ttk.Frame(real_tab)
+    real_wf_bar.pack(fill="x", pady=(4, 0))
     real_log = make_log(real_tab)
     real_log.configure(height=12)
     ttk.Button(ob, text="Copy Log", command=lambda: copy_text(real_log)).pack(side="right")
+    ttk.Button(real_wf_bar, text="Copy Log", command=lambda: copy_text(real_log)).pack(side="right")
 
     # ---- controller
     ask_q = queue.Queue()      # V3.14: worker threads never touch Tk; real_poll (main thread) shows the dialogs
@@ -631,9 +731,38 @@ def run_console(initial_tab="sim"):
         cam_q.put(line)
     cam_tab = CAM.CameraTabUI(tk, ttk, cam_main, pipe, jpanel, safe_tab, real_cfg, log=cam_log_line,
                               ask=confirm_from_worker, visible_fn=lambda: nb.select() == str(cam_outer))
+    cam_tab.attach_workflow_bar(real_wf_bar)
+    cam_tab.attach_workflow_bar(cam_bar)
 
-    def start_job(name, fn):
-        if real_job["t"] is not None and real_job["t"].is_alive():
+    # ---- V3.59 SKILL STRATEGY KNOBS & HOVER DRY-RUN TAB
+    import NERO_V359_Strategy as ST59
+    strat_outer = ttk.Frame(nb, padding=6)
+    nb.add(strat_outer, text="技能参数旋钮")
+    strat_tab = ST59.SkillStrategyTabUI(
+        tk, ttk, strat_outer, cam_tab=cam_tab, pipe=pipe, jpanel=jpanel,
+        log=cam_log_line, ask=confirm_from_worker,
+    )
+    cam_tab.strategy_tab = strat_tab
+    # V3.60: a skill applied in the simulation GUI tab shows up here when this tab is opened
+    nb.bind("<<NotebookTabChanged>>",
+            lambda _e: strat_tab.reload_active_if_changed() if nb.select() == str(strat_outer) else None, add="+")
+
+    # ---- V3.65 NERO REAL CUP TASK TAB: the stack_cups_so101 simulation skills + parameters on the real NERO
+    #      (SO-101 gripper on an STS3215 servo, fixed D435i + wrist camera monitors, LLM agent, run modes 1-3)
+    rct_tab = None
+    try:
+        import NERO_V365_Real_Cup_Task as RCT
+        rct_outer = ttk.Frame(nb, padding=6)
+        nb.add(rct_outer, text="NERO实机任务")
+        rct_tab = RCT.RealCupTaskTabUI(tk, ttk, rct_outer, pipe, jpanel, cam_tab, log=pipe.log, ask=confirm_from_worker,
+                                       visible_fn=lambda: nb.select() == str(rct_outer))
+        nb.bind("<<NotebookTabChanged>>",
+                lambda _e: rct_tab.refresh_skill() if nb.select() == str(rct_outer) else None, add="+")
+    except Exception as exc:
+        log_append(real_log, f"[FAIL] [V3.65 REAL CUP TASK] NERO实机任务 tab not available: {exc}")
+
+    def start_job(name, fn, force=False):
+        if not force and real_job["t"] is not None and real_job["t"].is_alive():
             log_append(real_log, f"[WARN] busy: {real_job['name']} still running")
             return
         if runner.running():
@@ -668,11 +797,15 @@ def run_console(initial_tab="sim"):
 
     def real_poll():
         serve_asks()
+        mirrored = []                                 # V3.70 CONSOLE LOG MIRROR
         try:
             while True:
-                log_append(real_log, pipe.events.get_nowait())
+                ln = pipe.events.get_nowait()
+                mirrored.append(ln)
+                log_append(real_log, ln)
         except queue.Empty:
             pass
+        v370_mirror_lines(console_log, mirrored)
         try:
             while True:
                 log_append(cam_log, cam_q.get_nowait())
@@ -727,6 +860,7 @@ def run_console(initial_tab="sim"):
                 if ui_flags.get(key_) != str(exc):
                     ui_flags[key_] = str(exc)
                     log_append(real_log, f"[FAIL] [V3.15] {name_} refresh: {exc}")
+        cam_tab.update_workflow_lamps()
         update_mode()
         root.after(200, real_poll)
 
@@ -758,6 +892,19 @@ def run_console(initial_tab="sim"):
         sim_log.configure(state="disabled")
         scene = sim_scene_by_label.get(sim_scene_var.get(), DEFAULT_SIM_SCENE)
         log_append(sim_log, f"[V3.12 CONSOLE] starting {SIM_SCRIPT} | V3.44 scene={scene}")
+        runner.strategy_env = {}
+        try:                                        # V3.60 SIM ENV INJECTION (applied skill; baseline EB injects nothing)
+            prof360 = ST59.read_active_strategy_file() or strat_tab.profile
+            env360, notes360 = ST59.strategy_sim_env(prof360, base_env=clean_child_env())
+            runner.strategy_env = env360
+            n_inj = sum(1 for k_ in env360 if not k_.startswith("NERO_V360_SKILL_"))
+            log_append(sim_log, f"[OK] [V3.60 策略] 本次仿真技能 {prof360.label()} ({prof360.skill_id})："
+                                + (f"注入 {n_inj} 个后端参数" if n_inj else "与基准 EB 相同，后端参数保持默认"))
+            for n_ in notes360:
+                log_append(sim_log, n_)
+        except Exception as exc:
+            runner.strategy_env = {}
+            log_append(sim_log, f"[WARN] [V3.60 策略] 技能注入失败，按后端默认参数启动：{exc}")
         try:
             pid = runner.start(extra_env=scene_env(scene))
         except Exception as exc:
@@ -779,10 +926,20 @@ def run_console(initial_tab="sim"):
         log_append(sim_log, "[V3.12 CONSOLE] stop requested -> SIGINT to launcher (cleanup + restore kinematics.yaml)")
         sim_status.set("正在停止…")
         btn_sim_stop.configure(state="disabled")
+        stop_t0[0] = time.time()                    # V3.76 STOP COUNTDOWN
         runner.stop()
 
     btn_sim_start.configure(command=on_sim_start)
     btn_sim_stop.configure(command=on_sim_stop)
+    stop_t0 = [None]
+
+    def stop_countdown():
+        """V3.76 STOP COUNTDOWN: the launcher stops every process within ~8 s (INT -> TERM -> KILL); the console's
+        SIGKILL of the whole session follows after STOP_GRACE_S at the latest"""
+        if stop_t0[0] is None or not runner.running() or not runner.stop_requested():
+            return
+        left = max(0, int(round(STOP_GRACE_S - (time.time() - stop_t0[0]))))
+        sim_status.set(f"正在停止…（MoveIt / RViz / MuJoCo / 仿真 GUI，最多再等 {left} s）")
 
     def poll():
         changed = False
@@ -800,7 +957,9 @@ def run_console(initial_tab="sim"):
                         sim_status.set(f"仿真已结束 (exit {rc})")
                     else:
                         sim_status.set(f"启动失败 (exit {rc}) — 见日志")
-                    log_append(sim_log, f"[V3.12 CONSOLE] launcher exited rc={rc}")
+                    log_append(sim_log, f"[V3.12 CONSOLE] launcher exited rc={rc}"
+                               + (f" | V3.76 stop took {time.time() - stop_t0[0]:.1f} s" if stop_t0[0] else ""))
+                    stop_t0[0] = None
                     btn_sim_start.configure(state="normal")
                     btn_sim_stop.configure(state="disabled")
                     update_mode()
@@ -818,11 +977,17 @@ def run_console(initial_tab="sim"):
             pass
         if changed:
             refresh_sim_lamps()
+        stop_countdown()
         root.after(100, poll)
 
     def on_close():
         try:
             cam_tab.shutdown()
+        except Exception:
+            pass
+        try:
+            if rct_tab is not None:
+                rct_tab.shutdown()              # V3.65: stop a running real task, close the gripper serial port
         except Exception:
             pass
         if pipe.active():

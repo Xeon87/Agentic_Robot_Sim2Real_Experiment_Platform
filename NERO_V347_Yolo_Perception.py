@@ -12,6 +12,7 @@ Pipeline (per capture)
    (standing only when clearly better); its position and yaw are found by matching the projected silhouette with the
    YOLO mask (IoU).  The D435 flattens small white eggs at ~0.8 m (measured 17-28 mm instead of 42), so depth on the
    egg is used only for the displayed height and to reject flat things (< 12 mm).
+   V3.47.2: depth fusion and plane / morphology operations run only in the ROI around each object; detector logs GPU/CPU.
 3. checks: silhouette overlap (trusted >= 0.80, rejected < 0.60), image border, YOLO confidence, safety zone, plane
    found, hand-eye calibration verified.
 
@@ -32,18 +33,22 @@ import os
 import threading
 import time
 
-VERSION = "V3.47.1"
+VERSION = "V3.76"
 HERE = os.path.dirname(os.path.realpath(__file__))
 DEFAULT_MODEL_DIR = os.environ.get("NERO_YOLO_DIR") or os.path.expanduser("~/Downloads/objectmodels")
 DEFAULT_MODEL = "yoloe-26s-seg.pt"
+# V3.48 GENERAL OBJECTS + PF VOCABULARY: prompt-free (*-pf.pt, 4,585 built-in classes) and open-vocab object queries
+DEFAULT_PF_MODEL = "yoloe-26s-seg-pf.pt"
 REF_JSON = os.path.join(HERE, "config", "yolo_ref.json")
 REF_IMG = os.path.join(HERE, "config", "yolo_ref.jpg")
 SAMPLES_DIR = os.path.join(HERE, "config", "yolo_samples")
 DEFAULT_TEXT_PROMPTS = "white round object, white egg, egg"
+DEFAULT_OBJECT_PROMPTS = "cup, bottle, box, bowl, can, apple, orange, banana, cell phone, mouse, remote, book, scissors"
 EGG_SIZE_MM = (55.0, 42.0)                 # length, width of the real eggs (measured)
 CONF_MIN = 0.25                             # YOLO confidence below this: not listed
 IMGSZ = 1280
 FUSE_FRAMES = 5
+FUSE_PAD_PX = 120                           # V3.47.2 ROI SPEED + YOLO DEVICE: ROI padding for depth fusion
 ERODE_FRAC, ERODE_MIN_PX = 0.08, 2          # mask erosion for the depth-on-egg check: 8 % of sqrt(area)
 EDGE_PX = 3                                 # box this close to the image border -> cut off -> untrusted
 # V3.47.1 POSE FROM SILHOUETTE: table plane in a band 3-6 cm around each object, egg pose from the YOLO silhouette
@@ -109,6 +114,38 @@ def file_sha256(path):
 
 def parse_prompts(text):
     return [s.strip() for s in str(text or "").replace("，", ",").split(",") if s.strip()]
+
+
+def is_pf_model(model_path):
+    """V3.48 GENERAL OBJECTS + PF VOCABULARY: prompt-free checkpoints (*-pf.pt) ship a built-in 4,585-name vocabulary
+    (LVIS + Objects365 via LRPC) and must be run without set_classes() or visual_prompts."""
+    return "-pf" in os.path.basename(model_path or "").lower()
+
+
+def is_wildcard_prompt(prompts):
+    if not prompts:
+        return True
+    return any(str(p).strip().lower() in ("*", "all", "全部", "any") for p in prompts)
+
+
+def match_object_name(det_name, targets):
+    """Case-insensitive match between a YOLOE built-in class name and user-entered object names."""
+    if is_wildcard_prompt(targets):
+        return True
+    dn = str(det_name or "").strip().lower()
+    if not dn:
+        return False
+    d_tokens = set(dn.replace("-", " ").replace("_", " ").split())
+    for t in targets:
+        tn = str(t or "").strip().lower()
+        if not tn:
+            continue
+        if tn == dn or tn in dn or dn in tn:
+            return True
+        t_tokens = set(tn.replace("-", " ").replace("_", " ").split())
+        if t_tokens and (t_tokens <= d_tokens or d_tokens <= t_tokens):
+            return True
+    return False
 
 
 def _cv2():
@@ -190,8 +227,32 @@ class YoloEDetector:
         self.device = None                  # None = ultralytics default (CUDA when available)
         self.info = {}
 
+    def device_name(self, m=None):
+        """V3.47.2 ROI SPEED + YOLO DEVICE: report whether YOLOE runs on GPU (CUDA) or CPU."""
+        if self.device == "cpu":
+            return "CPU"
+        if isinstance(self.device, str) and ("cuda" in self.device.lower() or self.device.isdigit()):
+            return "GPU"
+        pred = getattr(m, "predictor", None)
+        dev = getattr(pred, "device", None) if pred is not None else (
+            getattr(m, "device", None) if not hasattr(m, "model") else None)
+        if dev is not None:
+            s = str(dev).lower()
+            if "cuda" in s:
+                return "GPU"
+            if "cpu" in s:
+                return "CPU"
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return "GPU"
+        except Exception:
+            pass
+        return "CPU"
+
     def _load(self, path, mode, prompts):
-        key = (path, mode, tuple(prompts) if mode == "text" else ())
+        eff_mode = "pf" if (mode == "pf" or (mode == "text" and is_pf_model(path))) else mode
+        key = (path, eff_mode, tuple(prompts) if eff_mode == "text" else ())
         if self.model is not None and self.key == key:
             return self.model
         try:
@@ -203,11 +264,11 @@ class YoloEDetector:
             raise YoloUnavailable(f"找不到模型文件 {path}")
         t0 = time.time()
         m = YOLOE(path)
-        if mode == "text":
+        if eff_mode == "text":
             enc_dir = os.path.dirname(path)
             enc = text_encoder_name(path)
             if not os.path.isfile(os.path.join(enc_dir, enc)):
-                raise YoloUnavailable(f"文字提示需要 {enc}，请放进 {enc_dir}（否则会尝试联网下载）；视觉提示不需要它")
+                raise YoloUnavailable(f"文字提示需要 {enc}，请放进 {enc_dir}（否则会尝试联网下载）；视觉提示或 -pf 模型不需要它")
             with _CWD_LOCK:                 # ultralytics looks for the text encoder in the working directory
                 old = os.getcwd()
                 os.chdir(enc_dir)
@@ -216,8 +277,10 @@ class YoloEDetector:
                 finally:
                     os.chdir(old)
         self.model, self.key = m, key
-        self.info = {"path": path, "sha256": file_sha256(path), "mode": mode, "load_s": round(time.time() - t0, 2)}
-        self.log(f"[OK] [V3.47 yolo] 模型 {path}（sha256 {self.info['sha256'][:12]}…，{mode}，加载 "
+        dev = self.device_name(m)
+        self.info = {"path": path, "sha256": file_sha256(path), "mode": eff_mode, "device": dev,
+                     "load_s": round(time.time() - t0, 2)}
+        self.log(f"[OK] [V3.47 yolo] 模型 {path}（sha256 {self.info['sha256'][:12]}…，{eff_mode}，{dev}，加载 "
                  f"{self.info['load_s']:.1f} s）")
         return m
 
@@ -229,29 +292,54 @@ class YoloEDetector:
             if "cuda" not in str(exc).lower() or self.device == "cpu":
                 raise
             self.device = "cpu"
+            self.info["device"] = "CPU"
             self.log(f"[WARN] [V3.47 yolo] GPU 出错（{str(exc)[:120]}）→ 改用 CPU")
             return m.predict(bgr, conf=conf, imgsz=IMGSZ, verbose=False, device="cpu", **kw)
 
     def detect(self, rgb, mode, model_path, ref=None, prompts=None, conf=CONF_MIN):
         import numpy as np
-        prompts = list(prompts or parse_prompts(DEFAULT_TEXT_PROMPTS))
-        if mode == "vp" and not ref:
+        raw_prompts = list(prompts) if prompts is not None else []
+        eff_mode = "pf" if (mode == "pf" or (mode != "vp" and is_pf_model(model_path))) else mode
+        if eff_mode == "text":
+            prompts = [p for p in raw_prompts if str(p).strip() not in ("*", "all", "全部")] or parse_prompts(DEFAULT_TEXT_PROMPTS)
+        else:
+            prompts = raw_prompts
+        if eff_mode == "vp" and not ref:
             raise YoloUnavailable("视觉提示还没有参考图：先「框选参考」并「保存参考」（或改用文字提示）")
         with self.lock:
-            m = self._load(model_path, mode, prompts)
+            m = self._load(model_path, eff_mode, prompts)
             bgr = np.ascontiguousarray(rgb[..., ::-1])       # D435i stream is RGB, ultralytics wants BGR
-            if mode == "vp":
+            if eff_mode == "vp":
                 from ultralytics.models.yolo.yoloe import YOLOEVPSegPredictor
                 vp = {"bboxes": np.array(ref["boxes"], dtype=float), "cls": np.array(ref["cls"], dtype=int)}
                 res = self._predict(m, bgr, conf, refer_image=ref["image"], visual_prompts=vp,
                                     predictor=YOLOEVPSegPredictor)
             else:
                 res = self._predict(m, bgr, conf)
+            self.info["device"] = self.device_name(m)
+            model_names = getattr(m, "names", None)
         r = res[0]
-        return parse_result(r, rgb.shape[:2], mode, prompts)
+        dets = parse_result(r, rgb.shape[:2], eff_mode, prompts, model_names=model_names)
+        if eff_mode == "pf":
+            seen = []
+            for d in dets:
+                if d["name"] not in seen:
+                    seen.append(d["name"])
+            self.info["pf_seen"] = seen
+            if not is_wildcard_prompt(prompts):
+                dets = [d for d in dets if match_object_name(d["name"], prompts)]
+        return dets
 
 
-def parse_result(r, hw, mode, prompts):
+def _lookup_name(names_map, c):
+    if isinstance(names_map, dict):
+        return str(names_map.get(c, names_map.get(str(c), c)))
+    if isinstance(names_map, (list, tuple)) and 0 <= c < len(names_map):
+        return str(names_map[c])
+    return str(c)
+
+
+def parse_result(r, hw, mode, prompts, model_names=None):
     import numpy as np
     h, w = hw
     if r.boxes is None or len(r.boxes) == 0:
@@ -275,8 +363,12 @@ def parse_result(r, hw, mode, prompts):
         c = int(clss[k])
         if mode == "vp":
             cls, name = (0, "鸡蛋") if c == 0 else (1, "非鸡蛋")
+        elif mode == "pf":
+            nmap = getattr(r, "names", None) or model_names or {}
+            cls, name = 0, _lookup_name(nmap, c)
         else:
-            cls, name = 0, (prompts[c] if 0 <= c < len(prompts) else str(c))
+            nmap = getattr(r, "names", None)
+            cls, name = 0, (prompts[c] if 0 <= c < len(prompts) else _lookup_name(nmap, c))
         out.append({"cls": cls, "name": name, "conf": float(confs[k]), "box": b, "mask": mask.astype(bool)})
     out.sort(key=lambda d: -d["conf"])
     return out
@@ -298,6 +390,16 @@ def _pix_to_base(uu, vv, z, K, T):
     import numpy as np
     pc = np.stack([(uu - K["ppx"]) * z / K["fx"], (vv - K["ppy"]) * z / K["fy"], z], axis=1)
     return pc @ T[:3, :3].T + T[:3, 3]
+
+
+def _mask_bbox(mask):
+    """V3.47.2 ROI SPEED: fast (xmin, ymin, xmax, ymax) of a 2D boolean mask via row/col reductions, or None."""
+    import numpy as np
+    rows = np.flatnonzero(mask.any(axis=1))
+    if not len(rows):
+        return None
+    cols = np.flatnonzero(mask.any(axis=0))
+    return int(cols[0]), int(rows[0]), int(cols[-1]), int(rows[-1])
 
 
 # --------------------------------------------------------------------------- V3.47.1 table plane
@@ -322,19 +424,32 @@ def fit_plane(P, iters=4):
     return n, d, rms, int(len(Q))
 
 
-def local_plane(depth_m, K, T, mask, other, z_cam):
-    """Table plane in a band PLANE_RING_M (3-6 cm) around the object (other objects, invalid depth excluded)."""
+def local_plane(depth_m, K, T, mask, other, z_cam, bbox=None):
+    """Table plane in a band PLANE_RING_M (3-6 cm) around the object (other objects, invalid depth excluded).
+    V3.47.2 ROI SPEED: distanceTransform and dilation run on the local crop around the mask instead of full 1280x720."""
     import numpy as np
     cv2 = _cv2()
     f = 0.5 * (K["fx"] + K["fy"])
     r_in = max(6, int(round(f * PLANE_RING_M[0] / z_cam)))
     r_out = max(r_in + 6, int(round(f * PLANE_RING_M[1] / z_cam)))
-    dist = cv2.distanceTransform((~mask).astype(np.uint8), cv2.DIST_L2, 5)
-    band = (dist >= r_in) & (dist <= r_out) & (depth_m > 0)
-    if other is not None and other.any():
-        k = 2 * r_in + 1
-        band &= ~cv2.dilate(other.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))).astype(bool)
+    bbox = bbox or _mask_bbox(mask)
+    if bbox is None:
+        return None, 0
+    h, w = mask.shape
+    pad = r_out + r_in + 4
+    x0, y0 = max(0, bbox[0] - pad), max(0, bbox[1] - pad)
+    x1, y1 = min(w, bbox[2] + pad + 1), min(h, bbox[3] + pad + 1)
+    mc = mask[y0:y1, x0:x1]
+    dc = depth_m[y0:y1, x0:x1]
+    dist = cv2.distanceTransform((~mc).astype(np.uint8), cv2.DIST_L2, 5)
+    band = (dist >= r_in) & (dist <= r_out) & (dc > 0)
+    if other is not None:
+        oc = other[y0:y1, x0:x1] & ~mc
+        if oc.any():
+            k = 2 * r_in + 1
+            band &= ~cv2.dilate(oc.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))).astype(bool)
     vv, uu = np.nonzero(band)
+    vv, uu = vv + y0, uu + x0
     if len(vv) < PLANE_MIN_POINTS:
         return None, int(len(vv))
     if len(vv) > 6000:
@@ -363,7 +478,7 @@ class SilhouetteFit:
     """Egg (spheroid a = L/2 along the axis, b = W/2) resting on the plane n . p = d: pose (s, t, yaw) in the plane,
     standing or lying; score = IoU of the projected silhouette with the YOLO mask."""
 
-    def __init__(self, mask, K, T_base_cam, plane, size_mm):
+    def __init__(self, mask, K, T_base_cam, plane, size_mm, bbox=None):
         import numpy as np
         self.np = np
         self.cv2 = _cv2()
@@ -376,12 +491,15 @@ class SilhouetteFit:
         self.o = self.n * self.d
         self.a, self.b = size_mm[0] / 2000.0, size_mm[1] / 2000.0
         h, w = mask.shape
-        ys, xs = np.nonzero(mask)
+        bbox = bbox or _mask_bbox(mask)
+        bx0, by0, bx1, by1 = bbox
+        ys, xs = np.nonzero(mask[by0:by1 + 1, bx0:bx1 + 1])
+        ys, xs = ys + by0, xs + bx0
         pad = 60
-        self.x0, self.y0 = max(0, int(xs.min()) - pad), max(0, int(ys.min()) - pad)
-        self.x1, self.y1 = min(w, int(xs.max()) + pad + 1), min(h, int(ys.max()) + pad + 1)
+        self.x0, self.y0 = max(0, bx0 - pad), max(0, by0 - pad)
+        self.x1, self.y1 = min(w, bx1 + pad + 1), min(h, by1 + pad + 1)
         self.m = mask[self.y0:self.y1, self.x0:self.x1]
-        self.m_area = float(self.m.sum())
+        self.m_area = float(len(ys))
         self.cxy = (float(xs.mean()), float(ys.mean()))
         self.evals = 0
 
@@ -529,10 +647,14 @@ def locate(dets2d, depth_m, K, T_base_cam, table_z=None, fence_poly=None, size_m
     T = np.asarray(T_base_cam, dtype=float)
     h, w = depth_m.shape
     out, planes = [], []
-    union = np.zeros((h, w), bool)
-    for d in dets2d:
-        union |= d["mask"]
-    for k, d in enumerate(dets2d):
+    bboxes = [_mask_bbox(d["mask"]) for d in dets2d]
+    union = None
+    if len(dets2d) > 1:
+        union = np.zeros((h, w), bool)
+        for d, bb in zip(dets2d, bboxes):
+            if bb is not None:
+                union[bb[1]:bb[3] + 1, bb[0]:bb[2] + 1] |= d["mask"][bb[1]:bb[3] + 1, bb[0]:bb[2] + 1]
+    for k, (d, bb) in enumerate(zip(dets2d, bboxes)):
         x0, y0, x1, y1 = d["box"]
         t_start = time.time()
         res = {"yolo": {"conf": round(d["conf"], 3), "box": [round(v) for v in d["box"]], "cls": d["cls"],
@@ -543,19 +665,23 @@ def locate(dets2d, depth_m, K, T_base_cam, table_z=None, fence_poly=None, size_m
             res["reasons"].append("参考里的非鸡蛋")
             continue
         m = d["mask"]
-        area = int(m.sum())
+        area = int(m[bb[1]:bb[3] + 1, bb[0]:bb[2] + 1].sum()) if bb is not None else 0
         if area < 30:
             res["reasons"].append("轮廓太小")
             continue
-        m8 = m.astype(np.uint8)
         r_er = max(ERODE_MIN_PX, int(round(ERODE_FRAC * math.sqrt(area))))
+        # V3.47.2 ROI SPEED: erode and initial depth-ring check run on the cropped object patch
+        pad0 = max(24, r_er + 4)
+        cy0, cy1 = max(0, bb[1] - pad0), min(h, bb[3] + pad0 + 1)
+        cx0, cx1 = max(0, bb[0] - pad0), min(w, bb[2] + pad0 + 1)
+        mc = m[cy0:cy1, cx0:cx1]
+        m8 = mc.astype(np.uint8)
+        dc = depth_m[cy0:cy1, cx0:cx1]
         er = cv2.erode(m8, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r_er + 1, 2 * r_er + 1))).astype(bool)
-        # distance scale for the band: depth around the object (the egg itself may have none)
-        ring0 = cv2.dilate(m8, np.ones((41, 41), np.uint8)).astype(bool) & ~m & (depth_m > 0)
-        zc = depth_m[ring0]
+        ring0 = cv2.dilate(m8, np.ones((41, 41), np.uint8)).astype(bool) & ~mc & (dc > 0)
+        zc = dc[ring0]
         z_cam = float(np.median(zc)) if zc.size >= 20 else 0.8
-        other = union & ~m
-        plane, n_band = local_plane(depth_m, K, T, m, other, z_cam)
+        plane, n_band = local_plane(depth_m, K, T, m, union, z_cam, bbox=bb)
         psrc = "局部桌面平面"
         if plane is None:
             if table_z is None:
@@ -565,7 +691,8 @@ def locate(dets2d, depth_m, K, T_base_cam, table_z=None, fence_poly=None, size_m
         planes.append(plane)
         # depth on the egg: coverage + measured height above the plane (display / flat check / standing hint only)
         vv, uu = np.nonzero(er)
-        dz = depth_m[vv, uu]
+        dz = dc[vv, uu]
+        vv, uu = vv + cy0, uu + cx0
         cov = float((dz > 0).mean()) if len(dz) else 0.0
         hmeas = None
         if cov >= DEPTH_COVER_MIN and (dz > 0).sum() >= 20:
@@ -573,7 +700,7 @@ def locate(dets2d, depth_m, K, T_base_cam, table_z=None, fence_poly=None, size_m
             P = _pix_to_base(uu[ok].astype(float), vv[ok].astype(float), dz[ok].astype(float), K, T)
             hmeas = float(np.percentile(P @ plane[0] - plane[1], 95)) * 1000.0
         hint = hmeas is not None and hmeas >= size_mm[1] + STANDING_HINT_MM
-        fit = SilhouetteFit(m, K, T, plane, size_mm).solve(standing_hint=hint)
+        fit = SilhouetteFit(m, K, T, plane, size_mm, bbox=bb).solve(standing_hint=hint)
         c, ax = fit["centre"], fit["axis"]
         if ax[2] < 0:
             ax = -ax
@@ -638,9 +765,187 @@ def locate(dets2d, depth_m, K, T_base_cam, table_z=None, fence_poly=None, size_m
     return out, diag
 
 
-def fuse_depth(depths):
+
+
+def locate_objects(dets2d, depth_m, K, T_base_cam, table_z=None, fence_poly=None, calib_note=None):
+    """V3.48 GENERAL OBJECTS: 2D YOLOE detections (from text prompt or *-pf built-in vocabulary) + aligned depth (m)
+    -> 3D object positions, heights, and bounding sizes in base_link for testing recognition & hover verification."""
+    import numpy as np
+    cv2 = _cv2()
+    T = np.asarray(T_base_cam, dtype=float)
+    h, w = depth_m.shape
+    out, planes = [], []
+    bboxes = [_mask_bbox(d["mask"]) for d in dets2d]
+    union = None
+    if len(dets2d) > 1:
+        union = np.zeros((h, w), bool)
+        for d, bb in zip(dets2d, bboxes):
+            if bb is not None:
+                union[bb[1]:bb[3] + 1, bb[0]:bb[2] + 1] |= d["mask"][bb[1]:bb[3] + 1, bb[0]:bb[2] + 1]
+    f_px = 0.5 * (K["fx"] + K["fy"])
+    for d, bb in zip(dets2d, bboxes):
+        x0, y0, x1, y1 = d["box"]
+        t_start = time.time()
+        oname = str(d.get("name") or "object")
+        res = {"yolo": {"conf": round(d["conf"], 3), "box": [round(v) for v in d["box"]], "cls": d["cls"],
+                        "name": oname}, "obj_name": oname, "reasons": [], "notes": [], "status": "rejected",
+               "trusted": False, "confidence": 0.0}
+        out.append(res)
+        if d["cls"] != 0:
+            res["reasons"].append("参考里的非目标物")
+            continue
+        m = d["mask"]
+        area = int(m[bb[1]:bb[3] + 1, bb[0]:bb[2] + 1].sum()) if bb is not None else 0
+        if area < 30:
+            res["reasons"].append("轮廓太小")
+            continue
+        r_er = max(ERODE_MIN_PX, int(round(ERODE_FRAC * math.sqrt(area))))
+        pad0 = max(24, r_er + 4)
+        cy0, cy1 = max(0, bb[1] - pad0), min(h, bb[3] + pad0 + 1)
+        cx0, cx1 = max(0, bb[0] - pad0), min(w, bb[2] + pad0 + 1)
+        mc = m[cy0:cy1, cx0:cx1]
+        m8 = mc.astype(np.uint8)
+        dc = depth_m[cy0:cy1, cx0:cx1]
+        er = cv2.erode(m8, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r_er + 1, 2 * r_er + 1))).astype(bool)
+        if not er.any():
+            er = mc
+        ring0 = cv2.dilate(m8, np.ones((41, 41), np.uint8)).astype(bool) & ~mc & (dc > 0)
+        zc = dc[ring0]
+        vv_e, uu_e = np.nonzero(er)
+        dz = dc[vv_e, uu_e]
+        vv_e, uu_e = vv_e + cy0, uu_e + cx0
+        z_obj = dz[dz > 0]
+        z_cam = float(np.median(zc)) if zc.size >= 20 else (float(np.median(z_obj)) if z_obj.size >= 10 else 0.8)
+        plane, n_band = local_plane(depth_m, K, T, m, union, z_cam, bbox=bb)
+        psrc = "局部桌面平面"
+        if plane is None:
+            if table_z is None:
+                res["reasons"].append(f"测不到桌面平面（周围 3–6 cm 有效深度点 {n_band}）")
+                continue
+            plane, psrc = (np.array([0.0, 0.0, 1.0]), float(table_z), None, 0), "安全设置 z_table"
+        planes.append(plane)
+        n_vec, d_pl = np.asarray(plane[0], float), float(plane[1])
+        cov = float((dz > 0).mean()) if len(dz) else 0.0
+        ys_m, xs_m = np.nonzero(mc)
+        uc, vc = float(xs_m.mean() + cx0), float(ys_m.mean() + cy0)
+        span_u_m = max(0.015, (bb[2] - bb[0]) * z_cam / f_px)
+        span_v_m = max(0.015, (bb[3] - bb[1]) * z_cam / f_px)
+        hmeas = None
+        if cov >= 0.25 and z_obj.size >= 15:
+            ok = dz > 0
+            P = _pix_to_base(uu_e[ok].astype(float), vv_e[ok].astype(float), dz[ok].astype(float), K, T)
+            hs = P @ n_vec - d_pl
+            h95 = float(np.percentile(hs, 95)) * 1000.0
+            if h95 >= 4.0:
+                hmeas = h95
+            L_mm = max(10.0, float(np.percentile(P[:, 0], 95) - np.percentile(P[:, 0], 5)) * 1000.0)
+            W_mm = max(10.0, float(np.percentile(P[:, 1], 95) - np.percentile(P[:, 1], 5)) * 1000.0)
+            size_est = [round(max(L_mm, W_mm), 1), round(min(L_mm, W_mm), 1)]
+        else:
+            size_est = [round(max(span_u_m, span_v_m) * 1000.0, 1), round(min(span_u_m, span_v_m) * 1000.0, 1)]
+        h_use_m = (hmeas / 1000.0) if hmeas is not None else max(0.020, min(0.120, 0.75 * min(span_u_m, span_v_m)))
+        # Ray through the mask centroid to the mid-height plane (n . p = d_pl + 0.5 * h_use_m)
+        dr = T[:3, :3] @ np.array([(uc - K["ppx"]) / K["fx"], (vc - K["ppy"]) / K["fy"], 1.0])
+        o = T[:3, 3]
+        lam = (d_pl + 0.5 * h_use_m - float(n_vec @ o)) / float(n_vec @ dr)
+        c_ray = o + lam * dr
+        if cov >= 0.50 and z_obj.size >= 25:
+            ok = dz > 0
+            P = _pix_to_base(uu_e[ok].astype(float), vv_e[ok].astype(float), dz[ok].astype(float), K, T)
+            med_xy = np.median(P[:, :2], axis=0)
+            # Blend centroid ray with surface point cloud median
+            xyz = [float(0.6 * c_ray[0] + 0.4 * med_xy[0]), float(0.6 * c_ray[1] + 0.4 * med_xy[1]), float(c_ray[2])]
+        else:
+            xyz = [float(c_ray[0]), float(c_ray[1]), float(c_ray[2])]
+            res["notes"].append(f"表面深度 {cov * 100:.0f}%，按轮廓中心 + 桌面定位")
+        res["ground_z_m"] = round(float((d_pl - n_vec[0] * xyz[0] - n_vec[1] * xyz[1]) / n_vec[2]), 4)
+        edge = x0 <= EDGE_PX or y0 <= EDGE_PX or x1 >= w - 1 - EDGE_PX or y1 >= h - 1 - EDGE_PX
+        warn = []
+        if edge:
+            warn.append("贴画面边缘（被切掉一部分）")
+        if d["conf"] < 0.35:
+            warn.append(f"YOLO 置信度低 {d['conf']:.2f}")
+        if fence_poly and not point_in_poly(xyz[0], xyz[1], fence_poly):
+            warn.append("在安全区外")
+        if psrc != "局部桌面平面":
+            warn.append("周围桌面没有深度，用的是安全设置 z_table")
+        if calib_note:
+            warn.append(calib_note)
+        res.update(xyz_m=[round(v, 5) for v in xyz], axis_world=[0.0, 0.0, 1.0], quat_xyzw=[0.0, 0.0, 0.0, 1.0],
+                   iou=None, pose=f"类别 {oname}", size_mm=size_est,
+                   height_mm=None if hmeas is None else round(hmeas, 1), depth_cover=round(cov, 2),
+                   plane_src=psrc, plane_rms_mm=None if plane[2] is None else round(plane[2] * 1000.0, 2),
+                   edge=bool(edge), fit_ms=round((time.time() - t_start) * 1000.0),
+                   reasons=warn, status="untrusted" if warn else "object", trusted=not warn,
+                   confidence=round(float(d["conf"]) * (1.0 if not warn else 0.7), 3))
+    order = {"object": 0, "untrusted": 1, "rejected": 2}
+    out.sort(key=lambda r: (order.get(r["status"], 2), -r["yolo"]["conf"]))
+    n = 0
+    for r in out:
+        if r["status"] != "rejected":
+            n += 1
+            r["det_id"] = f"obj_{n}"
+        else:
+            r["det_id"] = "✗"
+    diag = {"n_2d": len(dets2d), "n_obj": sum(1 for r in out if r["status"] == "object"),
+            "n_untrusted": sum(1 for r in out if r["status"] == "untrusted"),
+            "n_rejected": sum(1 for r in out if r["status"] == "rejected")}
+    gz = [r["ground_z_m"] for r in out if r.get("plane_src") == "局部桌面平面" and r.get("ground_z_m") is not None]
+    if gz:
+        diag["ground_z_m"] = round(float(np.median(gz)), 4)
+        if table_z is not None:
+            diag["ground_minus_z_table_mm"] = round((diag["ground_z_m"] - float(table_z)) * 1000.0, 1)
+    loc = [p[2] for p in planes if p[2] is not None]
+    if loc:
+        diag["plane_rms_mm"] = round(float(np.median(loc)) * 1000.0, 2)
+    return out, diag
+
+
+def roi_boxes(dets2d, shape, pad=FUSE_PAD_PX):
+    """V3.47.2 ROI SPEED: merged (x0, y0, x1, y1) ROIs around detected egg candidates (cls == 0) so depth fusion
+    only processes the regions around objects instead of the full 1280x720 frame."""
+    h, w = shape[:2]
+    boxes = []
+    for d in dets2d or []:
+        if d.get("cls", 0) != 0:
+            continue
+        b = d.get("box")
+        if not b:
+            continue
+        x0, y0, x1, y1 = b
+        boxes.append([max(0, int(math.floor(x0)) - pad), max(0, int(math.floor(y0)) - pad),
+                      min(w, int(math.ceil(x1)) + pad + 1), min(h, int(math.ceil(y1)) + pad + 1)])
+    merged = True
+    while merged and len(boxes) > 1:
+        merged = False
+        for i in range(len(boxes)):
+            for j in range(i + 1, len(boxes)):
+                a, b = boxes[i], boxes[j]
+                if a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]:
+                    boxes[i] = [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
+                    boxes.pop(j)
+                    merged = True
+                    break
+            if merged:
+                break
+    return [tuple(b) for b in boxes]
+
+
+def fuse_depth(depths, dets2d=None, pad=FUSE_PAD_PX):
+    """V3.47.2 ROI SPEED: fuse N depth frames; when dets2d is given, fuse only inside the padded ROIs around objects."""
+    import numpy as np
     import NERO_V308_Camera_Perception as P8
-    return P8.temporal_fuse(depths) if len(depths) > 1 else depths[0]
+    if len(depths) <= 1:
+        return depths[0]
+    if dets2d is None:
+        return P8.temporal_fuse(depths)
+    rois = roi_boxes(dets2d, depths[0].shape, pad=pad)
+    if not rois:
+        return np.asarray(depths[-1], dtype=np.float32)
+    out = np.asarray(depths[-1], dtype=np.float32).copy()
+    for x0, y0, x1, y1 in rois:
+        out[y0:y1, x0:x1] = P8.temporal_fuse([f[y0:y1, x0:x1] for f in depths])
+    return out
 
 
 def save_sample(rgb, dets2d, results, meta, folder=None):

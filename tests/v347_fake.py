@@ -143,8 +143,8 @@ class _Masks:
 
 
 class _Result:
-    def __init__(self, boxes, masks):
-        self.boxes, self.masks = boxes, masks
+    def __init__(self, boxes, masks, names=None):
+        self.boxes, self.masks, self.names = boxes, masks, names
 
 
 class FakeState:
@@ -163,24 +163,33 @@ class YOLOEVPSegPredictor:
     pass
 
 
+DEFAULT_PF_NAMES = {0: "egg", 1: "box", 2: "cup", 3: "bottle", 4: "apple", 5: "bowl"}
+
+
 class YOLOE:
     def __init__(self, path):
         import os
         if not os.path.isfile(path):
             raise FileNotFoundError(path)
         self.path = path
+        self.is_pf = "-pf" in os.path.basename(path).lower()
         self.classes = None
+        self.names = dict(DEFAULT_PF_NAMES)
 
     def set_classes(self, names, *a):
         import os
+        if self.is_pf:
+            raise RuntimeError("Prompt-free (*-pf.pt) models do not support set_classes()")
         STATE.set_classes_calls.append((list(names), os.getcwd()))
         self.classes = list(names)
+        self.names = {i: n for i, n in enumerate(self.classes)}
 
     def predict(self, source, conf=0.25, imgsz=640, verbose=True, refer_image=None, visual_prompts=None,
                 predictor=None, device=None, **kw):
         import cv2
         STATE.calls.append({"source": source, "conf": conf, "refer_image": refer_image,
-                            "visual_prompts": visual_prompts, "predictor": predictor, "device": device})
+                            "visual_prompts": visual_prompts, "predictor": predictor, "device": device,
+                            "path": self.path})
         objects, ids = STATE.scene
         has_not = visual_prompts is not None and 1 in set(np.asarray(visual_prompts["cls"]).tolist())
         xyxy, cf, cl, polys = [], [], [], []
@@ -188,6 +197,26 @@ class YOLOE:
             m = (ids == k).astype(np.uint8)
             if m.sum() < 30 or ob["conf"] < conf:
                 continue
+            label = ob.get("label")
+            c_idx = 0
+            if visual_prompts is not None:
+                c_idx = 1 if (has_not and ob["name"] in STATE.not_egg_names) else 0
+            elif self.is_pf:
+                if label:
+                    for idx_k, nm in self.names.items():
+                        if nm == label:
+                            c_idx = idx_k
+                            break
+                    else:
+                        c_idx = max(self.names, default=0) + 1
+                        self.names[c_idx] = label
+                else:
+                    c_idx = 1 if ob.get("kind") == "box" else 0
+            elif self.classes and label:
+                matched = [i for i, p in enumerate(self.classes) if p.lower() in label.lower() or label.lower() in p.lower()]
+                if not matched:
+                    continue
+                c_idx = matched[0]
             if STATE.bleed_px:
                 m = cv2.dilate(m, np.ones((2 * STATE.bleed_px + 1,) * 2, np.uint8))
             cs, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -195,9 +224,10 @@ class YOLOE:
             ys, xs = np.nonzero(m)
             xyxy.append([xs.min(), ys.min(), xs.max(), ys.max()])
             cf.append(ob["conf"])
-            cl.append(1 if (has_not and ob["name"] in STATE.not_egg_names) else 0)
+            cl.append(c_idx)
             polys.append(cs)
-        return [_Result(_Boxes(np.array(xyxy, float).reshape(-1, 4), np.array(cf), np.array(cl)), _Masks(polys))]
+        return [_Result(_Boxes(np.array(xyxy, float).reshape(-1, 4), np.array(cf), np.array(cl)), _Masks(polys),
+                        names=dict(self.names))]
 
 
 def install():

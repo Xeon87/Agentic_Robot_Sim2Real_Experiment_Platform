@@ -1,0 +1,451 @@
+{
+  "version": "V3.63",
+  "generated": "2026-11-02 03:12:43",
+  "what": "headless MuJoCo twin: official AgileX finger pads driven by the URDF arm kinematics (V3.63: joint space, Cartesian moves as checked IK-continuity paths) + backend gripper logic (force clamp, penetration guard, auto CONNECT hold) + the two scene cups; scripted CS episode observe -> plan -> pick -> place -> verify; camera rows: fixed stand D435i perception instead of simulator truth. No arm dynamics / ros2_control. Not measured on hardware.",
+  "layout": {
+    "obj_cup_1": [
+      -0.35,
+      -0.13
+    ],
+    "obj_cup_2": [
+      -0.35,
+      0.13
+    ]
+  },
+  "cup_origin": "rim",
+  "defaults": {
+    "cup_rim_pinch_depth_mm": 35.0,
+    "cup_grasp_rim_angle_deg": 40.0,
+    "cup_place_rim_angle_deg": 35.0,
+    "cup_pregrasp_height_mm": 90.0,
+    "cup_transport_clearance_mm": 20.0,
+    "cup_release_gap_mm": 85.0,
+    "cup_release_xy_tol_mm": 7.5,
+    "cup_release_tilt_tol_deg": 3.0,
+    "cup_nested_height_mm": 25.3,
+    "cup_clamp_force_n": 5.0,
+    "cup_wall_tilt_follow": true
+  },
+  "rows": [
+    {
+      "knobs": {},
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 0,
+      "cup_solref": "scene default",
+      "pose_mode": "truth",
+      "line_refused_to_joint_space": [
+        "carry cup_1 over cup_2"
+      ],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.0,
+      "tilt_after_lift_deg": 2.01,
+      "failed_at": null,
+      "sim_time_s": 39.1
+    },
+    {
+      "knobs": {},
+      "source": "cup_2",
+      "target": "cup_1",
+      "position_noise_seed": 0,
+      "cup_solref": "scene default",
+      "pose_mode": "truth",
+      "line_refused_to_joint_space": [],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.0,
+      "tilt_after_lift_deg": 3.15,
+      "failed_at": null,
+      "sim_time_s": 34.3
+    },
+    {
+      "knobs": {
+        "cup_rim_pinch_depth_mm": 30.0,
+        "cup_clamp_force_n": 3.0
+      },
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 1,
+      "cup_solref": "scene default",
+      "pose_mode": "truth",
+      "line_refused_to_joint_space": [],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.3,
+      "tilt_after_lift_deg": 4.91,
+      "failed_at": null,
+      "sim_time_s": 50.5
+    },
+    {
+      "knobs": {
+        "cup_rim_pinch_depth_mm": 30.0,
+        "cup_clamp_force_n": 3.0
+      },
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 2,
+      "cup_solref": "scene default",
+      "pose_mode": "truth",
+      "line_refused_to_joint_space": [],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.0,
+      "tilt_after_lift_deg": 1.41,
+      "failed_at": null,
+      "sim_time_s": 34.7
+    },
+    {
+      "knobs": {
+        "cup_rim_pinch_depth_mm": 30.0,
+        "cup_clamp_force_n": 5.0
+      },
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 1,
+      "cup_solref": "scene default",
+      "pose_mode": "truth",
+      "line_refused_to_joint_space": [],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.0,
+      "tilt_after_lift_deg": 4.77,
+      "failed_at": null,
+      "sim_time_s": 50.4
+    },
+    {
+      "knobs": {
+        "cup_rim_pinch_depth_mm": 30.0,
+        "cup_clamp_force_n": 5.0
+      },
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 2,
+      "cup_solref": "scene default",
+      "pose_mode": "truth",
+      "line_refused_to_joint_space": [],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.0,
+      "tilt_after_lift_deg": 1.38,
+      "failed_at": null,
+      "sim_time_s": 34.7
+    },
+    {
+      "knobs": {
+        "cup_rim_pinch_depth_mm": 35.0,
+        "cup_clamp_force_n": 3.0
+      },
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 1,
+      "cup_solref": "scene default",
+      "pose_mode": "truth",
+      "line_refused_to_joint_space": [
+        "carry cup_1 over cup_2"
+      ],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.0,
+      "tilt_after_lift_deg": 3.01,
+      "failed_at": null,
+      "sim_time_s": 40.3
+    },
+    {
+      "knobs": {
+        "cup_rim_pinch_depth_mm": 35.0,
+        "cup_clamp_force_n": 3.0
+      },
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 2,
+      "cup_solref": "scene default",
+      "pose_mode": "truth",
+      "line_refused_to_joint_space": [
+        "carry cup_1 over cup_2"
+      ],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.2,
+      "tilt_after_lift_deg": 1.76,
+      "failed_at": null,
+      "sim_time_s": 39.4
+    },
+    {
+      "knobs": {
+        "cup_rim_pinch_depth_mm": 35.0,
+        "cup_clamp_force_n": 5.0
+      },
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 1,
+      "cup_solref": "scene default",
+      "pose_mode": "truth",
+      "line_refused_to_joint_space": [
+        "carry cup_1 over cup_2"
+      ],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.0,
+      "tilt_after_lift_deg": 2.94,
+      "failed_at": null,
+      "sim_time_s": 40.3
+    },
+    {
+      "knobs": {
+        "cup_rim_pinch_depth_mm": 35.0,
+        "cup_clamp_force_n": 5.0
+      },
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 2,
+      "cup_solref": "scene default",
+      "pose_mode": "truth",
+      "line_refused_to_joint_space": [
+        "carry cup_1 over cup_2"
+      ],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.0,
+      "tilt_after_lift_deg": 1.76,
+      "failed_at": null,
+      "sim_time_s": 39.4
+    },
+    {
+      "knobs": {
+        "cup_rim_pinch_depth_mm": 40.0,
+        "cup_clamp_force_n": 3.0
+      },
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 1,
+      "cup_solref": "scene default",
+      "pose_mode": "truth",
+      "line_refused_to_joint_space": [
+        "carry cup_1 over cup_2"
+      ],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.0,
+      "tilt_after_lift_deg": 3.9,
+      "failed_at": null,
+      "sim_time_s": 40.0
+    },
+    {
+      "knobs": {
+        "cup_rim_pinch_depth_mm": 40.0,
+        "cup_clamp_force_n": 3.0
+      },
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 2,
+      "cup_solref": "scene default",
+      "pose_mode": "truth",
+      "line_refused_to_joint_space": [
+        "carry cup_1 over cup_2"
+      ],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.0,
+      "tilt_after_lift_deg": 2.83,
+      "failed_at": null,
+      "sim_time_s": 39.2
+    },
+    {
+      "knobs": {
+        "cup_rim_pinch_depth_mm": 40.0,
+        "cup_clamp_force_n": 5.0
+      },
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 1,
+      "cup_solref": "scene default",
+      "pose_mode": "truth",
+      "line_refused_to_joint_space": [
+        "carry cup_1 over cup_2"
+      ],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.0,
+      "tilt_after_lift_deg": 3.55,
+      "failed_at": null,
+      "sim_time_s": 40.0
+    },
+    {
+      "knobs": {
+        "cup_rim_pinch_depth_mm": 40.0,
+        "cup_clamp_force_n": 5.0
+      },
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 2,
+      "cup_solref": "scene default",
+      "pose_mode": "truth",
+      "line_refused_to_joint_space": [
+        "carry cup_1 over cup_2"
+      ],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.0,
+      "tilt_after_lift_deg": 3.21,
+      "failed_at": null,
+      "sim_time_s": 39.2
+    },
+    {
+      "knobs": {},
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 3,
+      "cup_solref": "-5000 -30",
+      "pose_mode": "truth",
+      "line_refused_to_joint_space": [
+        "carry cup_1 over cup_2"
+      ],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.0,
+      "tilt_after_lift_deg": 0.53,
+      "failed_at": null,
+      "sim_time_s": 39.3
+    },
+    {
+      "knobs": {},
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 3,
+      "cup_solref": "-50000 -100",
+      "pose_mode": "truth",
+      "line_refused_to_joint_space": [
+        "carry cup_1 over cup_2"
+      ],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.0,
+      "tilt_after_lift_deg": 6.97,
+      "failed_at": null,
+      "sim_time_s": 39.3
+    },
+    {
+      "knobs": {
+        "cup_rim_pinch_depth_mm": 25.0
+      },
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 0,
+      "cup_solref": "scene default",
+      "pose_mode": "truth",
+      "line_refused_to_joint_space": [],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.0,
+      "tilt_after_lift_deg": 6.53,
+      "failed_at": null,
+      "sim_time_s": 35.0
+    },
+    {
+      "knobs": {
+        "cup_wall_tilt_follow": false
+      },
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 0,
+      "cup_solref": "scene default",
+      "pose_mode": "truth",
+      "line_refused_to_joint_space": [],
+      "stacked": false,
+      "nested_full": false,
+      "base_dz_mm": 0.0,
+      "tilt_after_lift_deg": null,
+      "failed_at": "plan_cup_stack:PLACE_UNREACHABLE",
+      "sim_time_s": 0.4
+    },
+    {
+      "knobs": {
+        "cup_rim_pinch_depth_mm": 25.0,
+        "cup_wall_tilt_follow": false
+      },
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 0,
+      "cup_solref": "scene default",
+      "pose_mode": "truth",
+      "line_refused_to_joint_space": [],
+      "stacked": false,
+      "nested_full": false,
+      "base_dz_mm": 0.0,
+      "tilt_after_lift_deg": null,
+      "failed_at": "plan_cup_stack:PLACE_UNREACHABLE",
+      "sim_time_s": 0.4
+    },
+    {
+      "knobs": {},
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 0,
+      "cup_solref": "scene default",
+      "pose_mode": "camera",
+      "line_refused_to_joint_space": [
+        "carry cup_1 over cup_2"
+      ],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.0,
+      "tilt_after_lift_deg": 0.0,
+      "failed_at": null,
+      "sim_time_s": 38.9
+    },
+    {
+      "knobs": {},
+      "source": "cup_2",
+      "target": "cup_1",
+      "position_noise_seed": 0,
+      "cup_solref": "scene default",
+      "pose_mode": "camera",
+      "line_refused_to_joint_space": [],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.0,
+      "tilt_after_lift_deg": 0.0,
+      "failed_at": null,
+      "sim_time_s": 33.9
+    },
+    {
+      "knobs": {},
+      "source": "cup_1",
+      "target": "cup_2",
+      "position_noise_seed": 4,
+      "cup_solref": "scene default",
+      "pose_mode": "camera",
+      "line_refused_to_joint_space": [
+        "carry cup_1 over cup_2"
+      ],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.0,
+      "tilt_after_lift_deg": 0.0,
+      "failed_at": null,
+      "sim_time_s": 38.9
+    },
+    {
+      "knobs": {},
+      "source": "cup_2",
+      "target": "cup_1",
+      "position_noise_seed": 5,
+      "cup_solref": "scene default",
+      "pose_mode": "camera",
+      "line_refused_to_joint_space": [],
+      "stacked": true,
+      "nested_full": true,
+      "base_dz_mm": 25.0,
+      "tilt_after_lift_deg": 0.0,
+      "failed_at": null,
+      "sim_time_s": 34.1
+    }
+  ],
+  "summary": {
+    "camera_runs": 4,
+    "camera_success": 4,
+    "default_like_runs": 20,
+    "default_like_success": 20
+  }
+}
