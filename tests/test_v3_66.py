@@ -372,7 +372,7 @@ ov = RT.overlay_dets({"dets": [{"det_id": "#1", "kind": "cup", "height_mm": 124.
                                {"det_id": "#2", "kind": "stack", "height_mm": 150.0, "conf": 0.8,
                                 "contour": [[100, 90], [130, 60], [160, 90]]},
                                {"det_id": "#3", "kind": "lifted", "conf": 0.7, "contour": []}]})
-assert len(ov) == 2 and ov[0]["label"] == "#1 单杯 125mm 0.91" and ov[0]["anchor"] == [40, 20]
+assert len(ov) == 2 and ov[0]["label"] == "#1 杯子 125mm 0.91" and ov[0]["anchor"] == [40, 20]   # V3.74: a standing cup is labelled 杯子 (single / nested comes from the vision review)
 assert ov[1]["label"].startswith("#2 已叠好") and ov[0]["color"] != ov[1]["color"]
 print("[X7] tab: prompt field (saved in NERO_CALIB_DIR), YOLOE settings shown, run refused when YOLOE is "
       "unavailable, overlay contours + labels")

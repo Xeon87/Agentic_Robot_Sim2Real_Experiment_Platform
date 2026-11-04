@@ -218,7 +218,8 @@ if gl_ok:
     r1 = tw.cup_pose("cup_1")[0]
     tw.d.qpos[adr:adr + 3] = [r1[0], r1[1], r1[2] + 0.06]
     mj.mj_forward(tw.m, tw.d)
-    near = [(np.array([r1[0], r1[1], r1[2] + 0.12]), np.eye(3), np.array([0.02, 0.02, 0.02]))]
+    # V3.74 LIFTED NEEDS THE GRIPPER AT THE CUP: the stand-in gripper sits at the raised rim (it was 6 cm above it)
+    near = [(np.array([r1[0], r1[1], r1[2] + 0.07]), np.eye(3), np.array([0.02, 0.02, 0.02]))]
     far = [(np.array([-0.10, 0.30, 0.40]), np.eye(3), np.array([0.02, 0.02, 0.02]))]
     k_near = sorted(e["kind"] for e in YC.perceive_cups_yolo(camfn(), robot_boxes=near)["dets"])
     res_far = YC.perceive_cups_yolo(camfn(), robot_boxes=far)
