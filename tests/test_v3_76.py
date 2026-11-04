@@ -180,7 +180,7 @@ if HAVE_MJ:
     def dropping_run(target_xy):
         tw = S.SortTwinIO()
         sk = S.SortSkills(tw)
-        assert sk.run_tool("pick_object", {"item_id": "item_1"})["ok"]
+        assert sk.run_tool("pick_object", {"item_id": "item_1", "box": "blue"})["ok"]
         orig = sk._go_line
 
         def go_line(label, *a, **kw):
@@ -202,7 +202,7 @@ if HAVE_MJ:
     assert not r6b["ok"] and r6b["reason"] == "ITEM_DROPPED" and sk.held is None, r6b
     tw = S.SortTwinIO()
     sk = S.SortSkills(tw)
-    assert sk.run_tool("pick_object", {"item_id": "item_4"})["ok"]
+    assert sk.run_tool("pick_object", {"item_id": "item_4", "box": "blue"})["ok"]
     tw._release_hold()
     tw.gripper_open(80.0)
     tw.step(800)
@@ -243,6 +243,7 @@ fn = re.search(r"^v376_alive\(\).*?$", src, re.M).group(0) + "\n" + re.search(r"
 cl = re.search(r"^cleanup\(\)\{.*?^\}", src, re.M | re.S).group(0)
 for lbl in ('"$TRAC_MOVEIT_PID" 1', '"$BIO_MOVEIT_PID" 1', '"$BACKEND_PID" 0', '"$GPU_PID" 0'):
     assert lbl in cl, lbl
+assert 'wait "$w1" "$w2" "$w3" "$w4"' in cl and not re.search(r"^\s*wait\s*$", cl, re.M)   # a bare wait hangs on the log tee
 (TMP / "stopfn.sh").write_text(fn + "\n", encoding="utf-8")
 script = f"""source {TMP / 'stopfn.sh'}
 bash -c 'trap "" INT TERM; sleep 311 & wait' & P1=$!

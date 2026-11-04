@@ -125,11 +125,12 @@ v376_stop(){                      # v376_stop <label> <pid> [group]  (group=1: s
 cleanup(){
   set +e
   status INFO "Shutdown: stopping NERO processes (V3.76 timed stop: INT -> TERM -> KILL)"
-  v376_stop "TRAC MoveIt" "$TRAC_MOVEIT_PID" 1 &
-  v376_stop "BioIK MoveIt + RViz" "$BIO_MOVEIT_PID" 1 &
-  v376_stop "backend (MuJoCo + GUI)" "$BACKEND_PID" 0 &
-  v376_stop "cuRobo GPU server" "$GPU_PID" 0 &
-  wait
+  local w1 w2 w3 w4
+  v376_stop "TRAC MoveIt" "$TRAC_MOVEIT_PID" 1 & w1=$!
+  v376_stop "BioIK MoveIt + RViz" "$BIO_MOVEIT_PID" 1 & w2=$!
+  v376_stop "backend (MuJoCo + GUI)" "$BACKEND_PID" 0 & w3=$!
+  v376_stop "cuRobo GPU server" "$GPU_PID" 0 & w4=$!
+  wait "$w1" "$w2" "$w3" "$w4" 2>/dev/null     # only these four (a bare wait also waits for the log tee -> hang)
   restore_kinematics
   status INFO "V3.76 stop complete"
 }
