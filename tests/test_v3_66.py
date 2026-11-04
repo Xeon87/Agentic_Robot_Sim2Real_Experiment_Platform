@@ -291,7 +291,9 @@ if gl_ok:
     assert out["ok"] and st6["nested_full"], [r_.get("reason") for r_ in out["results"] if not r_.get("ok")]
     assert max(abs(v) for v in tw6.q) < 1e-6
     last = [l for l in log6 if "[V3.66 REAL CUP YOLOE]" in l][-1]
-    assert " stack@" in last, last
+    # V3.74: the geometry no longer names the pair "stack"; the final view is ONE cup instance, taller than a single
+    # cup (the nested pair) - verify_stack decided "stacked" (out["ok"] above)
+    assert "YOLOE 1 个" in last and " cup@" in last and int(last.split(" h=")[1].split("mm")[0]) >= 140, last
     print(f"[X6] twin + YOLOE pipeline: cup_2 -> cup_1 nested, back at the start; last view: {last.split('|')[-1][:90]}")
 else:
     CP_reason = gl_reason if HAVE_MJ else "MuJoCo not installed"
