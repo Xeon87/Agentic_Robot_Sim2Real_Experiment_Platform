@@ -132,7 +132,7 @@ print("[G3] banana 201 x 64 mm fits a bin only lengthwise (0/180 deg yes, 45/90 
 # V3.76 (intended change): the SO-101 opens up / down, moving jaw on top -> roll default -90 (V3.75: 0); rev V3.76
 assert G.MOUNT["roll_deg"] == -90.0 and G.describe()["roll_deg"] == -90.0
 gp = G.describe()["grasp_point_in_tcp_mm"]
-assert abs(math.hypot(gp[0], gp[1]) - 2.0) < 0.2 and abs(gp[2] + 18.8) < 0.2, gp
+assert math.hypot(gp[0], gp[1]) < 5.0 and abs(gp[2] + 18.8) < 0.2, gp    # roll about link7 x moves the 2 mm axis offset
 r = subprocess.run([sys.executable, "-c", "import NERO_V364_SO101_Gripper as G; print(G.MOUNT['roll_deg'])"],
                    cwd=str(ROOT), env=dict(os.environ, NERO_V364_SO101_ROLL_DEG="-45"), capture_output=True, text=True)
 assert r.stdout.strip() == "-45.0", r.stdout + r.stderr

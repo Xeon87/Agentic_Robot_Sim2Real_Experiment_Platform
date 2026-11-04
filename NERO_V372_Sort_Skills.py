@@ -11,7 +11,7 @@ labels from observe_scene, decides each item's category from the prompt and call
 Skills (one physical tool at a time, like the cup skills; motion helpers, joint-path checks, safety latch handling
 and the SO-101 gripper profile are the V3.62-V3.64 CupSkills ones - this class only adds the sorting tools):
   observe_scene            items (id, detector label, centre, size, long-axis yaw, bin it is in, held) + bins + gripper
-  pick_object(item_id)     top-down grasp across the item's width (jaws closing perpendicular to its long axis; any
+  pick_object(item_id, box)top-down grasp across the item's width (jaws closing perpendicular to its long axis; any
                            direction for round items), fixed jaw first with a small clearance, straight descent, clamp,
                            straight lift; verified by contact / hold and by the item rising with the gripper
   place_in_box(box)        rotate in place so the long axis lies along the bin's y side, carry above a free slot of the
@@ -66,8 +66,9 @@ SLOT_DX_M = 0.045            # slots: bin centre -+ 45 mm along the closing dire
 JAW_CLEAR_M = 0.008          # open jaws keep this from every other item (candidate filter)
 PREFERRED_MARGIN_DEG = 8.0
 # V3.75 BIN FIT + COLLISION PRE-CHECK
-FIT_MARGIN_M = 0.008         # an item placed in a bin keeps its footprint this far inside the inner walls
+FIT_MARGIN_M = 0.006         # an item placed in a bin keeps its footprint this far inside the inner walls (V3.75: 8)
 ITEM_WALL_MARGIN_M = 0.004   # 3-D check: held item box vs bin walls at the release pose
+MIN_ITEM_GAP_M = 0.003       # V3.76 NO OVERLAP: a placed item keeps this from the items already in the bin
 MARKER_V375 = "V3.75 BIN FIT + COLLISION PRE-CHECK"
 # V3.76 CARRY SLOWER WITH AN ITEM: the V3.75 run diverged (joint 5 / 7 runaway) while rotating / carrying a held item
 HELD_SLOW = 3.0              # time stretch of the rotate / carry / lowering motions while an item is held (V3.75: 1.5-2)
@@ -84,6 +85,22 @@ def grasp_R(phi):
     z = np.array([0.0, 0.0, -1.0])
     y = np.array([math.cos(phi), math.sin(phi), 0.0])
     return np.column_stack([np.cross(y, z), y, z])
+
+
+def _turning_segment(tag, p0, R0, p1, R1, n=6):
+    """V3.76: intermediate poses of a straight TCP line whose orientation turns from R0 to R1 (slerp), names "~..."
+    (strict IK continuity, like CK.segment_points)"""
+    q0, q1 = np.asarray(CK.R_to_quat_xyzw(R0), float), np.asarray(CK.R_to_quat_xyzw(R1), float)
+    if float(q0 @ q1) < 0.0:
+        q1 = -q1
+    out = []
+    for i in range(1, n):
+        u = i / float(n)
+        d = float(np.clip(q0 @ q1, -1.0, 1.0))
+        th = math.acos(d)
+        q = q0 if th < 1e-6 else (math.sin((1 - u) * th) * q0 + math.sin(u * th) * q1) / math.sin(th)
+        out.append((f"~{tag}{i}", p0 + (p1 - p0) * u, CK.quat_xyzw_to_R(q / np.linalg.norm(q))))
+    return out
 
 
 def yaw_of_wxyz(q):
@@ -224,6 +241,7 @@ class SortSkills(CK.CupSkills):
         self.skill = skill or {"code": "SI", "short_name": "Sort Items", "skill_id": "sort_items_top_grasp"}
         self.held = None                 # item id
         self.held_off = None             # item centre in the TCP frame (measured after the lift)
+        self.held_phi = None             # V3.76: closing direction (deg, world) of the current grasp
         self.placed = {}                 # item id -> requested bin
         self.picked_from = {}
 
@@ -335,6 +353,21 @@ class SortSkills(CK.CupSkills):
         return {"moved": True, "home": bool(r.get("ok", True)), "straight_rise": rose,
                 "rose_to_mm": round(float(self.io.tcp_pose()[0][2]) * 1000)}
 
+    def _v376_placeable(self, it, phi_deg, q_lift, p_grasp, boxes=BOXES):
+        """V3.76 PLACEABLE GRASP: in how many bins the item can be laid lengthwise from this grasp - the place planner
+        itself (_plan_place, lengthwise angles only) on the state predicted after the lift (the item rigid in the
+        gripper, LIFT_M higher)"""
+        T_l = self._arm().fk(np.asarray(q_lift, float))
+        p_l, R_l = T_l[:3, 3].copy(), T_l[:3, :3].copy()
+        c_l = np.asarray(it["c"], float) + np.array([0.0, 0.0, LIFT_M])
+        off = R_l.T @ (c_l - p_l)
+        n = 0
+        for box in boxes:
+            best, _rej = self._plan_place(box, it["id"], it, q_lift, p_l, R_l, off, phi_deg, float(c_l[2]),
+                                          lengthwise_only=it["spec"]["shape"] != "round")
+            n += int(best is not None)
+        return n
+
     # -- V3.75 COLLISION PRE-CHECK
     def _v375_states_ok(self, states, opening_mm, extra=None):
         """every state: MoveIt pairs (backend) + SO-101 coarse boxes; MoveIt-gripper-model pairs are accepted only if
@@ -366,7 +399,7 @@ class SortSkills(CK.CupSkills):
                 best = min(best, float(np.linalg.norm(t - (c + s * u))) - sp["width"] / 2.0)
         return best
 
-    def _plan_pick(self, it, q_now):
+    def _plan_pick(self, it, q_now, box=None):
         sp = it["spec"]
         width = float(sp["width"])
         gap_m = (width * 1000.0 + OPEN_MARGIN_MM) / 1000.0
@@ -417,17 +450,29 @@ class SortSkills(CK.CupSkills):
             if not (ok_o and ok_c):
                 self.v375_rejects.append({"phi_deg": round(_wrap(ph), 1), "collision": why_o or why_c})
                 continue
+            # V3.76 PLACEABLE GRASP: a long item must later lie lengthwise in a bin; with J7 limited to +-90 deg the grasp
+            # angle decides whether that wrist angle is reachable (V3.76 twin, seed 2: no lengthwise place for the banana)
+            # V3.76 PICK FOR THE BIN: the agent says where the item goes (pick_object box) -> only that bin counts
+            targets = (box,) if box in BOXES else BOXES
+            n_place = self._v376_placeable(it, ph, r["q"][i_l], p_a, targets)     # long and round items
+            # V3.76 ACROSS FIRST: how far the closing direction is from perpendicular to the long axis (a diagonal
+            # grasp turns a banana by ~20 deg when the jaws open in the bin)
+            off_perp = 0.0 if sp["shape"] == "round" else abs(_wrap(ph - float(it["yaw_deg"]) - 90.0))
+            off_perp = min(off_perp, 180.0 - off_perp)
             cands.append({"phi_deg": round(_wrap(ph), 1), "margin": r["min_margin_deg"], "binding": r["binding"],
                           "jaw_clear_mm": round(clear * 1000, 1), "tcp": tcp, "q": q,
                           "q_down": r["q"][:i_g + 1], "q_up": r["q"][i_g:i_l + 1], "gap_mm": gap_m * 1000.0,
-                          "zg": zg})
-            if r["min_margin_deg"] >= PREFERRED_MARGIN_DEG:
+                          "zg": zg, "placeable_bins": n_place, "off_perp_deg": off_perp})
+            if r["min_margin_deg"] >= PREFERRED_MARGIN_DEG and n_place == len(targets) and off_perp < 1.0:
                 break
         if not cands:
             return None
-        return max(cands, key=lambda c: c["margin"])
+        # placeable (in the target bin / in some bin) first, then a grasp across the item (a diagonal grasp lets the
+        # item swing in the hold - V3.76 twin), then placeable in more bins, then the joint margin
+        return max(cands, key=lambda c: (min(c["placeable_bins"], 1), -round(c["off_perp_deg"] / 15.0),
+                                         c["placeable_bins"], min(c["margin"], PREFERRED_MARGIN_DEG), c["margin"]))
 
-    def pick_object(self, item_id="item_1", **_):
+    def pick_object(self, item_id="item_1", box="any", **_):
         tool = "pick_object"
         if item_id not in ITEM_IDS:
             return self._res(tool, False, reason="UNKNOWN_ITEM", nxt=["observe_scene"])
@@ -442,7 +487,12 @@ class SortSkills(CK.CupSkills):
             q_now = self.io.current_q()
         except Exception:
             q_now = None
-        plan = self._plan_pick(it, q_now)
+        plan = self._plan_pick(it, q_now, box)
+        if box in BOXES:
+            v["planned_for_box"] = box
+        if plan is not None and plan.get("placeable_bins", 1) == 0:
+            v["warning_place"] = ("no grasp found from which the item can be laid into "
+                                  + (f"the {box} bin" if box in BOXES else "a bin") + " (lengthwise) - placing may fail")
         if plan is None:
             rej = getattr(self, "v375_rejects", [])
             if rej:                                   # V3.75: what collided (MoveIt pairs / SO-101 boxes)
@@ -486,11 +536,12 @@ class SortSkills(CK.CupSkills):
         tcp, qt = self.io.tcp_pose()
         self.held_off = CK.quat_xyzw_to_R(qt).T @ (it2["c"] - np.asarray(tcp, float))
         self.stage = "HOLDING"
+        self.held_phi = float(plan["phi_deg"])
         self.picked_from[item_id] = it["in_bin"]
         return self._res(tool, True, v, nxt=["place_in_box"])
 
     # -- place
-    def _slot(self, box, iid, phi, yaw_deg=None):
+    def _slot(self, box, iid, phi, yaw_deg=None, ranked=False):
         """V3.75 BIN FIT: item centre in the bin for the closing direction phi and the item's long-axis yaw at the
         release (yaw_deg).  Candidate centres on a grid; the item footprint (NERO_V343 sort_item_footprint) must stay
         FIT_MARGIN_M inside the inner walls.  Items already in the bin -> the candidate with the largest clearance to
@@ -506,28 +557,144 @@ class SortSkills(CK.CupSkills):
                 return min(slots, key=lambda s_: float(np.hypot(*s_)))
             return max(slots, key=lambda s_: min(float(np.hypot(*(s_ - o["c"][:2]))) for o in inside))
         sp = SC.SORT_ITEMS[ITEM_IDS[iid]]
+        if sp["shape"] == "round":
+            yaw_deg = 0.0            # V3.76: a round item's footprint does not turn with the wrist
         a = math.radians(yaw_deg)
         ul, uc = np.array([math.cos(a), math.sin(a)]), np.array([-math.sin(a), math.cos(a)])
         ix, iy = b["inner"][0] / 2.0 - FIT_MARGIN_M, b["inner"][1] / 2.0 - FIT_MARGIN_M
         fits = []
-        for t in np.linspace(-0.08, 0.08, 17):
+        for t in np.linspace(-0.08, 0.08, 33):           # V3.76: 5 mm grid (V3.75: 10 mm)
             for s_ in (0.0, -0.02, 0.02, -0.04, 0.04):
                 c = np.array([cx, cy]) + t * uc + s_ * ul
                 rc, half, ang = SC.sort_item_footprint(ITEM_IDS[iid], c, yaw_deg)
                 if all(abs(px - cx) <= ix and abs(py - cy) <= iy for px, py in CC.rect_corners(rc, half, ang)):
                     fits.append((c, (rc, half, ang), t, s_))
         if not fits:
-            return None
+            return [] if ranked else None
         if inside:
             def clear(f):
                 return min(CC.rect_dist(f[1], SC.sort_item_footprint(o["body"], o["c"][:2], o["yaw_deg"]))
                            for o in inside)
-            best = max(fits, key=lambda f: (round(clear(f), 3), -abs(f[3]), -float(np.hypot(*f[0]))))
+            # V3.76 NO OVERLAP: only spots MIN_ITEM_GAP_M clear of the items in the bin (V3.76 twin: apple on the banana)
+            order = sorted([f for f in fits if clear(f) >= MIN_ITEM_GAP_M],
+                           key=lambda f: (-round(clear(f), 3), abs(f[3]), float(np.hypot(*f[0]))))
+            if ranked:
+                return [(float(f[0][0]), float(f[0][1])) for f in order]
+            if not order:
+                return None
+            best = order[0]
         else:
+            # V3.76 FREE STRIP: against the side wall that leaves the widest free strip across the bin for the next
+            # item (V3.75 took the side nearer the robot on a 10 mm grid: 70 mm left for the 74 mm apple)
             mid = [f for f in fits if f[3] == 0.0] or fits
-            ends = [min(mid, key=lambda f: f[2]), max(mid, key=lambda f: f[2])]      # against either side wall
-            best = min(ends, key=lambda f: float(np.hypot(*f[0])))
+            yw = (cy - b["inner"][1] / 2.0, cy + b["inner"][1] / 2.0)
+
+            def free(f):
+                ys = [py for _px, py in CC.rect_corners(*f[1])]
+                return max(yw[1] - max(ys), min(ys) - yw[0])
+            order = sorted(mid, key=lambda f: (-round(free(f), 3), float(np.hypot(*f[0]))))
+            if ranked:           # V3.76: the place loop tries them in turn (gripper clear of the walls)
+                return [(float(f[0][0]), float(f[0][1])) for f in order]
+            best = order[0]
         return float(best[0][0]), float(best[0][1])
+
+    def _plan_place(self, box, iid, it, q_now, tcp0, R_now, held_off, held_phi, item_z, lengthwise_only=False):
+        """V3.76 ONE PLACE PLANNER: place_in_box and the pick-time check (_v376_placeable, on the predicted state after
+        the lift) use this same search -> (best candidate or None, collision rejects)"""
+        sp = it["spec"]
+        b = SC.SORT_BINS[box]
+        c_rel = sp["cz"] + b["floor_t"] + RELEASE_ABOVE_FLOOR_M
+        c_above = b["wall_h"] + ABOVE_WALL_M + sp["cz"]
+        import NERO_V364_SO101_Gripper as G
+        # V3.75 BIN FIT: the item's long-axis yaw at the release follows the wrist rotation; orientations whose
+        # footprint does not fit the (smaller) bin are skipped; the long axis along the bin's long side first
+        yaw_item = float(it["yaw_deg"])
+        held_v = G.opening_mm_for_tip_gap(max(2.0, sp["width"] * 1000.0))
+        long_x = b["inner"][0] >= b["inner"][1]
+
+        def yaw_at(Rt_):
+            Rr = Rt_ @ R_now.T
+            return yaw_item + math.degrees(math.atan2(Rr[1, 0], Rr[0, 0]))
+
+        def pref(ph_):
+            ya = math.radians(yaw_at(grasp_R(math.radians(ph_)) @ self.prof.T_grasp_tcp[:3, :3]))
+            return abs(math.sin(ya)) if long_x else abs(math.cos(ya))
+        grid = [float(v) for v in range(0, 360, 15)]
+        if sp["shape"] != "round":
+            # V3.76 EXACT LENGTHWISE: the two angles that lay the long axis exactly along the bin (the 15 deg grid can
+            # be 7.5 deg off - a 20 cm banana 7.5 deg off already takes 89 of the 170 mm bin width)
+            d0 = yaw_at(grasp_R(0.0) @ self.prof.T_grasp_tcp[:3, :3]) - (0.0 if long_x else 90.0)
+            grid += [round((-d0) % 360.0, 1), round((180.0 - d0) % 360.0, 1)]
+        phis = sorted(set(grid), key=lambda ph_: (round(pref(ph_), 2), ph_ % 30 != 0))
+        if lengthwise_only:          # V3.76 PLACEABLE GRASP: only the angles that lay the item along the bin
+            phis = [ph_ for ph_ in phis if pref(ph_) <= 0.05]
+        best = None
+        rejects = []
+        # V3.76 BOTH WAYS PER ANGLE: an angle is tried with the in-place turn, then with the wrist turning along the carry
+        # (V3.75 tried the second way only when no angle worked the first way - the lengthwise banana angles were lost)
+        got = set()
+        for ph, rotate_first in [(p_, rf_) for p_ in phis for rf_ in (True, False)]:
+            if ph not in got:
+                # the long axis is perpendicular to the closing direction phi; the slot is offset along phi
+                R = grasp_R(math.radians(ph))
+                Rt = R @ self.prof.T_grasp_tcp[:3, :3]
+                off = Rt @ held_off
+                y_rel = yaw_at(Rt)
+                # V3.76 GRIPPER CLEAR OF THE WALLS: the fixed finger sits outside the item; a slot pushed against a side
+                # wall made it touch the wall (V3.76 twin: the lengthwise banana angles 75 / 255 were rejected) ->
+                # the ranked spots of this angle are tried in turn (IK + collision check of the gripper / item)
+                found = False
+                for slot in self._slot(box, iid, math.radians(ph), yaw_deg=y_rel, ranked=True)[:8]:
+                    sx, sy = slot
+                    p_above = np.array([sx, sy, max(c_above, float(item_z))]) - off
+                    p_rel = np.array([sx, sy, c_rel]) - off
+                    p_rot = np.array([tcp0[0], tcp0[1], max(tcp0[2], p_above[2])])
+                    # V3.76 CARRY LINE IN THE PLAN: the straight carry to "above" is part of the chain (fixed wrist after
+                    # an in-place rotation, else the wrist turning along the line like the Cartesian path) - V3.76 twin:
+                    # an unchecked carry ran J6 into its limit and the joint fallback would dip the held apple
+                    if rotate_first:
+                        carry = CK.segment_points("c", p_rot, p_above, Rt, 6)
+                    else:
+                        carry = _turning_segment("c", np.asarray(tcp0, float), R_now, p_above, Rt, 6)
+                    chain = (([("rotate", p_rot, Rt)] if rotate_first else []) + carry + [("above", p_above, Rt)]
+                             + CK.segment_points("l", p_above, p_rel, Rt, 6) + [("release", p_rel, Rt)])
+                    r = CK.ik_chain(chain, q_now)
+                    if (not r["ok"] or r["min_margin_deg"] < CK.MIN_MARGIN_RELAXED_DEG) and not rotate_first:
+                        r = CK.ik_chain(chain, q_now, start_first=False)
+                    if not r["ok"] or r["min_margin_deg"] < CK.MIN_MARGIN_RELAXED_DEG:
+                        continue
+                    names = [c[0] for c in chain]
+                    # V3.75 COLLISION PRE-CHECK: above / lowering / release with the held item's box at the release
+                    i_a, i_r = names.index("above"), names.index("release")
+                    sts = [r["q"][i_a], r["q"][(i_a + i_r) // 2], r["q"][i_r]]
+                    ibox = CC.item_box((sx, sy), c_rel - sp["cz"], y_rel, sp)
+                    ok_s, why_s = self._v375_states_ok(sts, held_v)
+                    hit = CC.check_parts([ibox], CC.world_boxes(SCENE)[1:], ITEM_WALL_MARGIN_M) if ok_s else []
+                    if not ok_s or hit:
+                        rejects.append({"phi_deg": ph, "collision": why_s or CC.pairs_text(hit, 3),
+                                                  "slot_xy_m": [round(sx, 3), round(sy, 3)]})
+                        continue                   # V3.76: the next spot of this angle
+                    found = True
+                    break
+                if not found:
+                    continue
+                cand = {"phi": ph, "margin": r["min_margin_deg"], "item_yaw_deg": round(_wrap(y_rel), 1), "binding": r["binding"], "q": dict(zip(names, r["q"])),
+                        "q_down": r["q"][names.index("above"):], "p_rot": p_rot, "p_above": p_above, "p_rel": p_rel,
+                        "Rt": Rt, "rotate_first": rotate_first, "slot": [round(float(sx), 3), round(float(sy), 3)]}
+                # V3.76 LENGTHWISE FIRST: alignment with the bin's long side ranks before the joint margin (V3.76 twin:
+                # the banana lay 22 deg off and took the middle of the bin, the apple had no room)
+                cand["align"] = round(pref(ph), 2)
+                # V3.76 SMALL WRIST TURN: a 168 deg in-place turn swung the held banana ~30 deg on its CONNECT hold
+                # (twin) -> after the alignment, the smaller turn from the grasp's closing direction wins
+                cand["turn_deg"] = round(abs(_wrap(ph - held_phi)), 1) if held_phi is not None else 0.0
+                key = lambda c_: (-c_["align"], -round(c_["turn_deg"] / 45.0), min(c_["margin"], PREFERRED_MARGIN_DEG),
+                                  c_["margin"])
+                got.add(ph)
+                if best is None or key(cand) > key(best):
+                    best = cand
+                if cand["margin"] >= PREFERRED_MARGIN_DEG and cand["align"] <= 0.05 and cand["turn_deg"] <= 45.0:
+                    break
+        return best, rejects
 
     def place_in_box(self, box="red", **_):
         tool = "place_in_box"
@@ -541,68 +708,13 @@ class SortSkills(CK.CupSkills):
         sp = it["spec"]
         b = SC.SORT_BINS[box]
         v = {"item": iid, "label": sp["label"], "box": box}
-        c_rel = sp["cz"] + b["floor_t"] + RELEASE_ABOVE_FLOOR_M
-        c_above = b["wall_h"] + ABOVE_WALL_M + sp["cz"]
         q_now = self.io.current_q()
         tcp0, _q0 = self.io.tcp_pose()
-        import NERO_V364_SO101_Gripper as G
-        # V3.75 BIN FIT: the item's long-axis yaw at the release follows the wrist rotation; orientations whose
-        # footprint does not fit the (smaller) bin are skipped; the long axis along the bin's long side first
         R_now = CK.quat_xyzw_to_R(_q0)
-        yaw_item = float(it["yaw_deg"])
+        import NERO_V364_SO101_Gripper as G
         held_v = G.opening_mm_for_tip_gap(max(2.0, sp["width"] * 1000.0))
-        long_x = b["inner"][0] >= b["inner"][1]
-
-        def yaw_at(Rt_):
-            Rr = Rt_ @ R_now.T
-            return yaw_item + math.degrees(math.atan2(Rr[1, 0], Rr[0, 0]))
-
-        def pref(ph_):
-            ya = math.radians(yaw_at(grasp_R(math.radians(ph_)) @ self.prof.T_grasp_tcp[:3, :3]))
-            return abs(math.sin(ya)) if long_x else abs(math.cos(ya))
-        phis = sorted(range(0, 360, 15), key=lambda ph_: (round(pref(ph_), 2), ph_ % 30 != 0))
-        best = None
-        self.v375_rejects = []
-        for rotate_first in (True, False):
-            for ph in phis:
-                # the long axis is perpendicular to the closing direction phi; the slot is offset along phi
-                R = grasp_R(math.radians(ph))
-                Rt = R @ self.prof.T_grasp_tcp[:3, :3]
-                off = Rt @ self.held_off
-                y_rel = yaw_at(Rt)
-                slot = self._slot(box, iid, math.radians(ph), yaw_deg=y_rel)
-                if slot is None:
-                    continue
-                sx, sy = slot
-                p_above = np.array([sx, sy, max(c_above, float(it["c"][2]))]) - off
-                p_rel = np.array([sx, sy, c_rel]) - off
-                p_rot = np.array([tcp0[0], tcp0[1], max(tcp0[2], p_above[2])])
-                chain = (([("rotate", p_rot, Rt)] if rotate_first else []) + [("above", p_above, Rt)]
-                         + CK.segment_points("l", p_above, p_rel, Rt, 6) + [("release", p_rel, Rt)])
-                r = CK.ik_chain(chain, q_now)
-                if (not r["ok"] or r["min_margin_deg"] < CK.MIN_MARGIN_RELAXED_DEG) and not rotate_first:
-                    r = CK.ik_chain(chain, q_now, start_first=False)
-                if not r["ok"] or r["min_margin_deg"] < CK.MIN_MARGIN_RELAXED_DEG:
-                    continue
-                names = [c[0] for c in chain]
-                # V3.75 COLLISION PRE-CHECK: above / lowering / release with the held item's box at the release
-                i_a, i_r = names.index("above"), names.index("release")
-                sts = [r["q"][i_a], r["q"][(i_a + i_r) // 2], r["q"][i_r]]
-                ibox = CC.item_box((sx, sy), c_rel - sp["cz"], y_rel, sp)
-                ok_s, why_s = self._v375_states_ok(sts, held_v)
-                hit = CC.check_parts([ibox], CC.world_boxes(SCENE)[1:], ITEM_WALL_MARGIN_M) if ok_s else []
-                if not ok_s or hit:
-                    self.v375_rejects.append({"phi_deg": ph, "collision": why_s or CC.pairs_text(hit, 3)})
-                    continue
-                cand = {"phi": ph, "margin": r["min_margin_deg"], "item_yaw_deg": round(_wrap(y_rel), 1), "binding": r["binding"], "q": dict(zip(names, r["q"])),
-                        "q_down": r["q"][names.index("above"):], "p_rot": p_rot, "p_above": p_above, "p_rel": p_rel,
-                        "Rt": Rt, "rotate_first": rotate_first, "slot": [round(float(sx), 3), round(float(sy), 3)]}
-                if best is None or cand["margin"] > best["margin"]:
-                    best = cand
-                if cand["margin"] >= PREFERRED_MARGIN_DEG:
-                    break
-            if best is not None:
-                break
+        best, self.v375_rejects = self._plan_place(box, iid, it, q_now, tcp0, R_now, self.held_off, self.held_phi,
+                                                   float(it["c"][2]))
         if best is None:
             if self.v375_rejects:
                 v["collision_rejects"] = self.v375_rejects[:4]
@@ -689,7 +801,7 @@ class SortSkills(CK.CupSkills):
         for iid, body in ITEM_IDS.items():
             sp = SC.SORT_ITEMS[body]
             box = (rule or {}).get(sp["label"]) or ("red" if sp["category"] == "fruit" else "blue")
-            r = self.run_tool("pick_object", {"item_id": iid})
+            r = self.run_tool("pick_object", {"item_id": iid, "box": box})
             out.append(r)
             if not r.get("ok"):
                 continue
@@ -708,10 +820,12 @@ SORT_TOOLS = [
      "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False}, "strict": True},
     {"type": "function", "name": "pick_object",
      "description": "Grasp one item from above with the SO-101 gripper (jaws across its width), lift it. Plans the grasp "
-                    "itself (reachable closing direction, joint margins, open jaws clear of the other items). Verifies "
+                    "itself (reachable closing direction, joint margins, open jaws clear of the other items) so that the "
+                    "item can afterwards be laid into `box` (the bin you decided for it; 'any' if undecided). Verifies "
                     "contact and that the item rose with the gripper.",
-     "parameters": {"type": "object", "properties": {"item_id": {"type": "string", "enum": _IDS}},
-                    "required": ["item_id"], "additionalProperties": False}, "strict": True},
+     "parameters": {"type": "object", "properties": {"item_id": {"type": "string", "enum": _IDS},
+                                                     "box": {"type": "string", "enum": list(BOXES) + ["any"]}},
+                    "required": ["item_id", "box"], "additionalProperties": False}, "strict": True},
     {"type": "function", "name": "place_in_box",
      "description": "Carry the held item into the open bin (red or blue), lower it to just above the bin floor, open, "
                     "retreat up. Verifies the item lies inside that bin.",
@@ -734,7 +848,8 @@ everything else). You control the robot ONLY through the function tools. Never i
 Procedure:
 1. Call observe_scene first. From each item's label decide its category and its target bin according to the user's
    task. State your assignment (item id, label, category, bin) in one short line of text before the first pick.
-2. For every item that is not yet in its target bin: pick_object(item_id) -> place_in_box(box). One physical tool at a
+2. For every item that is not yet in its target bin: pick_object(item_id, box) -> place_in_box(box), with the same box
+   (the grasp is chosen so that the item fits that bin). One physical tool at a
    time; after every tool read ok, reason, physical_verification and recommended_next_actions.
 3. Items the task does not mention, or whose category is unclear: leave them on the table and say so (do not guess).
 4. If pick_object fails (ITEM_NOT_LIFTED, NO_TWO_FINGER_CONTACT, MOTION_FAILED), the gripper is empty: call

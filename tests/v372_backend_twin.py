@@ -73,7 +73,7 @@ class ScriptedSortLLM:
             for it in last["scene"]["items"]:
                 box = self.fruit if any(w in it["label"].lower() for w in FRUIT_WORDS) else self.other
                 if it["in_bin"] != box:
-                    self.queue += [("pick_object", {"item_id": it["id"]}), ("place_in_box", {"box": box})]
+                    self.queue += [("pick_object", {"item_id": it["id"], "box": box}), ("place_in_box", {"box": box})]
             self.queue += [("check_bins", {}), ("return_to_safe_pose", {})]
         if last.get("tool") == "return_to_safe_pose":
             return self._msg("sorted: fruit -> red bin, other items -> blue bin (check_bins)")
