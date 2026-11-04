@@ -60,12 +60,12 @@ except Exception:
 
 # ------------------------------------------------------------------ D1
 for m in (CON, RR, YP, W49, S):
-    assert m.VERSION in ("V3.72", "V3.73", "V3.74", "V3.75", "V3.76", "V3.77", "V3.78"), (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.72", "V3.73", "V3.74", "V3.75", "V3.76", "V3.77", "V3.78") and SC.SCENES_REV in ("V3.72", "V3.75", "V3.76", "V3.77", "V3.78")
+    assert m.VERSION in ("V3.72", "V3.73", "V3.74", "V3.75", "V3.76", "V3.77", "V3.78", "V3.79"), (m.__name__, m.VERSION)
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.72", "V3.73", "V3.74", "V3.75", "V3.76", "V3.77", "V3.78", "V3.79") and SC.SCENES_REV in ("V3.72", "V3.75", "V3.76", "V3.77", "V3.78", "V3.79")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 for fn, h in (("NERO_V326_Wrist_Camera.py", "6b5c5d683073e4252b82c1c703ad664173960a179947f9e72775bb9683697d0a"),
               ("NERO_V2_7_1_Agent.py", "3e52d05ea84d94c8359d5875fa0fee8c2cc42d612b52e59109e1166912439696"),
-              ("NERO_V325_Camera.py", "a58e69b363a5a861b3ad0806ba276c49601fc214ffdfc07ffba9bdc0c2c65797")):
+              ("NERO_V325_Camera.py", "69aca871f32372e916eb9fd269d1bc42276f50fce1bd7828c07a8b2e62fe9639")):
     assert H((ROOT / fn).read_bytes()) == h, f"{fn} changed"
 BK = (ROOT / "NERO_V2_7_1_Unified_Backend.py").read_text(encoding="utf-8")
 a = BK.index('        if _v343_scene_name() == "stack_cups":   # V3.62 STACK CUPS AGENT')

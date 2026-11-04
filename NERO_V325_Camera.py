@@ -1095,6 +1095,9 @@ class RealSenseSource:
         self.t_frame = None
         self.depth_res = DEPTH_RES[1]            # V3.53: default depth resolution 1280×720
         self.depth_preset = DEPTH_PRESETS[0]
+        # V3.79 CAMERA LAB HOOKS: sensor options and filter-set depth collections run inside the reader thread
+        self._dev_cmds = []
+        self._depth_jobs = []
 
     def running(self):
         return self.thread is not None and self.thread.is_alive()
@@ -1150,6 +1153,11 @@ class RealSenseSource:
             except Exception:
                 info["preset"] = "default"
             info["depth_res"] = f"{dw}×{dh}"
+            try:                                   # V3.79 SAVED D435I PROFILE (camera lab, only when locked)
+                import NERO_V379_Camera_Lab as LAB379
+                info["profile"] = LAB379.apply_saved_profile(prof.get_device(), rs, self.log)
+            except Exception as exc:
+                self.log(f"[WARN] [V3.79 camera lab] 相机参数没有套用：{exc}")
             scale = ds.get_depth_scale()
             intr = prof.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
             K = {"width": intr.width, "height": intr.height, "fx": intr.fx, "fy": intr.fy, "ppx": intr.ppx, "ppy": intr.ppy}
@@ -1168,6 +1176,8 @@ class RealSenseSource:
                 c, d = al.get_color_frame(), al.get_depth_frame()
                 if not c or not d:
                     continue
+                if self._dev_cmds or self._depth_jobs:    # V3.79 CAMERA LAB HOOKS
+                    self._serve_lab(prof.get_device(), rs, d, scale)
                 d = temporal.process(spatial.process(d))
                 depth = np.asanyarray(d.get_data()).astype(np.float32) * scale
                 rgb = np.asanyarray(c.get_data()).copy()
@@ -1190,6 +1200,61 @@ class RealSenseSource:
     def frames(self):
         with self.lock:
             return self.rgb, self.depth, self.frame_id
+
+    # V3.79 CAMERA LAB HOOKS
+    def run_on_device(self, fn, timeout=5.0):
+        """V3.79: fn(device, rs) inside the reader thread (the sensor options belong to it) -> its result"""
+        if not self.running():
+            raise RuntimeError("相机未连接")
+        box = {"ev": threading.Event()}
+        with self.lock:
+            self._dev_cmds.append((fn, box))
+        if not box["ev"].wait(timeout):
+            raise TimeoutError("相机线程没有响应")
+        if "err" in box:
+            raise box["err"]
+        return box.get("out")
+
+    def collect_depth(self, make_chain, n, timeout=None):
+        """V3.79: n aligned depth frames (m) through make_chain(rs) -> fn(frame) (None = raw), in the reader thread"""
+        if not self.running():
+            raise RuntimeError("相机未连接")
+        job = {"make": make_chain, "n": int(n), "out": [], "ev": threading.Event()}
+        with self.lock:
+            self._depth_jobs.append(job)
+        if not job["ev"].wait(timeout or (5.0 + 0.2 * int(n))):
+            with self.lock:
+                if job in self._depth_jobs:
+                    self._depth_jobs.remove(job)
+            raise TimeoutError(f"只收到 {len(job['out'])}/{n} 帧深度")
+        if "err" in job:
+            raise job["err"]
+        return job["out"]
+
+    def _serve_lab(self, device, rs, d, scale):
+        import numpy as np
+        with self.lock:
+            cmds, self._dev_cmds = self._dev_cmds, []
+            jobs = list(self._depth_jobs)
+        for fn, box in cmds:
+            try:
+                box["out"] = fn(device, rs)
+            except Exception as exc:
+                box["err"] = exc
+            box["ev"].set()
+        for job in jobs:
+            try:
+                if "chain" not in job:
+                    job["chain"] = job["make"](rs) if job["make"] else None
+                f = job["chain"](d) if job["chain"] else d
+                job["out"].append(np.asanyarray(f.get_data()).astype(np.float32) * scale)
+            except Exception as exc:
+                job["err"] = exc
+            if "err" in job or len(job["out"]) >= job["n"]:
+                with self.lock:
+                    if job in self._depth_jobs:
+                        self._depth_jobs.remove(job)
+                job["ev"].set()
 
     def display_ppm(self, view="color", size=(560, 315)):
         import numpy as np
@@ -1787,6 +1852,7 @@ class CameraTabUI:
         r = ttk.Frame(p)
         r.pack(fill="x", pady=3)
         ttk.Button(r, text="保存相机信息", command=self.on_save_info).pack(side="left")
+        ttk.Button(r, text="相机高级测试", command=self.on_camera_lab).pack(side="left", padx=(6, 0))  # V3.79 CAMERA LAB
         ttk.Label(p, text="相机固定在支架上（和 NERO 同一个刚性底座）。换了相机 / 动了支架 → 重新做手眼标定。",
                   foreground="#555555", justify="left").pack(anchor="w")
         # V3.49 WRIST USB CAMERA INFO (placed below the main camera info)
@@ -2898,6 +2964,14 @@ class CameraTabUI:
                 self.cv.after_cancel(self.after_id)
             except Exception:
                 pass
+
+    def on_camera_lab(self):
+        """V3.79 CAMERA LAB: camera parameters / depth noise / locating accuracy / capture + auto-label + review"""
+        try:
+            import NERO_V379_Camera_Lab as LAB379
+            LAB379.open_lab(self)
+        except Exception as exc:
+            self.log(f"[FAIL] [V3.79 camera lab] 打不开相机高级测试：{exc}")
 
     def on_save_info(self):
         if not self.src or not self.src.info:
