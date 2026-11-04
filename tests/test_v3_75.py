@@ -129,24 +129,24 @@ assert CC.rect_dist(r1, ((0.02, 0.0), (0.05, 0.01), 0.5)) == 0.0
 print("[G3] banana 201 x 64 mm fits a bin only lengthwise (0/180 deg yes, 45/90 deg no); rectangle clearance ok")
 
 # ------------------------------------------------------------------ G4
-# V3.76 (intended change): the SO-101 opens up / down -> roll default +90 (V3.75: 0); migration rev V3.76
-assert G.MOUNT["roll_deg"] == 90.0 and G.describe()["roll_deg"] == 90.0
+# V3.76 (intended change): the SO-101 opens up / down, moving jaw on top -> roll default -90 (V3.75: 0); rev V3.76
+assert G.MOUNT["roll_deg"] == -90.0 and G.describe()["roll_deg"] == -90.0
 gp = G.describe()["grasp_point_in_tcp_mm"]
 assert abs(math.hypot(gp[0], gp[1]) - 2.0) < 0.2 and abs(gp[2] + 18.8) < 0.2, gp
 r = subprocess.run([sys.executable, "-c", "import NERO_V364_SO101_Gripper as G; print(G.MOUNT['roll_deg'])"],
                    cwd=str(ROOT), env=dict(os.environ, NERO_V364_SO101_ROLL_DEG="-45"), capture_output=True, text=True)
 assert r.stdout.strip() == "-45.0", r.stdout + r.stderr
 _T, _Tg, mnt = RT.real_mount({})
-assert mnt["roll_deg"] == 90.0 and mnt["ring_mm"] == 7.0
+assert mnt["roll_deg"] == -90.0 and mnt["ring_mm"] == 7.0
 old = {"clearance_mm": 8.0, "roll_deg": -45.0, "tip_corr_mm": [1.5, -2.0, 0.5], "ring_mm": 7.0, "seat_mm": 37.5}
 logs = []
 new, lines = RT.migrate_geometry_v375(old, log=logs.append)
-assert new["roll_deg"] == 90.0 and new["tip_corr_mm"] == [0.0, 0.0, 0.0] and new["mount_rev"] == "V3.76"
+assert new["roll_deg"] == -90.0 and new["tip_corr_mm"] == [0.0, 0.0, 0.0] and new["mount_rev"] == "V3.76"
 assert new["pre_v375"]["roll_deg"] == -45.0 and new["pre_v375"]["tip_corr_mm"] == [1.5, -2.0, 0.5] and len(lines) == 2
 assert logs and "转接环" in logs[0] and new["clearance_mm"] == 8.0
-assert RT.migrate_geometry_v375(new)[1] == [] and RT.migrate_geometry_v375({"roll_deg": -43.0})[0]["roll_deg"] == 92.0
+assert RT.migrate_geometry_v375(new)[1] == [] and RT.migrate_geometry_v375({"roll_deg": -43.0})[0]["roll_deg"] == -88.0
 assert RT.migrate_geometry_v375({})[0] == {}
-print("[G4] SO-101 roll +90 (V3.76; env override still works); real mount +90 deg; old settings: -45 -> +90, "
+print("[G4] SO-101 roll -90 (V3.76; env override still works); real mount -90 deg; old settings: -45 -> -90, "
       "fingertip correction reset, kept in pre_v375; current settings untouched")
 
 # ------------------------------------------------------------------ G5

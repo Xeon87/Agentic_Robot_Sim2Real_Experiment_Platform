@@ -325,12 +325,15 @@ class SortSkills(CK.CupSkills):
                     break
         else:
             last = last or self._Abort("TARGET_UNREACHABLE", {})
-        if last is not None and float(self.io.tcp_pose()[0][2]) < z0 + 0.04:
-            self.io.emit(f"[WARN] [V3.76 SORT] start clear failed: {last.reason} "
-                         f"{last.info.get('error') or last.info.get('detail') or ''}")
-            return {"moved": False, "error": last.reason}
+        rose = float(self.io.tcp_pose()[0][2]) >= z0 + 0.04
+        if not rose:
+            # no straight rise from this posture (e.g. a joint near its limit): home directly (backend: MoveIt-planned,
+            # collision-checked joint move)
+            self.io.emit(f"[WARN] [V3.76 SORT] start clear: no straight rise ({last.reason if last else '?'}: "
+                         f"{(last.info.get('detail') or last.info.get('error') or '') if last else ''}) -> home directly")
         r = self.io.go_home("V3.76 sort task start")
-        return {"moved": True, "home": bool(r.get("ok", True)), "rose_to_mm": round(float(self.io.tcp_pose()[0][2]) * 1000)}
+        return {"moved": True, "home": bool(r.get("ok", True)), "straight_rise": rose,
+                "rose_to_mm": round(float(self.io.tcp_pose()[0][2]) * 1000)}
 
     # -- V3.75 COLLISION PRE-CHECK
     def _v375_states_ok(self, states, opening_mm, extra=None):

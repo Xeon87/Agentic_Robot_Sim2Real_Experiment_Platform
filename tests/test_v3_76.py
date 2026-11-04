@@ -5,9 +5,9 @@ I2  Bin walls vs the backend's old basket-rim rule (V2-44 R2, frozen): the rule 
     to the V3.75 full walls it cuts exactly the red bin's x- and y+ walls (the user's log); applied to every box of
     the V3.76 twin / scene model (MuJoCo geoms) it cuts nothing; the segments rebuild the same outline; MoveIt keeps
     the full walls.
-I3  SO-101 standard orientation: roll default +90; with the tool pointing down the closing axis is the V3.75 one turned
-    90 deg CLOCKWISE seen from above (the user's words); env override still works.
-I4  Real settings migration: before V3.75 (-45) -> +90, V3.75 (0) -> +90, V3.76 untouched; fingertip correction reset.
+I3  SO-101 standard orientation (user's choice A from the rendered A / B figure): roll default -90; with the tool
+    horizontal, pointing forward and J7 = 0 the moving jaw points up; cup stack reachable in the twin; env override.
+I4  Real settings migration: before V3.75 (-45) -> -90, V3.75 (0) -> -90, V3.76 untouched; fingertip correction reset.
 I5  Soft pads only in the sorting scene / twin (solref 0.006); the cup gripper keeps solref 0.003.
 I6  State after a safety stop: an item let go by the backend and lying in the requested bin -> place_in_box ok with
     reason ITEM_DROPPED_IN_BOX (warning), the skill no longer holds it, return_to_safe_pose works; let go elsewhere ->
@@ -16,7 +16,7 @@ I7  Score by the final position: a failed place whose item lies in the requested
 I8  Start clear: TCP below 0.30 m -> straight up, then home; high -> no motion.
 I9  Launcher timed stop: v376_stop ends processes that ignore INT / TERM (and their children / their process group)
     within 2.5 steps; cleanup uses it for MoveIt x2, backend, GPU server.  Console: stop countdown.
-I10 Twin 4/4 and the backend path with the MoveIt emulation 4/4 with the +90 mount and soft pads; the held carry is
+I10 Twin 4/4 and the backend path with the MoveIt emulation 4/4 with the -90 mount and soft pads; the held carry is
     stretched HELD_SLOW x.
 I11 Release folder unchanged.
 """
@@ -127,31 +127,33 @@ print(f"[I2] old basket-rim rule: V3.75 walls -> {SC.legacy_rim_hits(SC.sort_bin
       f"{len(geoms) - 2} wall segments -> none cut; same outline; MoveIt keeps the 10 full boxes")
 
 # ------------------------------------------------------------------ I3
-assert G.MOUNT["roll_deg"] == 90.0
+assert G.MOUNT["roll_deg"] == -90.0
 arm = CK.FastArm()
-rk = CK.ik_chain([("t", np.array([-0.40, 0.0, 0.12]), S.grasp_R(0.0) @ G.T_tcp_grasp()[:3, :3].T)])
-assert rk["ok"], rk                                                    # a top-down pose (tool pointing down)
-Tq = arm.fk(np.asarray(rk["q"][-1], float))
-assert Tq[2, 2] < -0.9, Tq[:3, 2]
-T7 = Tq @ np.linalg.inv(arm.tool)
-x0 = T7[:3, :3] @ (G._rx(-G.MOUNT["roll_deg"]) @ G.R_l7_gripper())[:, 0]          # V3.75 model (roll 0)
-x1 = T7[:3, :3] @ G.R_l7_gripper()[:, 0]                                           # V3.76
-ang = math.degrees(math.atan2(np.cross(x0, x1)[2], float(x0 @ x1)))
-assert abs(ang + 90.0) < 3.0, ang                                                  # -90 about +z = clockwise from above
+Th = arm.fk(np.array([0, 1.2, 0, 0.4, 0, 0, 0.0]))                     # tool horizontal, pointing forward, J7 = 0
+assert Th[0, 2] < -0.99, Th[:3, 2]
+T7 = Th @ np.linalg.inv(arm.tool)
+up = (T7[:3, :3] @ G.R_l7_gripper())[:, 0]                             # closing axis: fixed jaw -> moving jaw
+assert up[2] > 0.99, up                                                # moving jaw on top
+if HAVE_MJ:
+    tw3 = CK.TwinIO(gripper="so101")
+    sk3 = CK.CupSkills(tw3)
+    sk3.run_tool("observe_scene", {})
+    r3 = sk3.run_tool("plan_cup_stack", {"source_cup": "cup_1", "target_cup": "cup_2"})
+    assert r3["ok"], r3
 r = subprocess.run([sys.executable, "-c", "import NERO_V364_SO101_Gripper as G; print(G.MOUNT['roll_deg'])"],
                    cwd=str(ROOT), env=dict(os.environ, NERO_V364_SO101_ROLL_DEG="0"), capture_output=True, text=True)
 assert r.stdout.strip() == "0.0", r.stdout + r.stderr
-print(f"[I3] roll +90: seen from above the closing axis turned {ang:+.1f} deg (clockwise) from V3.75; env override ok")
+print("[I3] roll -90: tool horizontal + J7 = 0 -> moving jaw on top (user's choice A); cup stack plan reachable; env override ok")
 
 # ------------------------------------------------------------------ I4
 logs = []
 g0, l0 = RT.migrate_geometry_v375({"roll_deg": -45.0, "tip_corr_mm": [1.0, 0.0, 0.0], "ring_mm": 7.0}, log=logs.append)
-assert g0["roll_deg"] == 90.0 and g0["tip_corr_mm"] == [0.0, 0.0, 0.0] and g0["mount_rev"] == "V3.76" and "pre_v375" in g0
+assert g0["roll_deg"] == -90.0 and g0["tip_corr_mm"] == [0.0, 0.0, 0.0] and g0["mount_rev"] == "V3.76" and "pre_v375" in g0
 g1, l1 = RT.migrate_geometry_v375({"roll_deg": 0.0, "mount_rev": "V3.75", "tip_corr_mm": [0.0, 2.0, 0.0]})
-assert g1["roll_deg"] == 90.0 and g1["tip_corr_mm"] == [0.0, 0.0, 0.0] and "pre_v376" in g1 and len(l1) == 2
+assert g1["roll_deg"] == -90.0 and g1["tip_corr_mm"] == [0.0, 0.0, 0.0] and "pre_v376" in g1 and len(l1) == 2
 assert RT.migrate_geometry_v375(g1)[1] == [] and logs and "安装方向" in logs[0]
-assert RT.real_mount({})[2]["roll_deg"] == 90.0
-print("[I4] real settings: -45 (before V3.75) -> +90, 0 (V3.75) -> +90, V3.76 untouched; fingertip correction reset")
+assert RT.real_mount({})[2]["roll_deg"] == -90.0
+print("[I4] real settings: -45 (before V3.75) -> -90, 0 (V3.75) -> -90, V3.76 untouched; fingertip correction reset")
 
 # ------------------------------------------------------------------ I5
 assert 'solref="0.003 1"' in G.gripper_parts()["link7"] and 'solref="0.006 1"' in G.gripper_parts(soft_pads=True)["link7"]
@@ -266,11 +268,11 @@ if HAVE_MJ:
     import v375_moveit_twin as MT  # noqa: E402
     r10 = MT.run_backend_episode()
     assert r10["state"] == {"item_1": "red", "item_2": "red", "item_3": "blue", "item_4": "blue"}, r10["state"]
-    assert any("roll +90 deg" in l for l in r10["log"]) and r10["scores"][0]["s"] == 1.0
+    assert any("roll -90 deg" in l for l in r10["log"]) and r10["scores"][0]["s"] == 1.0
     carry = [mv for mv in r10["core"].moves if mv[0] == "line"]          # the carries (MoveIt straight lines)
     assert carry, r10["core"].moves[:5]
     assert "slow=HELD_SLOW, free_fallback=True" in (ROOT / "NERO_V372_Sort_Skills.py").read_text(encoding="utf-8")
-    print(f"[I10] +90 mount, soft pads: twin 4/4, backend path with MoveIt emulation 4/4 (carry moves {len(carry)}, "
+    print(f"[I10] -90 mount, soft pads: twin 4/4, backend path with MoveIt emulation 4/4 (carry moves {len(carry)}, "
           f"stretched {S.HELD_SLOW}x)")
 else:
     print("[I5-I10 MuJoCo parts] skipped: MuJoCo not installed")

@@ -110,7 +110,7 @@ x_off = np.array([0.0, 0.0, -1.0])                               # official clos
 x_g = T[:3, 0]
 ang = math.degrees(math.atan2(np.dot(np.cross(x_off, x_g), [1, 0, 0]), np.dot(x_off, x_g)))
 # V3.75 NEW ADAPTER RING (intended change): roll default 0 (V3.64-V3.74: -45 deg right-hand about +x7)
-assert abs(ang - G.MOUNT["roll_deg"]) < 1e-6 and G.MOUNT["roll_deg"] in (-45.0, 0.0, 90.0), ang
+assert abs(ang - G.MOUNT["roll_deg"]) < 1e-6 and G.MOUNT["roll_deg"] in (-45.0, 0.0, -90.0), ang
 th2 = G.jaw_angle_deg(G.opening_mm_for_tip_gap(2.0))
 assert -10.0 < th2 < -3.0 and abs(G.tip_gap_mm(th2) - 2.0) < 0.05 and G.tip_gap_mm(-10.0) < 2.0
 th32 = G.jaw_angle_deg(G.opening_mm_for_tip_gap(32.0))
@@ -249,7 +249,7 @@ if HAVE_MJ:
     import v362_backend_twin as HB  # noqa: E402
     r7 = HB.run_backend_episode(gripper="so101")
     assert r7["state"]["nested_full"] and r7["scores"][0]["s"] == 1.0, r7["log"][-8:]
-    assert any("gripper: SO-101 gripper on a 7 mm ring, roll +90 deg" in l for l in r7["log"])     # V3.76 SO-101 standard orientation
+    assert any("gripper: SO-101 gripper on a 7 mm ring, roll -90 deg" in l for l in r7["log"])     # V3.76 SO-101 standard orientation (moving jaw on top)
     assert os.environ.get("NERO_SCENE") is None
     gl_ok = False
     try:

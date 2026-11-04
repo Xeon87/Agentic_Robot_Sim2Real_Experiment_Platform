@@ -100,10 +100,10 @@ print("[Y1] V3.67; frozen modules unchanged; simulation gripper profiles keep th
 # ------------------------------------------------------------------ Y2
 T_l7g, T_tg, mnt = RT.real_mount({})
 assert np.abs(T_l7g - G.T_l7_gripper()).max() < 1e-12 and np.abs(T_tg - G.T_tcp_grasp()).max() < 1e-12
-assert mnt == {"seat_mm": 37.5, "ring_mm": 7.0, "roll_deg": 90.0, "tip_corr_mm": [0.0, 0.0, 0.0]}   # V3.76 (V3.75: 0, before: -45)
+assert mnt == {"seat_mm": 37.5, "ring_mm": 7.0, "roll_deg": -90.0, "tip_corr_mm": [0.0, 0.0, 0.0]}   # V3.76 (V3.75: 0, before: -45)
 T2 = RT.real_mount({"roll_deg": -30.0})[0]
 dR = T2[:3, :3] @ T_l7g[:3, :3].T
-assert np.abs(dR - G._rx(-120.0)).max() < 1e-9                   # V3.76: relative to the default +90 (V3.75: -30 from 0)
+assert np.abs(dR - G._rx(60.0)).max() < 1e-9                     # V3.76: relative to the default -90 (V3.75: -30 from 0)
 T3 = RT.real_mount({"seat_mm": 40.0, "ring_mm": 9.0})[0]
 assert abs(T3[0, 3] - 0.049) < 1e-12
 off = np.array([0.002, -0.003, 0.004])
@@ -303,7 +303,7 @@ tab = RT.RealCupTaskTabUI(mtk, mttk, mock.MagicMock(), _Pipe(), types.SimpleName
                           log=logs7.append, visible_fn=lambda: False)
 gc = tab.geometry_cfg()
 assert gc["clearance_mm"] == 8.0 and gc["align_rotate_mm"] == 60.0 and gc["descent_stop_mm"] == 10.0
-assert gc["seat_mm"] == 37.5 and gc["ring_mm"] == 7.0 and gc["roll_deg"] == 90.0     # V3.76 (V3.75: 0, before: -45)
+assert gc["seat_mm"] == 37.5 and gc["ring_mm"] == 7.0 and gc["roll_deg"] == -90.0     # V3.76 (V3.75: 0, before: -45)
 assert "原地转腕" in tab.v_geo.get() and "固定指离杯壁 8 mm" in tab.v_geo.get()
 tab.v_clear.set("1")
 try:

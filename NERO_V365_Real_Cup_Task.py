@@ -97,13 +97,13 @@ def load_settings(path=None):
 
 MOUNT_REV = "V3.76"
 # roll change of each mount revision (settings saved without "mount_rev" = before V3.75, the old ring at -45 deg)
-_ROLL_STEP = {None: 135.0, "V3.75": 90.0}
+_ROLL_STEP = {None: -45.0, "V3.75": -90.0}          # -> -90 = moving jaw on top (user's choice A)
 
 
 def migrate_geometry_v375(geo, log=None):
     """V3.75 NEW ADAPTER RING + V3.76 SO-101 STANDARD ORIENTATION: the saved roll belongs to the mount model of the
-    version that saved it.  Before V3.75 (no "mount_rev"): old ring, -45 deg -> +90 = +135; V3.75 (model 0 deg, which
-    the user corrected: the SO-101 opens up / down, 90 deg clockwise seen from above) -> +90.  The fingertip correction
+    version that saved it.  Before V3.75 (no "mount_rev"): old ring, -45 deg -> -90 = -45; V3.75 (model 0 deg, which
+    the user corrected: the SO-101 opens up / down, moving jaw on top) -> -90.  The fingertip correction
     was measured on another mount model -> reset to 0 (old value kept under "pre_<rev>"); seat / ring thickness kept.
     -> (new geometry dict, list of change lines)"""
     g = dict(geo or {})
@@ -117,7 +117,7 @@ def migrate_geometry_v375(geo, log=None):
         r = float(g["roll_deg"]) + step
         g["roll_deg"] = round((r + 180.0) % 360.0 - 180.0, 2)
         lines.append(f"偏转 {float(old['roll_deg']):+.1f}° → {g['roll_deg']:+.1f}°"
-                     + ("（新转接环 + SO-101 标准方向：动指在上、上下开合）" if rev is None else "（SO-101 标准方向：上下开合，V3.75 少转了 90°）"))
+                     + ("（新转接环 + SO-101 标准方向：动指在上、上下开合）" if rev is None else "（SO-101 标准方向：上下开合、动指在上，V3.75 差了 90°）"))
     tc = [float(v) for v in (g.get("tip_corr_mm") or [0.0, 0.0, 0.0])]
     if any(abs(v) > 1e-9 for v in tc):
         g["tip_corr_mm"] = [0.0, 0.0, 0.0]
@@ -953,7 +953,7 @@ class RealCupTaskTabUI:
         self._build(parent)
         self.after_id = None
         if getattr(self, "_v375_mount_lines", None):                  # V3.75 NEW ADAPTER RING (once, at start)
-            self._log("[INFO] [V3.76 REAL] SO-101 安装方向已更新（上下开合、动指在上，偏转默认 +90°）：" + "；".join(self._v375_mount_lines)
+            self._log("[INFO] [V3.76 REAL] SO-101 安装方向已更新（上下开合、动指在上，偏转默认 -90°）：" + "；".join(self._v375_mount_lines)
                       + "。转接环厚度仍按旧值，请实测后在“实机夹爪几何”里填写并保存。")
         self._schedule()
 

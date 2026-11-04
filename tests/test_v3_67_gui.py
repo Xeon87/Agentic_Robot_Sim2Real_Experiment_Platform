@@ -99,7 +99,7 @@ def wait_idle(timeout=20):
 
 pump(0.4)
 assert (tab.v_clear.get(), tab.v_align.get(), tab.v_stop.get()) == ("8.0", "60.0", "10.0")
-assert (tab.v_seat.get(), tab.v_ring.get(), tab.v_roll.get()) == ("37.5", "7.0", "90.0")   # V3.76 (V3.75: 0, before: -45)
+assert (tab.v_seat.get(), tab.v_ring.get(), tab.v_roll.get()) == ("37.5", "7.0", "-90.0")   # V3.76 (V3.75: 0, before: -45)
 geo = tab.v_geo.get()
 assert "原地转腕" in geo and "固定指离杯壁 8 mm" in geo and "杯口上方 10 mm" in geo, geo
 print("[T1] geometry / safety panel with defaults and the align -> rotate -> descend description")
