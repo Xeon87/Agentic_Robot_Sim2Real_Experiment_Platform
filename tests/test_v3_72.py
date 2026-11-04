@@ -151,9 +151,20 @@ if HAVE_MJ:
     for seed in (None, 1, 2, 3):
         res, state, _io, sk_ = S.twin_episode(log=lambda s_: None, seed=seed)
         want = {iid: ("red" if SC.SORT_ITEMS[b_]["category"] == "fruit" else "blue") for iid, b_ in S.ITEM_IDS.items()}
-        assert state == want, (seed, state, [(r_["tool"], r_.get("reason")) for r_ in res if not r_["ok"]])
+        fails = [(r_["tool"], r_.get("reason"), (r_.get("physical_verification") or {}).get("note")) for r_ in res
+                 if not r_["ok"]]
+        if seed == 1 and getattr(S, "HELD_MARGIN_DEG", 0.0) >= 10.0:
+            # V3.77 HELD MARGIN (intended change): in this jittered layout the banana has no grasp + place with every
+            # joint >= 10 deg from its limit while held (best 8.4 deg, -90 deg SO-101 mount, J6 -42..+54 deg) ->
+            # GRASP_UNREACHABLE with the margin named, the other three items are sorted
+            assert state["item_1"] is None and all(state[k_] == want[k_] for k_ in ("item_2", "item_3", "item_4")), (
+                seed, state, fails)
+            assert fails and fails[0][1] == "GRASP_UNREACHABLE" and "needs >= 10 deg" in (fails[0][2] or ""), fails
+        else:
+            assert state == want, (seed, state, fails)
         rows.append(seed)
-    print(f"[D5] twin: layouts {rows} - banana / apple -> red, mouse / marker -> blue, all 16 items in their bins")
+    print(f"[D5] twin: layouts {rows} - banana / apple -> red, mouse / marker -> blue (seed 1: the banana is refused by "
+          "the V3.77 10 deg held margin, the rest sorted)")
     import v372_backend_twin as SB  # noqa: E402
     r6 = SB.run_backend_episode()
     assert r6["started"].get("label") == "RUN TASK (sort_items)" and not r6["started"].get("error"), r6["started"]
