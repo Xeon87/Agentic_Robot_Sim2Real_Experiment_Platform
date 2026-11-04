@@ -28,7 +28,7 @@ import time
 
 import numpy as np
 
-VERSION = "V3.71"
+VERSION = "V3.74"
 MARKER = "V3.65 NERO REAL CUP TASK"
 CALIB_DIR = os.environ.get("NERO_CALIB_DIR") or os.path.expanduser("~/Downloads/cameracalib")
 SETTINGS_NAME = "real_cup_task.json"
@@ -269,6 +269,9 @@ class RealIO:
         self.perc_times = []                           # V3.68: perception durations (task summary)
         self.joint_cap_deg_s = None                    # V3.71 SPEED CAP: real joint speed learned from slow arrivals
         self.on_perception = None                      # V3.71 LIVE OVERLAY: called with every perception result
+        self.vision = None                             # V3.74 LLM VISION REVIEW (NERO_V374_Vision_Review.VisionReviewer)
+        self.table_offset_mm = None                    # V3.74 TABLE OFFSET CHECK: fitted table - fence z_table
+        self._table_warned = False
 
     # -- basics
     def emit(self, s):
@@ -612,18 +615,53 @@ class RealIO:
             self.emit(f"[FAIL] [V3.66 REAL CUP YOLOE] YOLOE 不可用：{exc} → 任务终止（不改用颜色法）")
             raise
         self.last_perception, self.last_cam = res, cam
+        self._table_check(res, cam)
+        vis_line = self._vision_review(tag, res, cam)
         # V3.68 FAST PERCEPTION: snapshots only when a run fails (the task record keeps before / after images)
         dt = time.perf_counter() - t_p
         self.perc_times.append(dt)
         self.emit(f"[V3.66 REAL CUP YOLOE] {tag} | table z {res['table_z_m'] * 1000:+.0f} mm | YOLOE {res['n_2d']} 个 | "
                   + YC.summary(res) + f" | {dt:.2f} s（{YC.timing_text(res)}）"
                   + (f" · {res.get('device')}" if res.get("device") else ""))
+        if vis_line:
+            self.emit(vis_line)
         if self.on_perception is not None:            # V3.71 LIVE OVERLAY: the monitor shows what the task sees
             try:
                 self.on_perception(res)
             except Exception:
                 pass
         return res
+
+
+    def _table_check(self, res, cam):
+        """V3.74 TABLE OFFSET CHECK: the table plane fitted next to the cups vs the safety fence z_table.  A large
+        offset means the hand-eye calibration (or the fence height) is off: grasp heights are off by the same amount"""
+        zt = (cam or {}).get("z_table")
+        if zt is None or res.get("table_z_m") is None:
+            return
+        off = (float(res["table_z_m"]) - float(zt)) * 1000.0
+        self.table_offset_mm = round(off, 1)
+        if abs(off) > 5.0 and not self._table_warned:
+            self._table_warned = True
+            self.emit(f"[WARN] [V3.74 REAL] 识别到的桌面比安全区设定的桌面 {'低' if off < 0 else '高'} {abs(off):.0f} mm："
+                      "主相机手眼标定或安全区桌面高度可能偏了，抓取高度会偏同样多。下一步：Camera调试页复核手眼标定"
+                      "（标记边长填实测 38 mm），或在安全区编辑器核对桌面高度" + ("；超过 10 mm 时先别跑 ③" if abs(off) > 10.0 else ""))
+
+    def _vision_review(self, tag, res, cam):
+        """V3.74 LLM VISION REVIEW at the key perceptions -> one log line (or None)"""
+        if self.vision is None or not res.get("dets") or not self.vision.wanted(tag):
+            return None
+        import NERO_V374_Vision_Review as VR
+        rv = self.vision.review(cam["rgb"], res["dets"], context=str(tag))
+        if not rv.get("ok"):
+            return None
+        notes = VR.apply_review(res, rv)
+        items = " ".join(f"{k} {v.get('what')}" + (" 在夹爪里" if v.get("in_gripper") else "")
+                         for k, v in sorted((rv.get("items") or {}).items()))
+        when = "（沿用上次）" if rv.get("cached") else f"{rv.get('elapsed_s', 0)} s"
+        return (f"[V3.74 VISION] {tag} | {rv.get('model')} {when} | {items}"
+                + (f" | 和几何不一致：{'；'.join(notes)}" if notes else "")
+                + (f" | {rv.get('scene')}" if rv.get("scene") else ""))
 
 
 # ================================================================================================ run modes
@@ -819,7 +857,10 @@ def camera_from_tab(cam_tab, yolo=None, n_frames=None, timeout_s=3.0):
 
 KIND_TEXT = {"occluded": ("被夹爪挡住", "#b0bec5"), "cup": ("单杯", "#00e676"), "stack": ("已叠好", "#00e5ff"), "unknown": ("不像杯子", "#ff9100"),
              "lifted": ("在夹爪里", "#b0bec5"), "outside": ("围栏外", "#ff5252"), "edge": ("被画面切掉", "#ff9100"),
-             "no_depth": ("没有深度", "#ff9100"), "rejected": ("剔除", "#9e9e9e")}
+             "no_depth": ("没有深度", "#ff9100"), "rejected": ("剔除", "#9e9e9e"),
+             "not_cup": ("看图：不是杯子", "#ff5252")}                          # V3.74 LLM VISION REVIEW
+# V3.74 GEOMETRY MEASURES ONLY: a standing cup is "杯子" (single / nested is the vision review's answer)
+KIND_TEXT["cup"] = ("杯子", "#00e676")
 
 
 OVERLAY_OLD_S = 4.0                    # V3.71 LIVE OVERLAY: contours older than this are marked old (dashed)
@@ -1078,6 +1119,9 @@ class RealCupTaskTabUI:
         self.v_use_llm = tk.BooleanVar(value=bool(self.st.get("use_llm", False)))
         ttk.Checkbutton(r4, text="③ 用 LLM Agent（不勾 = 固定流程：观察→规划→抓→放→验证→回起点）",
                         variable=self.v_use_llm).pack(side="left")
+        # V3.74 LLM VISION REVIEW: the selected model looks at the main camera image (all run modes, also 「识别杯子」)
+        self.v_vision = tk.BooleanVar(value=bool(self.st.get("vision_review", True)))
+        ttk.Checkbutton(r4, text="LLM 看图复核", variable=self.v_vision).pack(side="left", padx=(8, 0))
         ttk.Button(r4, text="■ 停止", command=self.on_stop).pack(side="right")
         ttk.Button(r4, text="▶ 运行", command=self.on_run).pack(side="right", padx=4)
         # V3.69 SPEED MULTIPLIER (left of 「▶ 运行」)
@@ -1453,7 +1497,7 @@ class RealCupTaskTabUI:
                  model=self.v_model.get().strip(), effort=self.v_effort.get(), task=self.v_task.get().strip(),
                  use_llm=bool(self.v_use_llm.get()), cup_prompt=self.v_cup_prompt.get().strip() or "cup",
                  show_tips=bool(self.v_tips.get()), speed_mult=self.v_speed.get(),
-                 record_video=bool(self.v_video.get()))
+                 record_video=bool(self.v_video.get()), vision_review=bool(self.v_vision.get()))
         try:
             d["max_steps"] = int(self.v_steps.get())
         except ValueError:
@@ -1635,6 +1679,11 @@ class RealCupTaskTabUI:
         io = RealIO(arm, self.grip if self.grip.connected else None, lambda: camera_from_tab(self.cam_tab, yolo=ycfg),
                     log=self._log, cfg=mc, motion_allowed=(mode != "plan"))
         self.io = io
+        if bool(self.v_vision.get()):                 # V3.74 LLM VISION REVIEW with the tab's provider / model / key
+            import NERO_V374_Vision_Review as VR
+            vcfg = {"provider": llm["provider"], "model": llm["model"], "api_key": llm["api_key"]}
+            io.vision = VR.VisionReviewer(lambda c=vcfg: c, log=self._log,
+                                          query=self.v_cup_prompt.get().strip() or "cup")
         # V3.71 LIVE OVERLAY: every perception of the task (observe / pick / place / verify) goes to the monitor at once
         io.on_perception = lambda res, io_=io: self._ui(lambda: self._apply_overlay(res, getattr(io_, "skills", None)))
         touch_ok = bool(self.grip.cfg.get("touch_calibrated"))
@@ -1662,6 +1711,7 @@ class RealCupTaskTabUI:
                 self._log(f"[INFO] [V3.69 REAL] 速度 {speed_desc}")
             if perceive_only:
                 res = io.perceive("识别杯子")
+                self.last_table_offset_mm = io.table_offset_mm
                 self._set_overlay(res, None)
                 return
             if mode == "execute" and not touch_ok:
@@ -1673,6 +1723,8 @@ class RealCupTaskTabUI:
                         + ("机械臂到源杯上方约 5 cm、升高、转腕、到目标杯上方，再回起点；不下探、不合夹爪。"
                            if mode == "hover" else
                            "机械臂会下探捏住杯沿、抬起、放进另一只杯子（夹爪会夹紧）。请先跑过 ② 悬停预演。")
+                        + (f"\n⚠ 上次识别的桌面和安全区设定差 {self.last_table_offset_mm:+.0f} mm：手眼标定可能偏了，"
+                           "抓取高度会偏同样多（V3.74）" if abs(getattr(self, "last_table_offset_mm", 0) or 0) > 10 else "")
                         + "\n确认周围无人、急停在手边？")
                 if not self.ask("NERO 实机叠杯子", text):
                     self._log("[INFO] [V3.65 REAL] 已取消")
@@ -1722,6 +1774,8 @@ class RealCupTaskTabUI:
                 io.save_snapshot(f"failed_{(failed or {}).get('tool') or mode}_{(failed or {}).get('reason') or ''}")
             sk = out.get("skills")
             self.skills = sk
+            if io.table_offset_mm is not None:            # V3.74 TABLE OFFSET CHECK (shown before the next ② / ③)
+                self.last_table_offset_mm = io.table_offset_mm
             if sk is not None:
                 self._set_overlay(getattr(io, "last_perception", None), sk.plan, sk)
             # V3.68 REAL TASK RECORD: end-of-task summary (egg-task style)

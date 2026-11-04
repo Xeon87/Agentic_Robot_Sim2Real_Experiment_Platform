@@ -28,7 +28,7 @@ import math
 import os
 import sys
 
-VERSION = "V3.71"
+VERSION = "V3.74"
 MARKER = "V3.66 REAL CUP YOLOE PERCEPTION"
 MARKER_V367 = "V3.67 PERCEPTION ROBUSTNESS"
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -255,7 +255,18 @@ def held_geometry(P, T, g, robot_boxes=None):
     return out
 
 
-def cup_from_mask(mask, depth, K, T, z0, g, ndz_m, robot_boxes=None, fence_poly=None, hull=None):
+def gripper_reaches_down_to(robot_boxes, top_z, margin=0.03):
+    """V3.74 LIFTED NEEDS THE GRIPPER AT THE CUP: the lowest corner of the gripper boxes is at most `margin` above the
+    cup's top (the V3.72 real run called a cup on the table "lifted" while the arm was only parked next to it)"""
+    if not robot_boxes:
+        return True
+    low = min(float(np.asarray(c, float)[2]) - float(np.abs(np.asarray(R, float)[2, :]) @ np.asarray(h, float))
+              for c, R, h in robot_boxes)
+    return low <= float(top_z) + margin
+
+
+def cup_from_mask(mask, depth, K, T, z0, g, ndz_m, robot_boxes=None, fence_poly=None, hull=None,
+                  classify_by_height=False):
     """cup geometry of one YOLOE instance mask -> dict (kind, base / rim, heights, tilt, reason)"""
     import NERO_V363_Cup_Perception as CP
     YP = _yp()
@@ -286,6 +297,9 @@ def cup_from_mask(mask, depth, K, T, z0, g, ndz_m, robot_boxes=None, fence_poly=
         cxy = np.median(P[:, :2], axis=0)
         near = (not robot_boxes) or min(float(np.hypot(*(cxy - np.asarray(c, float)[:2]))) for c, _R, _h in robot_boxes) \
             <= LIFT_NEAR_M
+        if near and not gripper_reaches_down_to(robot_boxes, float(np.percentile(P[:, 2], 99))):
+            near = False
+            out["warnings"].append("夹爪在旁边但没有下到杯子的高度（不算被夹起）")
         if near:
             out.update(kind="lifted", reason="杯子离开桌面（在夹爪里）", n_points=int(n_all))
             out.update(held_geometry(P, T, g, robot_boxes))
@@ -334,7 +348,12 @@ def cup_from_mask(mask, depth, K, T, z0, g, ndz_m, robot_boxes=None, fence_poly=
     v_obs, v_min = mask_top_v(mask_full)
     h_sil = silhouette_height(c, z0, K, T, v_obs, g) if v_obs is not None else None
     h_mm = None if h_sil is None else h_sil * 1000.0
-    kind = classify(h_mm, g, ndz_m)
+    # V3.74 GEOMETRY MEASURES ONLY: position / size / tilt are measured; what the instance IS (a single cup, a nested
+    # pair, not a cup) is no longer decided from the silhouette height (the V3.72 real cups read 96-119 mm against the
+    # model's 122.6 mm and one of them was dropped as "unknown") - every standing YOLOE cup instance is a "cup";
+    # nested / not-a-cup / in-the-gripper come from the LLM vision review (NERO_V374_Vision_Review) or, after a
+    # release, from the V3.71 cluster check.  classify_by_height=True = the V3.66 height classes (tests / reference).
+    kind = classify(h_mm, g, ndz_m) if classify_by_height else "cup"
     if v_min is not None and v_min <= 2:
         kind, out["reason"] = "edge", "杯口被画面上边缘切掉"
     elif fence_poly and not YP.point_in_poly(float(c[0]), float(c[1]), fence_poly):
@@ -352,7 +371,7 @@ def cup_from_mask(mask, depth, K, T, z0, g, ndz_m, robot_boxes=None, fence_poly=
 
 
 # ================================================================================ main entry
-def perceive_cups_yolo(cam, robot_boxes=None, cup=None, nested_dz=None, hull_boxes=None):
+def perceive_cups_yolo(cam, robot_boxes=None, cup=None, nested_dz=None, hull_boxes=None, classify_by_height=False):
     """cam = {"rgb", "depths": [depth frames (m)], "K", "T_base_cam", "z_table", "fence_poly", "calib_note",
     "yolo": yolo_cfg_from_tab(...)} -> {"cups": [...], "dets": [...], "table_z_m", "diag", "yolo": text}"""
     YP = _yp()
@@ -400,7 +419,8 @@ def perceive_cups_yolo(cam, robot_boxes=None, cup=None, nested_dz=None, hull_box
         if z0 is None:
             z0 = float(zt or 0.0)
         it["z0"] = float(z0)
-        it["cup"] = (cup_from_mask(it["d"]["mask"], depth, K, T, it["z0"], g, ndz, robot_boxes, fence, hull)
+        it["cup"] = (cup_from_mask(it["d"]["mask"], depth, K, T, it["z0"], g, ndz, robot_boxes, fence, hull,
+                                   classify_by_height)
                      if r["status"] != "rejected" else {"kind": "rejected", "reason": "；".join(r["reasons"])})
     # merge masks of the same cup / nested pair
     groups = []
@@ -420,7 +440,7 @@ def perceive_cups_yolo(cam, robot_boxes=None, cup=None, nested_dz=None, hull_box
         c = best["cup"]
         if len(gr) > 1:
             mask = np.logical_or.reduce([it_["d"]["mask"] for it_ in gr])
-            c = cup_from_mask(mask, depth, K, T, best["z0"], g, ndz, robot_boxes, fence, hull)
+            c = cup_from_mask(mask, depth, K, T, best["z0"], g, ndz, robot_boxes, fence, hull, classify_by_height)
             c["warnings"] = list(c.get("warnings") or []) + [f"{len(gr)} 个 YOLOE 框合并为一个"]
         r = best["r"]
         e = dict(c, conf=round(float(best["d"]["conf"]), 3), name=best["d"].get("name"),

@@ -1361,7 +1361,9 @@ class CupSkills:
             else:
                 name = cand[0]
             new[name] = self._entry(b, c["tilt_deg"], {"height_mm": c["height_mm"], "fit_rms_mm": c.get("fit_rms_mm")})
-            if self.placed is None and c.get("height_mm"):
+            # V3.74: only while nothing is held - a cup carried above the target hides the target's rim and its
+            # silhouette reads short (twin: 109.5 instead of 125 mm), which spoiled the "taller after the release" check
+            if self.placed is None and self.held is None and c.get("height_mm"):
                 self.single_h[name] = float(c["height_mm"])
         for n, e in prev.items():                   # not seen now (occluded by the arm): keep the last estimate
             if n not in new:

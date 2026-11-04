@@ -70,8 +70,8 @@ except Exception:
 
 # ------------------------------------------------------------------ X1
 for m in (CON, RR, YP, W49, RT, YC):
-    assert m.VERSION in ("V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72", "V3.73"), (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72", "V3.73")
+    assert m.VERSION in ("V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72", "V3.73", "V3.74"), (m.__name__, m.VERSION)
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72", "V3.73", "V3.74")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 for fn, h in (("NERO_V326_Wrist_Camera.py", "6b5c5d683073e4252b82c1c703ad664173960a179947f9e72775bb9683697d0a"),
               ("NERO_V2_7_1_Agent.py", "3e52d05ea84d94c8359d5875fa0fee8c2cc42d612b52e59109e1166912439696"),
@@ -252,7 +252,8 @@ if gl_ok:
     # nested pair
     r2 = tw.cup_pose("cup_2")[0]
     set_cup(tw, "cup_1", [r2[0], r2[1], r2[2] + g["nested_dz"]])
-    res_s = YC.perceive_cups_yolo(camfn())
+    # V3.74: the geometry no longer names a nested pair (default kind "cup"); the V3.66 height classes on request
+    res_s = YC.perceive_cups_yolo(camfn(), classify_by_height=True)
     assert len(res_s["cups"]) == 1 and res_s["cups"][0]["kind"] == "stack", YC.summary(res_s)
     assert abs(res_s["cups"][0]["height_mm"] - (top_true("cup_2") + g["nested_dz"] * 1000.0)) <= 4.0
     # cup in the air (held)

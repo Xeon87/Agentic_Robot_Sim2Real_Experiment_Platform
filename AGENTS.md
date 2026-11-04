@@ -1,7 +1,7 @@
-# NERO 项目开发与交接文档（V3.73 · Sim2Real 与自动寻优路线版）
+# NERO 项目开发与交接文档（V3.74 · Sim2Real 与自动寻优路线版）
 
 > 放在仓库根目录，命名为 `AGENTS.md`（Codex / 后续开发 Agent 会自动读取）。
-> 更新时间：2026-11-04。当前已交付最新版本：**V3.73**（仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`）。
+> 更新时间：2026-11-04。当前已交付最新版本：**V3.74**（仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`）。
 > 接手者请在做任何修改前通读本文件。本文件里“用户”指项目所有者 Jimmy。
 
 ## 0. 一句话现状
@@ -22,7 +22,8 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 - **V3.71（已交付）**：`RealIO` 运动真到位才结束（`wait_still` + 到位超时 `ARM_NOT_AT_GOAL`）、按实测速度降速（`joint_cap_deg_s`，硬件 `speed_percent` 限速）、失败收尾（`recover_after_failure`：停稳 + 竖直升到 0.22 m）、围栏绕行（先升高）；共用技能（实机档案打开、仿真档案关闭）：识别漏检重试、规划余量 ≥ 8° 即停、放置前测夹着的杯子并修正偏移（`NERO_V366.held_geometry`）、叠好判断按目标位置单簇 + 比单杯高 4–40 mm（`stack_by_cluster`，可填实测套叠增量）；监视器实时同步任务识别（`on_perception`）；`start_nero.sh` 清 `CUDA_VISIBLE_DEVICES`。**只在替身上验证过，真机未验证**。
 - **V3.72（已交付）**：第 5 个仿真场景 `sort_items`（香蕉 / 苹果 / 鼠标 / 粗马克笔 → 左红框 / 右蓝框，SO-101 夹爪，场景本身带 `"gripper": "so101"`）；新模块 `NERO_V372_Sort_Skills.py`（`SortSkills` 继承 `CupSkills` 的运动 / 安全代码：observe_scene / pick_object / place_in_box / check_bins / return_to_safe_pose，LLM 按提示词从标签判断类别）；物体原点 = 顶面中心 + 隐形配重（后端 CONNECT 锁定点是球铰）；后端只在 RUN TASK A2 钩子段里加 sort_items 分支；只支持仿真真值位姿。**只在替身里验证过，完整仿真链路待用户复测**。
 - **V3.73（已交付）**：sort_items 首跑失败修复——后端 `object_pose(name)` 查 `sim_obj_{name}`，所以 `SortBackendIO` 必须传去掉 `obj_` 的名字（`tf_name`）；测试替身 `tests/v372_backend_twin.SortCore` 严格按后端规则查 TF；分类得分按 Agent 处理过的物体。**只在替身里验证过**。
-- **已和用户确认的后续路线（V3.74 → V3.76）**：仿真页用“任务登记表”按场景固定提示词 / 快捷按钮 / 工具调试栏（A2 钩子事后调整，不动后端冻结部分）；**实机页做成真正通用**：通用识别（任务提取物体名 → YOLOE + 深度 → 物体 / 容器 / 颜色 / 尺寸 / 关系；**用户要求开启“把相机画面发给支持看图的 LLM”**辅助识别）+ 通用动作库（observe / pick / place_into / place_on / place_at / verify，仿真与实机共用，仿真 sort_items 改用它）+ 专用技能库（叠杯子等带技能卡，由 LLM 选择）+ 档位 ①②③ 在运动层统一实现（② 统一截断到悬停高度）。V3.74：通用识别 + 实机新外壳（只开 ①）+ 仿真登记表；V3.75：通用动作库 + 实机 ②；V3.76：实机 ③ + 检查 + LLM 选专用技能。叠杯子必须保持不退化（V3.65–V3.71 测试原样通过）。
+- **V3.74（已交付）**：实机杯子识别“几何只测量、不下结论”（`NERO_V366` 默认不按杯高分类，`classify_by_height=True` 才用 V3.66 分档）+ LLM 看图复核（新模块 `NERO_V374_Vision_Review.py`：带编号轮廓的主相机画面 → 所选模型，回答单杯 / 已叠好 / 不是杯子 / 在夹爪里；只在关键识别时刻；按布局缓存）+ “在夹爪里”需夹爪下到杯子高度 + 桌面偏差提示。**用户原则：不要加画蛇添足的判断准则；几何只量位置和尺寸，“是什么”交给看图的 LLM**。**看图复核未连真实 API；真机未验证**。
+- **已和用户确认的后续路线（V3.75 → V3.77，原 V3.74 → V3.76 顺延一版）**：仿真页用“任务登记表”按场景固定提示词 / 快捷按钮 / 工具调试栏（A2 钩子事后调整，不动后端冻结部分）；**实机页做成真正通用**：通用识别（任务提取物体名 → YOLOE + 深度 → 物体 / 容器 / 颜色 / 尺寸 / 关系；**用户要求开启“把相机画面发给支持看图的 LLM”**辅助识别）+ 通用动作库（observe / pick / place_into / place_on / place_at / verify，仿真与实机共用，仿真 sort_items 改用它）+ 专用技能库（叠杯子等带技能卡，由 LLM 选择）+ 档位 ①②③ 在运动层统一实现（② 统一截断到悬停高度）。V3.74：通用识别 + 实机新外壳（只开 ①）+ 仿真登记表；V3.75：通用动作库 + 实机 ②；V3.76：实机 ③ + 检查 + LLM 选专用技能。叠杯子必须保持不退化（V3.65–V3.71 测试原样通过）。
 - **接下来的核心路线（V3.77 起，再顺延一版；先请用户在实机上按 ①→②→③ 复测叠杯子）**：遵循**“一套大脑、两套身体（仿真与实机除眼睛和手脚外 100% 通用）”**原则，将算法拆分为**“铁打的底层骨架 + 可拨动的控制旋钮（Control Knobs / Strategy Profile）”**，通过**带噪仿真自动寻优试验（DOE / 贝叶斯优化）**自动搜索各场景鲁棒最优参数包，并按 `纯视觉干跑 → 5 cm 悬停预演 → 实机柔顺抓放` 稳步完成真机迁移。
 
 ## 1. 用户的沟通规则（必须遵守，原话优先）
@@ -122,6 +123,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 | `NERO_V365_Real_Cup_Task.py` | **NERO实机任务（V3.65）**：`RealIO`（CupSkills 的实机 IO：FastArm TCP、连续 IK 直线段 / 关节线性插值 → 关节路径执行、D435i 杯子感知（桌面 z 平移 + 围栏工作区）、STS3215 夹爪换算）、`run_plan_preview` / `run_hover` / `run_execute`、`PipelineArm`、`camera_from_tab`、`RealCupTaskTabUI` |
 | `NERO_V366_Real_Cup_Yolo.py` | **实机杯子识别（V3.66）**：`yolo_cfg_from_tab`（Camera 页 YOLOE 设置，文字提示 / -pf 选择同 `_resolve_object_query`）、`perceive_cups_yolo`（detect → fuse_depth → locate_objects → 每个实例轮廓：锥面杯轴、轮廓顶边杯高 `silhouette_height`、`classify` 单杯 / 已叠好、lifted / outside / edge、重复框合并）、`summary` |
 | `NERO_V372_Sort_Skills.py` | **分类场景 Agent 技能（V3.72）**：`SortSkills`（继承 `CupSkills` 的运动 / 安全 / 夹爪档案）、`SortTwinIO` / `SortBackendIO`、`SORT_TOOLS` / `SORT_SYSTEM_INSTRUCTIONS`、`run_sort_task`（Agent 循环 + `[V3.72 SKILL SCORE]` + `[V3.72 SORT RESULT]`）、`gui_run_task`（后端 A2 钩子入口）、`twin_episode`（`--twin`） |
+| `NERO_V374_Vision_Review.py` | **LLM 看图复核（V3.74）**：`annotate`（轮廓 + #编号 JPEG）、`post_vision`（OpenAI Responses input_image / chat image_url）、`VisionReviewer`（关键时刻、布局缓存、失败只 WARN 一次）、`apply_review`（按回答设类别、列出与几何的分歧） |
 | `NERO_V368_Real_Task_Record.py` | **实机任务记录（V3.68）**：`TaskRecorder`（每个工具调用前后截图、steps.jsonl、summary.txt，目录 `task/` 或 `NERO_V368_TASK_DIR`）、`step_line` / `task_summary`（日志）、`fingertip_points`（模型指尖叠加）、`roll_sweep`（偏转角扫描） |
 | `NERO_V365_STS3215_Gripper.py` | **SO-101 实机夹爪（V3.65）**：Feetech STS 协议（取自用户工具）、`SO101RealGripper`（open_deg / open_gap / clamp / status）、角度↔指尖缝↔仿真虚拟开口换算、夹紧扭矩换算、`SimServo` 模拟舵机 |
 | `NERO_V361_Cup_Stack.py` | **叠杯子离线试验（V3.61）**：`release_trial` / `release_sweep`（只有杯子的 MuJoCo 松手试验）、`choose_release_params`、严格 6-DoF `pose_ik`（`CS.ik_tool` 会丢姿态，别用它算姿态）、`rim_pinch_pose`、`grasp_reachability`、`plan_cup_stack`（5 个航点）、`run_study`；结果存 `config/cup_stack_study_v361.json`（静态文件，运行时不写） |
@@ -146,7 +148,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
    - **痛点 B（画面下沿黑色夹爪阴影与塑封膜反光拉偏角点）**：**V3.58 方案**：开启 `CORNER_REFINE_SUBPIX` + `tryRefineMarkers`，并通过**干净子集去畸变 + 平面 RANSAC 单应性检验（`_clean_outlier_corners`）**自动剥离每张图里偏离 `> 1.15 px` 的 1–3 个孤立反光/夹爪遮挡坏角点（保留其余干净角点），而对 `>= 4` 个坏角点的运动模糊帧则整张剔除。
    - **痛点 C（起点偏左导致采样集中在左侧 + 纸面微翘）**：**V3.58 方案**：`plan_intr_auto_targets` 读取起点标定板实际位置 `s0_board["center_frac"]` 作为最远点采样种子，将四向及对角倾视基线提升至 `18°–28°`；`calibrate_eye_in_hand` 将 2D 深度比例因子 `alpha_z` 拓宽至 `[0.12, 1.85]`（以 `axy=1.0` 起算），并在自动采集达标后**一键同步保存 `wrist_intrinsics.json` 与 `wrist_handeye_calib.json`**。
 
-## 7. 版本简史（V3.43 – V3.73）
+## 7. 版本简史（V3.43 – V3.74）
 
 | 版本 | 核心改动内容 |
 | :--- | :--- |
@@ -170,6 +172,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 | **V3.62** | 叠杯子 Agent 技能（填 API key + 输入任务即可在仿真里叠杯子）；后端 RUN TASK A2 块加 `stack_cups` 分支；杯子原点改杯口中心 + 卷边硬接触 + 与质量无关的杯子接触；第 ⑥ 组 11 旋钮 `[仿真技能✓]`；修正 V3.61 抓放翻转不一致；替身试验 16/16 |
 | **V3.63** | 修复叠杯子放置 J7 越限急停（联合规划 + 逐点轨迹检查 + 先转腕再平移 + 急停即停解锁重试 + 不做小修正）；固定主相机 D435i 杯子感知（相机进程分支）；替身带 URDF 运动学与相机渲染；试验 20/20（相机 4/4） |
 | **V3.64** | 新场景 `stack_cups_so101`（SO-101 夹爪 + 7 mm 转接环 + 偏转 45°，后端不变）；夹爪档案（抓取坐标系、固定指在外、沿杯壁下探、抬起 / 搬运后摆正等待、低位松手 + 松手后外移）；通用：全角度回退、搬运优先规划关节解、关节停稳等待；SO-101 替身试验 |
+| **V3.74** | 实机杯子识别：几何只测量 + LLM 看图复核（`NERO_V374_Vision_Review.py`）+ 夹爪须下到杯子高度才算夹起 + 桌面偏差提示 |
 | **V3.73** | sort_items TF 帧名修复（`sim_obj_banana`）+ 测试替身严格按后端 TF 规则 + 分类得分按 Agent 处理的物体 |
 | **V3.72** | 第 5 个仿真场景 sort_items（物品分类放入红 / 蓝框，SO-101，LLM 按提示词分类）；`NERO_V372_Sort_Skills.py`；后端 RUN TASK 钩子加 sort_items 分支 |
 | **V3.71** | 运动真到位 + 实测降速 + 失败收尾 / 围栏绕行；漏检重试；规划 ≥ 8° 即停；放置前复查夹着的杯子；叠好按单簇 + 实测高度；监视器实时 |
