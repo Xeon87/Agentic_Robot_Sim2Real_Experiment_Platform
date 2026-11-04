@@ -389,8 +389,11 @@ class SortSkills(CK.CupSkills):
         off = R_l.T @ (c_l - p_l)
         n = 0
         for box in boxes:
+            # V3.77: +2 deg over the held margin - the real lift differs a little from the rigid prediction (test: the
+            # predicted placement had >= 10 deg, after the lift the best one had 9.9 deg)
             best, _rej = self._plan_place(box, it["id"], it, q_lift, p_l, R_l, off, phi_deg, float(c_l[2]),
-                                          lengthwise_only=it["spec"]["shape"] != "round")
+                                          lengthwise_only=it["spec"]["shape"] != "round",
+                                          need_margin_deg=HELD_MARGIN_DEG + 2.0)
             n += int(best is not None)
         return n
 
@@ -627,7 +630,8 @@ class SortSkills(CK.CupSkills):
             best = order[0]
         return float(best[0][0]), float(best[0][1])
 
-    def _plan_place(self, box, iid, it, q_now, tcp0, R_now, held_off, held_phi, item_z, lengthwise_only=False):
+    def _plan_place(self, box, iid, it, q_now, tcp0, R_now, held_off, held_phi, item_z, lengthwise_only=False,
+                    need_margin_deg=None):
         """V3.76 ONE PLACE PLANNER: place_in_box and the pick-time check (_v376_placeable, on the predicted state after
         the lift) use this same search -> (best candidate or None, collision rejects)"""
         sp = it["spec"]
@@ -692,9 +696,10 @@ class SortSkills(CK.CupSkills):
                         r = CK.ik_chain(chain, q_now, start_first=False)
                     if not r["ok"] or r["min_margin_deg"] < CK.MIN_MARGIN_RELAXED_DEG:
                         continue
-                    if r["min_margin_deg"] < HELD_MARGIN_DEG:      # V3.77 HELD MARGIN (item in the gripper throughout)
+                    need = HELD_MARGIN_DEG if need_margin_deg is None else float(need_margin_deg)
+                    if r["min_margin_deg"] < need:                 # V3.77 HELD MARGIN (item in the gripper throughout)
                         rejects.append({"phi_deg": ph, "joint_margin_deg": r["min_margin_deg"], "binding": r["binding"],
-                                        "need_deg": HELD_MARGIN_DEG})
+                                        "need_deg": need})
                         continue
                     names = [c[0] for c in chain]
                     # V3.75 COLLISION PRE-CHECK: above / lowering / release with the held item's box at the release

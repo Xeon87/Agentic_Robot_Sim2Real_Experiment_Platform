@@ -180,7 +180,7 @@ if HAVE_MJ:
     def dropping_run(target_xy):
         tw = S.SortTwinIO()
         sk = S.SortSkills(tw)
-        assert sk.run_tool("pick_object", {"item_id": "item_1", "box": "blue"})["ok"]
+        assert sk.run_tool("pick_object", {"item_id": "item_1", "box": "red"})["ok"]     # V3.77: its own bin
         orig = sk._go_line
 
         def go_line(label, *a, **kw):
@@ -192,11 +192,11 @@ if HAVE_MJ:
                 raise sk._Abort("SAFETY_STOP", {"during": label, "error": "runaway (test)"})
             return orig(label, *a, **kw)
         sk._go_line = go_line
-        return tw, sk, sk.run_tool("place_in_box", {"box": "blue"})
+        return tw, sk, sk.run_tool("place_in_box", {"box": "red"})
 
-    tw, sk, r6 = dropping_run(SC.SORT_BINS["blue"]["centre"])
+    tw, sk, r6 = dropping_run(SC.SORT_BINS["red"]["centre"])
     assert r6["ok"] and r6["reason"] == "ITEM_DROPPED_IN_BOX" and r6["warnings"], r6
-    assert sk.held is None and sk.placed.get("item_1") == "blue" and r6["physical_verification"]["dropped_by_safety_stop"]
+    assert sk.held is None and sk.placed.get("item_1") == "red" and r6["physical_verification"]["dropped_by_safety_stop"]
     assert sk.run_tool("return_to_safe_pose", {})["ok"]
     tw, sk, r6b = dropping_run((-0.30, 0.02))
     assert not r6b["ok"] and r6b["reason"] == "ITEM_DROPPED" and sk.held is None, r6b
@@ -208,7 +208,7 @@ if HAVE_MJ:
     tw.step(800)
     r6c = sk.run_tool("place_in_box", {"box": "blue"})
     assert not r6c["ok"] and r6c["reason"] == "NO_ITEM_HELD" and sk.run_tool("return_to_safe_pose", {})["ok"]
-    print("[I6] safety stop let go in the blue bin -> ITEM_DROPPED_IN_BOX (ok + warning), elsewhere -> ITEM_DROPPED; "
+    print("[I6] safety stop let go in the red bin -> ITEM_DROPPED_IN_BOX (ok + warning), elsewhere -> ITEM_DROPPED; "
           "released item noticed; return_to_safe_pose works")
 
 # ------------------------------------------------------------------ I7
