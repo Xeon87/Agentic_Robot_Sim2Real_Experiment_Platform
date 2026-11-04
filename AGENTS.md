@@ -1,7 +1,7 @@
-# NERO 项目开发与交接文档（V3.79 · Sim2Real 与自动寻优路线版）
+# NERO 项目开发与交接文档（V3.80 · Sim2Real 与自动寻优路线版）
 
 > 放在仓库根目录，命名为 `AGENTS.md`（Codex / 后续开发 Agent 会自动读取）。
-> 更新时间：2026-11-04。当前已交付最新版本：**V3.79**（仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`）。
+> 更新时间：2026-11-04。当前已交付最新版本：**V3.80**（仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`）。
 > 接手者请在做任何修改前通读本文件。本文件里“用户”指项目所有者 Jimmy。
 
 ## 0. 一句话现状
@@ -28,6 +28,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 - **V3.77（已交付）**：新模块 `NERO_V377_Stale_Procs.py`（`classify` / `stale_procs` / `stop_procs`，控制台「启动仿真」前弹窗列出并关闭残余进程，`start_nero_sim.sh` V3.07 检查也改用它）；sort_items：`SortBackendIO.move_line` 自己的直线路径手腕边走边转（`_turning_segment`，与规划 / MoveIt 一致），MoveIt 因关节路径检查拒绝时也可用（MoveIt 确认机械臂连杆不碰）；夹物动作每个关节余量 ≥ `HELD_MARGIN_DEG` = 10°（`margin_rejects`）；安全停结果带 `trip_reason` / `closest_joint_limit`（`BackendIO.v377_trip_info` 读 `NERO_DIAG_DIR/diag_trip_*`，叠杯子同样）。**只在替身和 MoveIt 模拟里验证过；仿真链路待复测，真机未验证**。
 - **V3.78（已交付）**：V4 准备工作第四组“感知精度”第 0–1 步（用户只有 D435i）：独立工具 `NERO_V378_D435i_Bench.py`（`profile` 锁定曝光 / 增益 / 白平衡 / 60 Hz → `NERO_CALIB_DIR/d435i_profile.json`；`noise` 5 种深度处理对比；`accuracy` ChArUco 板为坐标系 + Camera 页同一套 YOLOE + `YP.locate` 测鸡蛋中心误差；`capture` 训练图 → `~/Downloads/objectmodels/datasets/`）。Camera 页 / 后端未改（下一版让 Camera 页启动时套用这份参数）。**没有在真实 D435i 上运行过**。
 - **V3.79（已交付）**：Camera 页「相机信息」→「保存相机信息」右边「相机高级测试」窗口（`NERO_V379_Camera_Lab.py`，用 Camera 页的相机线程 `run_on_device` / `collect_depth`）：① 相机参数（保存并锁定 → Camera 页每次连接自动套用，深度预设仍按 Camera 页）② 深度噪声 ③ 定位精度 ④ 采集 + YOLOE 自动标注 + 框级复核（`BoxEditor`，改框后 `recompute_outline`：YOLOE 轮廓裁到框内 → GrabCut → 框）；数据集 `<root>/classes.json` + `<类别>/images|labels/{train,val}` + `meta/` + `depth/`，每 5 张 1 张 val。V325 哈希因此更新（tests 61–79）。**没有在真实 D435i / YOLOE / Tk 上运行过**。下一版 V3.80：训练 / YOLOE 精调 + 量化评估（固定验证集 mAP、召回、3D 误差对比）+ 生成可在 Camera 页选用的模型。
+- **V3.80（已交付）**：相机高级测试 4 项改进（仍在 `NERO_V379_Camera_Lab.py`，标记 `V3.80 CAMERA LAB UPGRADE`）：① `autotune`（工作区 ROI、曝光 = 闪烁周期整数倍、亮部 p99.5 < 245、最低增益到平均 110–150；反差大时以白色物体不过曝为先）+ 命名参数组 `cameracalib/d435i_profiles/` + 连接时自动套用 + `lighting_check`（亮度变化 > 20 % 提示重调；V325 只多传 `src=self`）② 表格用 `CAM.treeview_style` + `noise_verdict`（D435 理论 z²·0.08/(f·B)、平整度、最佳处理与代价、换算到 750 mm）③ 任意物体（`locate_fn`：一般物体 `locate_objects` + 高度误差 / 蛋形 `locate`）④ 类别清单（无默认类别、勾选的全部标注、当前类别 = 子文件夹、每类建议 150 张）。**没有在真实硬件上运行过**。计划见 8.5 / 8.6。
 - **用户的 V4 准备清单（22 项，8 组；SmolVLA 接入前的准备）**：当前先做第四组（感知精度：YOLO 微调、D435i 深度处理与蛋中心换算、两路相机分工与跟踪）；顺序：第 0 步（照明 / 相机参数 / 精度测试）→ 深度 → 两路相机 → YOLO 微调（必须在相机参数固定后采图）。仿真 sort_items 不再细调抓取规则（V3.77 后结论：主要卡在仿真里 SO-101 的物理稳定性与 MoveIt 夹爪模型）。
 - **已和用户确认的后续路线（V3.79 起，原 V3.78 → V3.80 顺延，可能被 V4 准备清单替代）**：仿真页用“任务登记表”按场景固定提示词 / 快捷按钮 / 工具调试栏（A2 钩子事后调整，不动后端冻结部分）；**实机页做成真正通用**：通用识别（任务提取物体名 → YOLOE + 深度 → 物体 / 容器 / 颜色 / 尺寸 / 关系；**用户要求开启“把相机画面发给支持看图的 LLM”**辅助识别）+ 通用动作库（observe / pick / place_into / place_on / place_at / verify，仿真与实机共用，仿真 sort_items 改用它）+ 专用技能库（叠杯子等带技能卡，由 LLM 选择）+ 档位 ①②③ 在运动层统一实现（② 统一截断到悬停高度）。V3.78：通用识别 + 实机新外壳（只开 ①）+ 仿真登记表；V3.79：通用动作库 + 实机 ②；V3.80：实机 ③ + 检查 + LLM 选专用技能。叠杯子必须保持不退化（V3.65–V3.71 测试原样通过）。
 - **接下来的核心路线（V3.81 起，再顺延；先请用户在实机上按 ①→②→③ 复测叠杯子）**：遵循**“一套大脑、两套身体（仿真与实机除眼睛和手脚外 100% 通用）”**原则，将算法拆分为**“铁打的底层骨架 + 可拨动的控制旋钮（Control Knobs / Strategy Profile）”**，通过**带噪仿真自动寻优试验（DOE / 贝叶斯优化）**自动搜索各场景鲁棒最优参数包，并按 `纯视觉干跑 → 5 cm 悬停预演 → 实机柔顺抓放` 稳步完成真机迁移。
@@ -129,7 +130,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 | `NERO_V365_Real_Cup_Task.py` | **NERO实机任务（V3.65）**：`RealIO`（CupSkills 的实机 IO：FastArm TCP、连续 IK 直线段 / 关节线性插值 → 关节路径执行、D435i 杯子感知（桌面 z 平移 + 围栏工作区）、STS3215 夹爪换算）、`run_plan_preview` / `run_hover` / `run_execute`、`PipelineArm`、`camera_from_tab`、`RealCupTaskTabUI` |
 | `NERO_V366_Real_Cup_Yolo.py` | **实机杯子识别（V3.66）**：`yolo_cfg_from_tab`（Camera 页 YOLOE 设置，文字提示 / -pf 选择同 `_resolve_object_query`）、`perceive_cups_yolo`（detect → fuse_depth → locate_objects → 每个实例轮廓：锥面杯轴、轮廓顶边杯高 `silhouette_height`、`classify` 单杯 / 已叠好、lifted / outside / edge、重复框合并）、`summary` |
 | `NERO_V372_Sort_Skills.py` | **分类场景 Agent 技能（V3.72）**：`SortSkills`（继承 `CupSkills` 的运动 / 安全 / 夹爪档案）、`SortTwinIO` / `SortBackendIO`、`SORT_TOOLS` / `SORT_SYSTEM_INSTRUCTIONS`、`run_sort_task`（Agent 循环 + `[V3.72 SKILL SCORE]` + `[V3.72 SORT RESULT]`）、`gui_run_task`（后端 A2 钩子入口）、`twin_episode`（`--twin`） |
-| `NERO_V379_Camera_Lab.py` | **相机高级测试（V3.79）**：`apply_saved_profile`、`Dataset`（类别子文件夹 + YOLO 分割标签 + meta）、`dets_to_anns`、`BoxEditor`、`recompute_outline` / `grabcut_poly` / `clip_poly`、`measure_noise`、`accuracy_trials`、`CameraLab` 窗口（4 页）、`open_lab` |
+| `NERO_V379_Camera_Lab.py` | **相机高级测试（V3.79 / V3.80）**：V3.80 加 `autotune` / `roi_stats` / `judge_brightness` / `save_named` / `activate_named` / `lighting_check` / `noise_verdict` / `locate_fn` / `accuracy_verdict` / `Dataset.class_counts`；`apply_saved_profile`、`Dataset`（类别子文件夹 + YOLO 分割标签 + meta）、`dets_to_anns`、`BoxEditor`、`recompute_outline` / `grabcut_poly` / `clip_poly`、`measure_noise`、`accuracy_trials`、`CameraLab` 窗口（4 页）、`open_lab` |
 | `NERO_V378_D435i_Bench.py` | **D435i 单机工具（V3.78）**：`load/save/apply_profile`（`NERO_CALIB_DIR/d435i_profile.json`）、`FilterChain`（空间 / 时间 / 补洞）、`median_stack`、`noise_report`、`board_pose` / `inner_corners` / `T_bench_cam_from_pose`（ChArUco 板 = 坐标系，z 朝上）、`accuracy_row` / `summarize` / `write_results`、交互模式 `profile` / `noise` / `accuracy` / `capture` |
 | `NERO_V377_Stale_Procs.py` | **残余进程检查（V3.77）**：`classify`（按 argv 认 ROS / MoveIt / RViz / 实机驱动 / 任何文件夹的 `NERO_*.py`，不认控制台和编辑器）、`stale_procs`、`stop_procs`（INT→TERM→KILL，进程组）、`--list` / `--stop`（启动脚本用） |
 | `NERO_V375_Collision_Check.py` | **碰撞预检（V3.75）**：`world_boxes`（桌面 + 分类框）、`so101_parts`（SO-101 + link5–7 粗略盒子，按候选关节 FK）、`obb_overlap`、`moveit_contacts`（`/check_state_validity` 全部碰撞对）、`classify_pairs`（blocking / 只有 MoveIt 夹爪模型）、`assess`、`official_gripper_parts`（原装夹爪估计外形，只给测试模拟 MoveIt 用）、`rect_corners` / `rect_dist`（占地矩形） |
@@ -158,7 +159,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
    - **痛点 B（画面下沿黑色夹爪阴影与塑封膜反光拉偏角点）**：**V3.58 方案**：开启 `CORNER_REFINE_SUBPIX` + `tryRefineMarkers`，并通过**干净子集去畸变 + 平面 RANSAC 单应性检验（`_clean_outlier_corners`）**自动剥离每张图里偏离 `> 1.15 px` 的 1–3 个孤立反光/夹爪遮挡坏角点（保留其余干净角点），而对 `>= 4` 个坏角点的运动模糊帧则整张剔除。
    - **痛点 C（起点偏左导致采样集中在左侧 + 纸面微翘）**：**V3.58 方案**：`plan_intr_auto_targets` 读取起点标定板实际位置 `s0_board["center_frac"]` 作为最远点采样种子，将四向及对角倾视基线提升至 `18°–28°`；`calibrate_eye_in_hand` 将 2D 深度比例因子 `alpha_z` 拓宽至 `[0.12, 1.85]`（以 `axy=1.0` 起算），并在自动采集达标后**一键同步保存 `wrist_intrinsics.json` 与 `wrist_handeye_calib.json`**。
 
-## 7. 版本简史（V3.43 – V3.79）
+## 7. 版本简史（V3.43 – V3.80）
 
 | 版本 | 核心改动内容 |
 | :--- | :--- |
@@ -182,6 +183,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 | **V3.62** | 叠杯子 Agent 技能（填 API key + 输入任务即可在仿真里叠杯子）；后端 RUN TASK A2 块加 `stack_cups` 分支；杯子原点改杯口中心 + 卷边硬接触 + 与质量无关的杯子接触；第 ⑥ 组 11 旋钮 `[仿真技能✓]`；修正 V3.61 抓放翻转不一致；替身试验 16/16 |
 | **V3.63** | 修复叠杯子放置 J7 越限急停（联合规划 + 逐点轨迹检查 + 先转腕再平移 + 急停即停解锁重试 + 不做小修正）；固定主相机 D435i 杯子感知（相机进程分支）；替身带 URDF 运动学与相机渲染；试验 20/20（相机 4/4） |
 | **V3.64** | 新场景 `stack_cups_so101`（SO-101 夹爪 + 7 mm 转接环 + 偏转 45°，后端不变）；夹爪档案（抓取坐标系、固定指在外、沿杯壁下探、抬起 / 搬运后摆正等待、低位松手 + 松手后外移）；通用：全角度回退、搬运优先规划关节解、关节停稳等待；SO-101 替身试验 |
+| **V3.80** | 相机高级测试：一键调参 + 命名参数组 + 连接后光照检查；噪声结论；任意物体定位精度；类别清单采集 |
 | **V3.79** | Camera 页「相机高级测试」窗口：相机参数锁定并自动套用、深度噪声、定位精度、任意物体采集 + 自动标注 + 框级复核 |
 | **V3.78** | D435i 单机工具：固定相机参数、深度滤波对比、鸡蛋定位精度（ChArUco 板坐标系）、训练图采集 |
 | **V3.77** | 启动仿真前列出并关闭残余进程（控制台 + 启动脚本共用 `NERO_V377_Stale_Procs.py`）；分类：自己的直线路径与规划一致（手腕边走边转）、夹物关节余量 ≥ 10°、安全停原因写进结果 |
@@ -283,6 +285,36 @@ ightarrow$ `回起点姿态`，方便在夹爪未就绪时完整验证视觉定�
      - Agent 在任务开始时根据桌面视觉特征（目标类别、密集程度、距边界距离）自动从 `config/strategies/` 中选择最匹配的仿真寻优策略包（或动态微调旋钮），并在实机执行日志中记录每次抓放的耗时与成败，持续扩充策略经验库。
 - **阶段 4 验收标准**：
   - 实机连续抓取多颗鸡蛋（先用假蛋验证 10 次，再用真鸡蛋验证）稳健放入 6 孔蛋托，不磕碰蛋托外壁、不伤蛋壳；改变鸡蛋密集度或更换其他抓取物时，切换/自动匹配对应策略包即可稳定复现；`tests/test_v3_62.py` 全部通过。
+
+### 8.5 V3 逐步完善计划（2026-11-04 与用户确认；V4 准备清单第四组优先）
+
+用户的 V4 准备清单（22 项、8 组，原文要点）与当前状态：
+
+| 组 | 项目 | 状态（V3.80） |
+| :--- | :--- | :--- |
+| 一 安全和硬件 | 1 急停 / 关节限位 / 工作空间边界 / 速度加速度上限 / 跟踪误差停止；2 SO-101 夹爪（开合、电流上限、位置 + 负载判断抓到）；3 统一机器人模型（新夹爪 TCP 与外形同一份 URDF → cuRobo 碰撞球 / MoveIt / MuJoCo） | 1 部分（围栏、限位、`ARM_NOT_AT_GOAL`、速度档）；2 部分（V3.65 STS3215 位置 + 扭矩上限，无力闭环）；3 未做（MoveIt 仍是原装夹爪，V3.75） |
+| 二 感知地基 | 4 照明和相机参数（漫射光、关自动曝光 / 白平衡、防闪烁，之后采图以此为准）；5 腕部 130° 内参（鱼眼 / 高阶畸变）；6 两路手眼标定 + TCP 到检测点实测偏差；7 桌面和蛋托位姿 | 4 V3.78–V3.80 工具已就绪（一键调参 + 参数组），待用户实测锁定；5、6 V3.58 已有，需按“实测偏差”验收；7 未做 |
+| 三 评测基线 | 8 统一记录（图像、关节、规划、agent 决策）+ 固定条件 20–30 次，按检测 / 规划 / 抓取 / 放置分别统计 | 部分（V3.68 `task/` 记录）；统计未做 |
+| 四 感知精度 | 9 微调 YOLO（第 4 步之后采图）；10 D435i 深度滤波 + 多帧平均 + 表面 → 蛋中心；11 两路相机分工 + 多帧跟踪 + 抓取前重检 | 9 采集标注 V3.79–V3.80 ✓，训练评估 V3.81；10 测量工具 ✓，接入 Camera 页 V3.82；11 V3.83 |
+| 五 规划成功率 | 12 IK 统一 cuRobo、MoveIt 只校验；13 放开绕竖直轴旋转 + 多候选抓取姿态；14 碰撞 padding、抓取段关夹爪-目标碰撞、当前构型作 IK 种子；15 标准化预抓取位（也是 V4 交接位） | 未做（叠杯子 / 分类技能里已有部分：多候选、当前构型起算） |
+| 六 动作流畅度 | 16 按轨迹时间参数执行（MuJoCo + 真机）；17 合并分段减少停顿 | 未做 |
+| 七 agent 鲁棒性 | 18 每步用感知验证；19 每个技能的失败恢复（重试 / 换姿态 / 放弃）；20 LLM 只能从技能表选、结构化输出、记录每次决策 | 部分（叠杯子 verify / recover、工具契约） |
+| 八 V4 准备 | 21 MuJoCo 相机内参和安装位置与真机一致；22 结合 store_in_safe 把大技能拆成原语 | 未做 |
+
+近期版本（每版先交付可在真机 / 实物上验证的东西；顺序可由用户调整）：
+- **V3.81 训练与评估（第 9 项）**：相机高级测试新页「⑤ 训练 / 评估」——从 V3.79 数据集生成 data.yaml（每类子文件夹 → 全局类别号，val 固定不参与训练）；YOLOE-26 精调（ultralytics 8.4 的 YOLOE 训练器，先在用户电脑上用一条命令确认类名 / 参数；子进程 + `clean_child_env`，进度和日志回到界面，训练时提示停掉 Camera 页实时识别）；评估：同一份 val 上原模型 vs 新模型的 mAP50 / mAP50-95（框 + 轮廓）、精确率、召回、每帧 ms，再用 ③ 定位精度比 3D 误差；结果 `metrics.json` + 对比表；模型存 `~/Downloads/objectmodels/finetuned/<名字>/`，Camera 页模型下拉框可选，原模型保留（精调模型只认训练过的类别）。
+- **V3.82 深度处理接入（第 10 项）**：Camera 页定位可选“滤波 + N 帧中值”（按 ② 的建议，静止物体抓取前用）；蛋表面 → 蛋中心的换算按 ③ 的实测误差校正并验收。
+- **V3.83 两路相机分工 + 跟踪（第 11 项）**：固定相机三维定位、腕部相机最后对准；多帧跟踪平滑（同一物体 ID、位置滤波）；抓取前在预抓取位重检一次，偏差超限就重新规划。
+- **之后（用户在实验室有机械臂时）**：第二组 5–7 的实测验收（TCP 走到检测点量偏差）、第三组评测基线（固定条件 20–30 次分段统计），再进入第一 / 五 / 六 / 七组。
+
+### 8.6 V4 开发目标：接入 SmolVLA（2026-11-04 记录；细节待与用户逐项确认）
+
+- **目标**：在 V3 的“规划 + 技能 + LLM 选技能”的骨架上接入 SmolVLA（LeRobot 的小型视觉-语言-动作模型）：输入两路相机图像 + 关节状态 + 语言指令，输出一段动作（action chunk）。
+- **分工设想**：V3 管线负责安全、全局定位和到达**标准预抓取位 / 交接位**（第 15 项）；SmolVLA 从交接位接手最后的接近、抓取、放置等精细动作；结束后交还 V3 做感知验证（第 18 项）和失败恢复（第 19 项）。安全层（第 1 项：限位、围栏、速度、跟踪误差停止）对 SmolVLA 的输出同样生效，不能绕过。
+- **数据**：用第 8 项的统一记录（图像、关节、动作、结果）在固定条件下采集示教 / 成功轨迹，作为 SmolVLA 精调数据；相机参数必须是第 4 项锁定的那组（与 YOLO 采图同一条件）。
+- **仿真**：第 21 项让 MuJoCo 相机内参和安装位置与真机一致，仿真里可以先做数据和闭环验证；第 22 项把大技能拆成原语，便于和 SmolVLA 的动作段衔接。
+- **前置条件**：第一组（安全、夹爪、统一模型）、第二组（标定实测验收）、第三组（评测基线）、第四组（感知精度）至少达到“可量化、可复现”，否则无法判断 SmolVLA 的效果是否来自模型本身。
+- **待用户确认**：SmolVLA 负责的动作范围（只做最后 5 cm，还是整个抓放）；动作空间（关节角 / TCP 位姿增量）；控制频率；示教方式（示教模式拖动 / 遥操作 / 仿真生成）；评测指标（沿用第 8 项的分段成功率）。
 
 ## 9. 测试环境的坑（给后续开发者的提醒）
 

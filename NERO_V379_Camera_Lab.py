@@ -19,6 +19,16 @@ Dataset layout (V3.80 trains on it):
   every 5th image of a class goes to val (about 8:2)
 
 Writes only NERO_CALIB_DIR (profile, results, lab settings) and the chosen data folder; never the release folder.
+
+V3.80 CAMERA LAB UPGRADE:
+  ① one-click auto tune (AWB settle -> exposure on whole flicker periods, longest without clipping in the work ROI,
+     then the lowest gain that reaches the target brightness) + named profiles (NERO_CALIB_DIR/d435i_profiles/) + the
+     one applied on connect + a lighting check after connect (brightness vs the saved reference)
+  ② rows no longer overlap (Camera-tab Treeview style) + a verdict (vs the D435i theory at that distance, flatness,
+     best setting vs the Camera tab's, scaled to the work distance)
+  ③ any object: egg / ball shape (ellipsoid fit) or general object (locate_objects), truth = corner + half its height
+  ④ no default class: a class list (common household objects offered) with ticks, the current class = folder, every
+     ticked class labelled, counts per class against the recommended number of images
 """
 import json
 import math
@@ -32,8 +42,9 @@ import numpy as np
 
 import NERO_V378_D435i_Bench as B378
 
-VERSION = "V3.79"
+VERSION = "V3.80"
 MARKER = "V3.79 CAMERA LAB"
+MARKER_V380 = "V3.80 CAMERA LAB UPGRADE"
 CALIB_DIR = B378.CALIB_DIR
 LAB_SETTINGS = os.path.join(CALIB_DIR, "camera_lab.json")
 DEFAULT_ROOT = B378.DATA_DIR
@@ -41,15 +52,40 @@ VAL_EVERY = 5                       # every 5th image -> val
 HANDLE_PX = 9                       # corner grab radius (display pixels)
 MIN_BOX_PX = 6
 POWER_CHOICES = [("50 Hz", 1), ("60 Hz", 2)]
+# V3.80 CAMERA LAB UPGRADE: constants
+PROFILES_DIR = os.path.join(CALIB_DIR, "d435i_profiles")
+DEFAULT_ROI = [0.2, 0.2, 0.8, 0.8]          # work area of the auto tune (fractions of the image)
+MEAN_LO, MEAN_HI, MEAN_AIM = 110.0, 150.0, 130.0
+P995_MAX, SAT_MAX = 245.0, 0.5
+EXP_UNIT_MS = 0.1                            # D435 RGB exposure unit (0.1 ms)
+FRAME_MS = 33.0                              # 30 fps
+LIGHT_CHANGE = 0.20                          # connect check: brightness change that asks for a re-tune
+DEPTH_F_PX = 1280 / 2.0 / math.tan(math.radians(87.0 / 2.0))   # D435 depth, 1280 wide, HFOV 87 deg
+BASELINE_M = 0.050
+SUBPIXEL = 0.08                              # Intel's typical sub-pixel RMS
+WORK_DIST_MM = 750.0                         # fixed camera to the table (user's set-up 0.71-0.80 m)
+RECOMMENDED_IMAGES = 150                     # per class (100-300)
+COMMON_CLASSES = ["cup", "mug", "bottle", "bowl", "plate", "spoon", "fork", "knife", "banana", "apple", "orange",
+                  "egg", "egg carton", "box", "toy block", "ball", "mouse", "keyboard", "cell phone", "remote",
+                  "marker", "pen", "scissors", "tape", "book", "can", "sponge", "towel"]
 
 
 # ============================================================================================ settings
 def load_settings(path=None):
-    d = {"root": DEFAULT_ROOT, "prompts": "egg", "conf": 0.25, "save_depth": True, "burst_n": 10, "burst_dt": 1.0,
-         "acc_prompt": "egg", "standing": False, "trials": 10, "noise_frames": 30}
+    d = {"root": DEFAULT_ROOT, "conf": 0.25, "save_depth": True, "burst_n": 10, "burst_dt": 1.0,
+         "trials": 10, "noise_frames": 30,
+         # V3.80 CAMERA LAB UPGRADE: no egg defaults
+         "class_list": [], "checked": [], "current": "", "roi": list(DEFAULT_ROI),
+         "acc_prompt": "", "acc_shape": "general", "acc_L": "", "acc_W": "", "acc_H": ""}
     try:
         with open(path or os.environ.get("NERO_V379_LAB_SETTINGS") or LAB_SETTINGS, encoding="utf-8") as f:
-            d.update(json.load(f))
+            old = json.load(f)
+        if "class_list" not in old:                  # V3.79 file: its egg defaults are dropped
+            old.pop("acc_prompt", None)
+            pr = [p for p in str(old.pop("prompts", "") or "").split(",") if p.strip() and p.strip() != "egg"]
+            old["class_list"] = [p.strip() for p in pr]
+            old["checked"] = list(old["class_list"])
+        d.update(old)
     except Exception:
         pass
     return d
@@ -65,12 +101,24 @@ def save_settings(d, path=None):
     return p
 
 
-def apply_saved_profile(device, rs, log=print, path=None):
+def read_profile_meta(path=None):
+    """V3.80: the extra keys of the active profile file (name, ref brightness, roi) that B378.load_profile drops"""
+    try:
+        with open(path or B378.PROFILE_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+        return {k: d.get(k) for k in ("name", "ref", "roi")}
+    except Exception:
+        return {}
+
+
+def apply_saved_profile(device, rs, log=print, path=None, src=None):
     """Camera-tab connect: apply the lab's profile when it is locked; the depth preset stays the tab's own choice.
+    V3.80: with src, check the lighting a moment later against the brightness saved with the profile.
     -> "locked" | "none" """
     prof = B378.load_profile(path)
     if not prof.get("locked"):
         return "none"
+    meta = read_profile_meta(path)
     p = json.loads(json.dumps(prof))
     p["depth"].pop("visual_preset", None)
     rows = B378.apply_profile(device, p, rs, log=lambda s: None)
@@ -78,8 +126,237 @@ def apply_saved_profile(device, rs, log=print, path=None):
     log(f"[{'OK' if not bad else 'WARN'}] [V3.79 camera lab] 已套用锁定的相机参数（曝光 "
         f"{prof['color'].get('exposure')} · 增益 {prof['color'].get('gain')} · 白平衡 {prof['color'].get('white_balance')}"
         f" · 防闪烁 {B378.POWER_LINE.get(int(prof['color'].get('power_line_frequency', 0)), '?')}）"
-        + (f"；没套上：{', '.join(r[0] + '.' + r[1] for r in bad)}" if bad else ""))
+        + (f"；没套上：{', '.join(r[0] + '.' + r[1] for r in bad)}" if bad else "")
+        + (f"（参数组「{meta['name']}」）" if meta.get("name") else ""))
+    if src is not None and (meta.get("ref") or {}).get("mean"):
+        threading.Thread(target=lighting_check, args=(src, meta, log), daemon=True, name="v380_light").start()
     return "locked"
+
+
+# ============================================================================================ V3.80 auto tune
+def roi_px(roi, wh):
+    w, h = wh
+    r = roi or DEFAULT_ROI
+    x0, x1 = sorted((min(max(r[0], 0.0), 1.0), min(max(r[2], 0.0), 1.0)))
+    y0, y1 = sorted((min(max(r[1], 0.0), 1.0), min(max(r[3], 0.0), 1.0)))
+    if x1 - x0 < 0.05 or y1 - y0 < 0.05:
+        x0, y0, x1, y1 = DEFAULT_ROI
+    return int(x0 * w), int(y0 * h), int(x1 * w), int(y1 * h)
+
+
+def roi_stats(rgb, roi=None):
+    """brightness of the work area: mean luma, 99.5 % luma (the bright parts), % of pixels with a saturated channel"""
+    x0, y0, x1, y1 = roi_px(roi, (rgb.shape[1], rgb.shape[0]))
+    sub = rgb[y0:y1:2, x0:x1:2].astype(np.float32)
+    y = sub @ np.array([0.299, 0.587, 0.114], np.float32)
+    return {"mean": round(float(y.mean()), 1), "p995": round(float(np.percentile(y, 99.5)), 1),
+            "sat_pct": round(float((sub >= 250).any(axis=2).mean() * 100.0), 2)}
+
+
+def judge_brightness(st, flicker_safe=True, gain=None, gain_max=128):
+    """-> list of problems (empty = good) in plain words"""
+    out = []
+    if st["p995"] >= P995_MAX or st["sat_pct"] >= SAT_MAX:
+        out.append(f"亮部过曝（最亮 0.5 % 的亮度 {st['p995']:.0f}，过曝 {st['sat_pct']} %）")
+    if st["mean"] < MEAN_LO and st["p995"] < 0.9 * P995_MAX:      # dark AND headroom left (else: high contrast)
+        out.append(f"偏暗（平均 {st['mean']:.0f} < {MEAN_LO:.0f}）"
+                   + ("：增益已到上限，需要加灯" if gain is not None and gain >= 0.95 * gain_max else ""))
+    elif st["mean"] > MEAN_HI:
+        out.append(f"偏亮（平均 {st['mean']:.0f} > {MEAN_HI:.0f}）")
+    if not flicker_safe:
+        out.append("灯光太亮，曝光短于一个闪烁周期，画面可能有条纹（可以调暗灯或接受）")
+    return out
+
+
+def flicker_exposures(power_hz):
+    """exposures (0.1 ms units) that are whole periods of the light flicker (twice the mains) and fit in a frame"""
+    per = 1000.0 / (2.0 * float(power_hz)) / EXP_UNIT_MS
+    return [int(round(k * per)) for k in (1, 2, 3) if k * per * EXP_UNIT_MS <= FRAME_MS]
+
+
+def autotune(set_eg, measure, power_hz=50, gain_range=(0, 128), exp_min=1, log=print):
+    """set_eg(exposure, gain) then measure() -> roi_stats.  Longest flicker-safe exposure without clipping, then the
+    lowest gain that brings the mean to the target.  -> (result, trace)"""
+    trace = []
+
+    def run(e, g):
+        set_eg(e, g)
+        st = measure()
+        trace.append(dict(exposure=e, gain=g, **st))
+        return st
+
+    gmin, gmax = gain_range
+    cands = flicker_exposures(power_hz)
+    chosen, fallback, flicker_safe = None, None, True
+    for e in sorted(cands, reverse=True):
+        st = run(e, gmin)
+        clip = st["p995"] >= P995_MAX or st["sat_pct"] >= SAT_MAX
+        if not clip and fallback is None:
+            fallback = (e, st)
+        if not clip and st["mean"] <= MEAN_HI:
+            chosen = (e, st)
+            break
+    chosen = chosen or fallback
+    if chosen is None:                        # clipping even at one flicker period: shorter than a period
+        flicker_safe = False
+        e = cands[0]
+        while e > exp_min:
+            e = max(exp_min, int(e // 2))
+            st = run(e, gmin)
+            if st["p995"] < P995_MAX and st["sat_pct"] < SAT_MAX:
+                break
+        chosen = (e, st)
+    e, st = chosen
+    g = gmin
+    if st["mean"] < MEAN_LO:                  # raise the gain (bisection) without clipping
+        lo, hi, best = gmin, gmax, (gmin, st)
+        for _ in range(7):
+            mid = int(round((lo + hi) / 2.0))
+            if mid in (lo, hi) and hi - lo <= 1:
+                break
+            s2 = run(e, mid)
+            if s2["p995"] < P995_MAX and s2["sat_pct"] < SAT_MAX and s2["mean"] <= MEAN_HI:
+                best, lo = (mid, s2), mid
+                if s2["mean"] >= MEAN_AIM - 10:
+                    break
+            else:
+                hi = mid
+            if hi - lo <= 2:
+                break
+        g, st = best
+    set_eg(e, g)
+    issues = judge_brightness(st, flicker_safe, g, gmax)
+    note = ""
+    if not issues and st["mean"] < MEAN_LO:
+        note = (f"场景反差大：亮部已到上限，平均亮度只能到 {st['mean']:.0f}（以白色物体不过曝为先）")
+    res = {"exposure": e, "gain": g, "stats": st, "flicker_safe": flicker_safe, "ok": not issues, "issues": issues,
+           "note": note, "exposure_ms": round(e * EXP_UNIT_MS, 1), "steps": len(trace)}
+    log(f"[{'OK' if not issues else 'WARN'}] [V3.80 auto tune] 曝光 {res['exposure_ms']} ms · 增益 {g} · 平均 "
+        f"{st['mean']:.0f} · 最亮 {st['p995']:.0f} · 过曝 {st['sat_pct']} %（{len(trace)} 步）"
+        + (f"：{'；'.join(issues)}" if issues else "：合格") + (f"（{note}）" if note else ""))
+    return res, trace
+
+
+def lighting_check(src, meta, log=print, wait_s=6.0):
+    """after a connect: compare the work-area brightness with the one saved with the profile"""
+    t0 = time.time()
+    while time.time() - t0 < wait_s:
+        rgb, _d, fid = src.frames()
+        if rgb is not None and fid >= 20:
+            break
+        time.sleep(0.1)
+    else:
+        return None
+    ref = meta["ref"]
+    st = roi_stats(rgb, meta.get("roi") or ref.get("roi"))
+    ch = (st["mean"] - ref["mean"]) / max(1.0, ref["mean"])
+    if abs(ch) > LIGHT_CHANGE or st["sat_pct"] >= SAT_MAX:
+        log(f"[WARN] [V3.80 camera lab] 光照和保存参数时不同（工作区亮度 {ref['mean']:.0f} → {st['mean']:.0f}，"
+            f"{ch * 100:+.0f} %，过曝 {st['sat_pct']} %）：到「相机信息 → 相机高级测试 → ① 相机参数」重新一键调参")
+    else:
+        log(f"[OK] [V3.80 camera lab] 光照检查：工作区亮度 {st['mean']:.0f}（保存时 {ref['mean']:.0f}），参数合适")
+    return st
+
+
+# ---------------------------------------------------------------- V3.80 named profiles
+def _profile_file(name):
+    return os.path.join(PROFILES_DIR, safe_class(name) + ".json")
+
+
+def list_named():
+    if not os.path.isdir(PROFILES_DIR):
+        return []
+    out = []
+    for fn in sorted(os.listdir(PROFILES_DIR)):
+        if fn.endswith(".json"):
+            try:
+                with open(os.path.join(PROFILES_DIR, fn), encoding="utf-8") as f:
+                    out.append(str(json.load(f).get("name") or fn[:-5]))
+            except Exception:
+                pass
+    return out
+
+
+def save_named(name, prof):
+    os.makedirs(PROFILES_DIR, exist_ok=True)
+    p = _profile_file(name)
+    d = dict(json.loads(json.dumps(prof)), name=str(name), version=VERSION, saved_at=time.strftime("%Y-%m-%d %H:%M:%S"))
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, p)
+    return p
+
+
+def load_named(name):
+    with open(_profile_file(name), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def activate_named(name):
+    """make the named profile the one the Camera tab applies on connect"""
+    d = load_named(name)
+    d["locked"] = True
+    return B378.save_profile(d)
+
+
+# ============================================================================================ V3.80 noise verdict
+def theory_std_mm(dist_mm):
+    """D435 depth RMS from triangulation: z^2 * subpixel / (f * baseline)"""
+    z = float(dist_mm) / 1000.0
+    return z * z * SUBPIXEL / (DEPTH_F_PX * BASELINE_M) * 1000.0
+
+
+def noise_verdict(rows, current="spatial+temporal", work_mm=WORK_DIST_MM, sets=None):
+    """-> {"level": ok / warn / fail, "lines": [...], "best": setting}"""
+    by = {r["setting"]: r for r in rows}
+    med = {n: m for n, _c, m in (sets or B378.FILTER_SETS)}
+    raw = by.get("raw") or rows[0]
+    lines, level = [], "ok"
+    if not raw.get("mean_dist_mm") or raw.get("temporal_std_mm") is None:
+        return {"level": "fail", "lines": ["没有测到深度：测量区没有有效深度（太近 < 0.3 m、太暗、黑色 / 反光表面？）"],
+                "best": None}
+    dist = raw["mean_dist_mm"]
+    th = theory_std_mm(dist)
+    ratio = raw["temporal_std_mm"] / th
+    if raw["valid_pct"] < 95 or ratio > 2.5:
+        level = "fail"
+        lines.append(f"判定：异常。原始深度抖动 {raw['temporal_std_mm']:.2f} mm，是这个距离（{dist:.0f} mm）理论值 "
+                     f"{th:.2f} mm 的 {ratio:.1f} 倍，有效像素 {raw['valid_pct']} %。可能是测量区反光 / 太暗 / 有东西在动 / "
+                     "红外投射被挡；换哑光平面再测")
+    elif raw["valid_pct"] < 98 or ratio > 1.6:
+        level = "warn"
+        lines.append(f"判定：偏大。原始抖动 {raw['temporal_std_mm']:.2f} mm（理论 {th:.2f} mm，{ratio:.1f} 倍），有效像素 "
+                     f"{raw['valid_pct']} %")
+    else:
+        lines.append(f"判定：正常。原始抖动 {raw['temporal_std_mm']:.2f} mm，和 D435i 在 {dist:.0f} mm 的理论值 "
+                     f"{th:.2f} mm 相符（{ratio:.1f} 倍），有效像素 {raw['valid_pct']} %")
+    ok_rows = [r for r in rows if r.get("temporal_std_mm") is not None and r.get("valid_pct", 0) >= 99.0] or \
+        [r for r in rows if r.get("temporal_std_mm") is not None]
+    best = min(ok_rows, key=lambda r: r["temporal_std_mm"])
+    if best.get("flatness_rms_mm") is not None and best["flatness_rms_mm"] > max(3.0 * best["temporal_std_mm"], 3.0):
+        level = "warn" if level == "ok" else level
+        lines.append(f"平整度 {best['flatness_rms_mm']:.2f} mm 远大于抖动 {best['temporal_std_mm']:.2f} mm：测量框里的表面"
+                     "可能不平、有物体或反光（框应全在哑光桌面上）")
+    cur = by.get(current)
+    if cur and cur.get("temporal_std_mm") is not None:
+        if best["setting"] == current:
+            lines.append(f"建议：Camera 页现在的「{current}」已经是最好的（抖动 {cur['temporal_std_mm']:.2f} mm），不用改")
+        else:
+            gain = (cur["temporal_std_mm"] - best["temporal_std_mm"]) / cur["temporal_std_mm"] * 100.0
+            cost = med.get(best["setting"], 1) * FRAME_MS
+            if gain < 10.0:
+                lines.append(f"建议：「{best['setting']}」比现在的「{current}」只好 {gain:.0f} %（{cur['temporal_std_mm']:.2f} → "
+                             f"{best['temporal_std_mm']:.2f} mm），不必改")
+            else:
+                lines.append(f"建议：「{best['setting']}」比现在的「{current}」好 {gain:.0f} %（{cur['temporal_std_mm']:.2f} → "
+                             f"{best['temporal_std_mm']:.2f} mm），代价是每次定位约等 {cost / 1000.0:.2f} s 取帧；"
+                             "静止物体抓取前的定位值得用")
+    if abs(dist - work_mm) > 150.0:
+        k = (work_mm / dist) ** 2
+        lines.append(f"距离：这次测在 {dist:.0f} mm，实际工作距离约 {work_mm:.0f} mm；换算过去抖动约为现在的 {k:.2f} 倍"
+                     f"（原始 ≈ {raw['temporal_std_mm'] * k:.2f} mm，最好的处理 ≈ {best['temporal_std_mm'] * k:.2f} mm）")
+    return {"level": level, "lines": lines, "best": best["setting"], "theory_mm": round(th, 2)}
 
 
 # ============================================================================================ geometry
@@ -334,6 +611,20 @@ class Dataset:
                 if rel and os.path.isfile(os.path.join(d, rel)):
                     os.remove(os.path.join(d, rel))
 
+    def class_counts(self):
+        """V3.80: per class over every folder -> {cls: {"images": images with it, "objects": boxes}}"""
+        out = {}
+        for fo in self.folders():
+            for m in self.items(fo):
+                seen = set()
+                for a in m.get("anns", []):
+                    c = out.setdefault(a["cls"], {"images": 0, "objects": 0})
+                    c["objects"] += 1
+                    if a["cls"] not in seen:
+                        c["images"] += 1
+                        seen.add(a["cls"])
+        return out
+
     def stats(self):
         out = {}
         for fo in self.folders():
@@ -458,9 +749,41 @@ def measure_noise(src, K, frames=30, log=print, sets=None):
     return rows, roi
 
 
-def accuracy_trials(grab, detect, K, T, corners, exp_z, trials=10, settings=(("滤波 + 5 帧中值", 5), ("滤波 1 帧", 1))):
-    """grab(n) -> (rgb, [depth]); detect(rgb) -> dets -> (rows, summary); same maths as the V3.78 bench"""
+SHAPES = [("general", "一般物体（通用定位）"), ("egg", "蛋形 / 球形（椭球拟合）")]
+
+
+def locate_fn(shape, size_lw_mm=None):
+    """V3.80: the Camera tab's locating for the shape -> fn(dets, depth, K, T) -> results"""
     import NERO_V347_Yolo_Perception as YP
+    if shape == "egg":
+        size = tuple(size_lw_mm) if size_lw_mm else YP.EGG_SIZE_MM
+        return lambda d, dm, K, T: YP.locate(d, dm, K, T, table_z=0.0, size_mm=size)
+    return lambda d, dm, K, T: YP.locate_objects(d, dm, K, T, table_z=0.0)
+
+
+def accuracy_verdict(summ):
+    """V3.80: one plain sentence per depth setting"""
+    out = []
+    for name, s_ in summ.items():
+        if not isinstance(s_, dict) or "err_3d" not in s_:
+            continue
+        if not s_["err_3d"].get("n"):
+            out.append(f"{name}：没有检出（物体名 / 置信度？物体在画面里？）")
+            continue
+        e, xy = s_["err_3d"], s_["xy"]
+        good = xy["mean"] <= 3.0 and e["max"] <= 6.0 and s_["detected_pct"] >= 90
+        out.append(f"{name}：检出 {s_['detected_pct']} %，水平误差平均 {xy['mean']} mm（最大 {xy['max']}），3D 平均 {e['mean']} mm"
+                   f" → {'可以用于抓取（抓取一般要求水平 ≤ 3 mm）' if good else '偏大：看哪个方向偏（CSV 里 dx / dy / dz）'}")
+    return "\n".join(out)
+
+
+def accuracy_trials(grab, detect, K, T, corners, exp_z, trials=10, settings=(("滤波 + 5 帧中值", 5), ("滤波 1 帧", 1)),
+                    locate=None, height_mm=None):
+    """grab(n) -> (rgb, [depth]); detect(rgb) -> dets -> (rows, summary); same maths as the V3.78 bench.
+    V3.80: locate = locate_fn(shape) (default the egg fit); height_mm = the object's real height -> height error"""
+    import NERO_V347_Yolo_Perception as YP
+    if locate is None:
+        locate = lambda d, dm, K_, T_: YP.locate(d, dm, K_, T_, table_z=0.0)
     rows = []
     for name, med in settings:
         for i in range(int(trials)):
@@ -470,7 +793,8 @@ def accuracy_trials(grab, detect, K, T, corners, exp_z, trials=10, settings=(("�
                 continue
             dets = detect(rgb)
             d_m = B378.median_stack(depths) if med > 1 else depths[-1]
-            res, _diag = YP.locate(dets, d_m, K, T, table_z=0.0)
+            res = locate(dets, d_m, K, T)
+            res = res[0] if isinstance(res, tuple) else res
             ok = [r for r in res if r.get("xyz_m") is not None and r.get("status") != "rejected"]
             if not ok:
                 rows.append({"setting": name, "trial": i, "detected": False, "why": f"{len(dets)} det"})
@@ -480,12 +804,14 @@ def accuracy_trials(grab, detect, K, T, corners, exp_z, trials=10, settings=(("�
                               "x_mm": round(best["xyz_m"][0] * 1000, 2), "y_mm": round(best["xyz_m"][1] * 1000, 2),
                               "z_mm": round(best["xyz_m"][2] * 1000, 2)},
                              **B378.accuracy_row(best["xyz_m"], corners, exp_z)))
+            if height_mm and best.get("height_mm") is not None:
+                rows[-1]["h_err_mm"] = round(float(best["height_mm"]) - float(height_mm), 2)
     summ = {}
     for name, _m in settings:
         rr = [r for r in rows if r["setting"] == name]
         summ[name] = {"detected_pct": round(100.0 * sum(1 for r in rr if r.get("detected")) / max(1, len(rr)), 1),
                       "err_3d": B378.summarize(rr), "xy": B378.summarize(rr, "xy_err_mm"),
-                      "dz": B378.summarize(rr, "dz_mm")}
+                      "dz": B378.summarize(rr, "dz_mm"), "h": B378.summarize(rr, "h_err_mm")}
     return rows, summ
 
 
@@ -517,7 +843,8 @@ def draw_overlay(rgb, anns=None, sel=None, points=None, scale=1.0, colours=None)
         if k == sel:
             for (x, y) in ((b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3])):
                 cv2.rectangle(img, (x - 4, y - 4), (x + 4, y + 4), (255, 255, 255), -1)
-        tag = f"#{k} {a['cls']}" + (f" {a['conf']:.2f}" if a.get("conf") is not None else f" {a.get('source', '')}")
+        tag = f"#{k} {_ascii(a['cls'])}" + (f" {a['conf']:.2f}" if a.get("conf") is not None else
+                                            f" {_ascii(a.get('source', ''))}")   # V3.80: cv2 cannot draw Chinese
         cv2.putText(img, tag, (b[0] + 2, max(12, b[1] - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3)
         cv2.putText(img, tag, (b[0] + 2, max(12, b[1] - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, c, 1)
     for i, (u, v) in (points or {}).items():
@@ -525,6 +852,11 @@ def draw_overlay(rgb, anns=None, sel=None, points=None, scale=1.0, colours=None)
         cv2.circle(img, p, 4, (0, 90, 255), -1)
         cv2.putText(img, str(i), (p[0] + 5, p[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 90, 255), 1)
     return img
+
+
+def _ascii(t):
+    t = str(t or "")
+    return t if t.isascii() else ""
 
 
 def fit_scale(wh, box_wh):
@@ -567,6 +899,8 @@ class CameraLab:
         self.busy = None
         self.st = load_settings()
         self.prof = B378.load_profile()
+        self.meta = read_profile_meta()                  # V3.80 CAMERA LAB UPGRADE
+        self.last_tune = None
         self.board_T, self.board_info = None, None
         self.ds = Dataset(self.st["root"])
         self.cur = None                  # (folder, stem)
@@ -623,6 +957,14 @@ class CameraLab:
         self.photos[key] = ph
         canvas.delete("all")
         canvas.create_image(0, 0, image=ph, anchor="nw")
+
+    def _tree_style(self):
+        """V3.80: the Camera tab's Treeview style (row height from the font) -> rows never overlap"""
+        try:
+            import NERO_V325_Camera as CAM
+            return CAM.treeview_style(self.ttk, self.win)[0]
+        except Exception:
+            return "Treeview"
 
     def _var(self, value):
         return self.tk.StringVar(value=str(value))
@@ -681,60 +1023,92 @@ class CameraLab:
             return
         s = fit_scale((rgb.shape[1], rgb.shape[0]), (self.PW, self.PH) if page != 3 else (480, 270))
         small = resize(rgb, s)
-        if page == 0:
-            stt = B378.image_stats(rgb[::4, ::4])
-            ok = 110 <= stt["mean"] <= 150 and stt["sat_pct"] < 0.5
-            self.v_stats.set(f"平均亮度 {stt['mean']}（目标 110–150） · 过曝 {stt['sat_pct']} %（目标 < 0.5 %）"
-                             f"  {'✓' if ok else '← 调曝光 / 增益'}")
+        if page == 0:                                   # V3.80: work-ROI brightness + the ROI drawn
+            stt = roi_stats(rgb, self.st.get("roi"))
+            bad = judge_brightness(stt)
+            self.v_stats.set(f"工作区：平均 {stt['mean']:.0f}（110–150） · 最亮 {stt['p995']:.0f}（< 245） · 过曝 "
+                             f"{stt['sat_pct']} %（< 0.5 %）  " + ("✓ 合适" if not bad else "← " + "；".join(bad)))
+            self._prof_scale_wh = (small.shape[1], small.shape[0])
+            x0, y0, x1, y1 = roi_px(self.st.get("roi"), (small.shape[1], small.shape[0]))
+            small = draw_overlay(small, [{"cls": "work ROI", "box": [x0, y0, x1, y1], "poly": None, "conf": None,
+                                          "source": ""}])
+            op = getattr(self, "_roi_op", None)
+            if op:
+                small = draw_overlay(small, [{"cls": "new", "box": norm_box(op), "poly": None, "conf": None,
+                                              "source": ""}])
         elif page == 1:
             w, h = small.shape[1], small.shape[0]
             r = 80 * s
             small = draw_overlay(small, [{"cls": "ROI", "box": [w / 2 - r, h / 2 - r, w / 2 + r, h / 2 + r],
-                                          "poly": None, "conf": None, "source": "测量区"}])
+                                          "poly": None, "conf": None, "source": "measure"}])
         elif page == 2 and self.board_T is not None and src.K:
             small = draw_overlay(small, points=corner_pixels(self.board_T, src.K, B378.inner_corners()), scale=s)
         self._show(canvas, f"p{page}", small)
 
     # ------------------------------------------------------------------ ① camera parameters
     def _build_profile(self):
+        # V3.80 CAMERA LAB UPGRADE: one-click auto tune in a work ROI + named profiles
         tk, ttk = self.tk, self.ttk
         p = ttk.Frame(self.nb, padding=6)
         self.nb.add(p, text="① 相机参数")
         self.cv_prof = tk.Canvas(p, width=self.PW, height=self.PH, bg="#202020", highlightthickness=0)
         self.cv_prof.pack(anchor="w")
-        self.v_stats = self._var("（连接相机后显示亮度）")
-        ttk.Label(p, textvariable=self.v_stats).pack(anchor="w", pady=(4, 2))
+        self.cv_prof.bind("<ButtonPress-1>", self._roi_press)
+        self.cv_prof.bind("<B1-Motion>", self._roi_drag)
+        self.cv_prof.bind("<ButtonRelease-1>", self._roi_release)
+        self.v_stats = self._var("（连接相机后显示工作区亮度；在画面上拖框 = 工作区）")
+        self.lb_stats = ttk.Label(p, textvariable=self.v_stats)
+        self.lb_stats.pack(anchor="w", pady=(4, 2))
+        r0 = ttk.Frame(p)
+        r0.pack(fill="x", pady=2)
         col = self.prof["color"]
+        pl = int(col.get("power_line_frequency", 1))
+        self.v_pl = self._var(next((n for n, v in POWER_CHOICES if v == pl), "50 Hz"))
+        ttk.Label(r0, text="电网频率").pack(side="left")
+        ttk.Combobox(r0, textvariable=self.v_pl, values=[n for n, _ in POWER_CHOICES], width=7,
+                     state="readonly").pack(side="left", padx=(2, 8))
+        ttk.Button(r0, text="▶ 一键自动调参", command=self.on_autotune).pack(side="left")
+        ttk.Button(r0, text="工作区恢复默认", command=self.on_roi_default).pack(side="left", padx=6)
+        self.v_tune = self._var("")
+        self.lb_tune = ttk.Label(p, textvariable=self.v_tune, justify="left", wraplength=self.PW + 300)
+        self.lb_tune.pack(anchor="w", pady=(2, 2))
         r = ttk.Frame(p)
         r.pack(fill="x", pady=2)
         self.v_exp, self.v_gain, self.v_wb = self._var(col["exposure"]), self._var(col["gain"]), self._var(col["white_balance"])
-        pl = int(col.get("power_line_frequency", 2))
-        self.v_pl = self._var(next((n for n, v in POWER_CHOICES if v == pl), "60 Hz"))
-        for lab, var in (("曝光", self.v_exp), ("增益", self.v_gain), ("白平衡 K", self.v_wb)):
-            ttk.Label(r, text=lab).pack(side="left")
-            ttk.Entry(r, textvariable=var, width=7).pack(side="left", padx=(2, 8))
-        ttk.Label(r, text="防闪烁").pack(side="left")
-        ttk.Combobox(r, textvariable=self.v_pl, values=[n for n, _ in POWER_CHOICES], width=7,
-                     state="readonly").pack(side="left", padx=(2, 8))
+        ttk.Label(r, text="手动：曝光(0.1 ms)").pack(side="left")
+        ttk.Entry(r, textvariable=self.v_exp, width=6).pack(side="left", padx=(2, 8))
+        ttk.Label(r, text="增益").pack(side="left")
+        ttk.Entry(r, textvariable=self.v_gain, width=5).pack(side="left", padx=(2, 8))
+        ttk.Label(r, text="白平衡 K").pack(side="left")
+        ttk.Entry(r, textvariable=self.v_wb, width=6).pack(side="left", padx=(2, 8))
+        ttk.Button(r, text="应用", command=self.on_apply).pack(side="left")
         r2 = ttk.Frame(p)
-        r2.pack(fill="x", pady=2)
-        ttk.Button(r2, text="自动调 3 秒后锁定", command=self.on_auto_lock).pack(side="left")
-        ttk.Button(r2, text="应用（手动值）", command=self.on_apply).pack(side="left", padx=4)
-        ttk.Button(r2, text="保存并锁定", command=self.on_save_profile).pack(side="left", padx=4)
-        ttk.Button(r2, text="读回当前值", command=self.on_read_back).pack(side="left", padx=4)
+        r2.pack(fill="x", pady=(6, 2))
+        self.v_pname = self._var(self.meta.get("name") or "")
+        ttk.Label(r2, text="参数组").pack(side="left")
+        self.cb_pname = ttk.Combobox(r2, textvariable=self.v_pname, values=list_named(), width=18,
+                                     postcommand=lambda: self.cb_pname.configure(values=list_named()))
+        self.cb_pname.pack(side="left", padx=2)
+        ttk.Button(r2, text="保存为这一组", command=self.on_save_profile).pack(side="left", padx=2)
+        ttk.Button(r2, text="套用这一组", command=self.on_load_named).pack(side="left", padx=2)
+        self.v_auto = self.tk.BooleanVar(value=True)
+        ttk.Checkbutton(r2, text="设为连接时自动套用", variable=self.v_auto).pack(side="left", padx=6)
         self.v_prof = self._var(self._prof_text())
         ttk.Label(p, textvariable=self.v_prof, justify="left", foreground="#335").pack(anchor="w", pady=(4, 0))
-        ttk.Label(p, text="先把灯光开成平时干活的样子 →「自动调 3 秒后锁定」→ 亮度合适就「保存并锁定」。\n"
-                          "锁定后 Camera 页每次连接相机都自动套用（深度预设仍按 Camera 页的选择）；之后的采图都在这组参数下。\n"
-                          "防闪烁选当地电网频率（中国大陆 50 Hz，北美 60 Hz）：选错时画面会有横向滚动条纹。",
+        ttk.Label(p, text="目标：工作区平均亮度 110–150、最亮 0.5 % 的像素 < 245（白色物体不过曝）、增益尽量低、"
+                          "曝光取灯光闪烁周期的整数倍（50 Hz 电网 = 10 ms）。\n"
+                          "先在画面上拖框圈出桌面工作区（避开窗户 / 屏幕）→「一键自动调参」（约 10 s）→ 合格后起个名字"
+                          "「保存为这一组」。\n参数组存在 cameracalib/d435i_profiles/；勾选「设为连接时自动套用」的那一组，"
+                          "Camera 页每次连接都会套用并检查光照有没有变。",
                   foreground="#555", justify="left").pack(anchor="w", pady=(4, 0))
 
     def _prof_text(self, rb=None):
         c = self.prof["color"]
-        s = (f"保存的参数：曝光 {c.get('exposure')} · 增益 {c.get('gain')} · 白平衡 {c.get('white_balance')} · 防闪烁 "
-             f"{B378.POWER_LINE.get(int(c.get('power_line_frequency', 0)), '?')} · "
-             f"{'已锁定' if self.prof.get('locked') else '未锁定'}"
-             + (f"（{self.prof.get('saved_at')}）" if self.prof.get("saved_at") else ""))
+        meta = read_profile_meta()
+        s = (f"连接时自动套用：{'「' + meta['name'] + '」' if meta.get('name') else '（未命名）'} · 曝光 "
+             f"{c.get('exposure')} · 增益 {c.get('gain')} · 白平衡 {c.get('white_balance')} · 防闪烁 "
+             f"{B378.POWER_LINE.get(int(c.get('power_line_frequency', 0)), '?')}"
+             if self.prof.get("locked") else "连接时自动套用：没有（还没保存过参数组）")
         if rb:
             cc = rb.get("color", {})
             s += (f"\n相机当前：曝光 {cc.get('exposure')} · 增益 {cc.get('gain')} · 白平衡 {cc.get('white_balance')} · "
@@ -742,12 +1116,36 @@ class CameraLab:
                   f"{B378.POWER_LINE.get(int(cc.get('power_line_frequency', -1)), '?')}")
         return s
 
+    # ---- work ROI (drag on the preview)
+    def _roi_press(self, ev):
+        self._roi_op = [ev.x, ev.y, ev.x, ev.y]
+
+    def _roi_drag(self, ev):
+        if getattr(self, "_roi_op", None):
+            self._roi_op[2:] = [ev.x, ev.y]
+
+    def _roi_release(self, ev):
+        op, self._roi_op = getattr(self, "_roi_op", None), None
+        if not op:
+            return
+        op[2:] = [ev.x, ev.y]
+        sc = getattr(self, "_prof_scale_wh", (self.PW, self.PH))
+        x0, x1 = sorted((op[0] / sc[0], op[2] / sc[0]))
+        y0, y1 = sorted((op[1] / sc[1], op[3] / sc[1]))
+        if x1 - x0 < 0.05 or y1 - y0 < 0.05:
+            return
+        self.st["roi"] = [round(min(max(v, 0.0), 1.0), 3) for v in (x0, y0, x1, y1)]
+        self.log(f"[INFO] [V3.80 camera lab] 工作区 = 画面 {self.st['roi']}（比例）")
+
+    def on_roi_default(self):
+        self.st["roi"] = list(DEFAULT_ROI)
+
     def _manual_colour(self):
         col = self.prof["color"]
         col["exposure"] = self._fget(self.v_exp, 1, 10000, "曝光")
         col["gain"] = self._fget(self.v_gain, 0, 128, "增益")
         col["white_balance"] = self._fget(self.v_wb, 2800, 6500, "白平衡")
-        col["power_line_frequency"] = dict(POWER_CHOICES).get(self.v_pl.get(), 2)
+        col["power_line_frequency"] = dict(POWER_CHOICES).get(self.v_pl.get(), 1)
         col.update(enable_auto_exposure=0, enable_auto_white_balance=0)
 
     def _apply_now(self, prof):
@@ -755,8 +1153,8 @@ class CameraLab:
         if src is None:
             return None
         p = json.loads(json.dumps(prof))
-        p["depth"].pop("visual_preset", None)
-        return src.run_on_device(lambda dev, rs: B378.apply_profile(dev, p, rs, log=self.log))
+        p.setdefault("depth", {}).pop("visual_preset", None)
+        return src.run_on_device(lambda dev, rs: B378.apply_profile(dev, p, rs, log=lambda m: None))
 
     def on_apply(self):
         try:
@@ -766,44 +1164,116 @@ class CameraLab:
             return
         self._run("应用相机参数", lambda: (self._apply_now(self.prof), self.tab._ui(self.on_read_back)))
 
-    def on_auto_lock(self):
-        if self._need_src() is None:
+    def _measure_roi(self, n=3, settle_s=0.35):
+        """work-area brightness after new settings: wait for them to take effect, average a few new frames"""
+        src = self._src()
+        time.sleep(settle_s)
+        sts, last, t0 = [], None, time.time()
+        while len(sts) < n and time.time() - t0 < 3.0:
+            rgb, _d, fid = src.frames()
+            if rgb is not None and fid != last:
+                sts.append(roi_stats(rgb, self.st.get("roi")))
+                last = fid
+            else:
+                time.sleep(0.02)
+        if not sts:
+            raise RuntimeError("没有新画面")
+        return {k: round(float(np.mean([s_[k] for s_ in sts])), 2) for k in sts[0]}
+
+    def on_autotune(self):
+        src = self._need_src()
+        if src is None:
             return
+        hz = 50 if self.v_pl.get().startswith("50") else 60
+        col = self.prof["color"]
 
         def job():
-            src = self._src()
-            col = self.prof["color"]
-            col["power_line_frequency"] = dict(POWER_CHOICES).get(self.v_pl.get(), 2)
+            col["power_line_frequency"] = 1 if hz == 50 else 2
             self._apply_now(dict(self.prof, color=dict(col, enable_auto_exposure=1, enable_auto_white_balance=1)))
-            time.sleep(3.0)
+            time.sleep(3.0)                                       # auto white balance settles
             cur = src.run_on_device(lambda dev, rs: B378.read_back(dev, rs)).get("color", {})
-            for k in ("exposure", "gain", "white_balance"):
-                if k in cur:
-                    col[k] = cur[k]
+            if "white_balance" in cur:
+                col["white_balance"] = cur["white_balance"]
             col.update(enable_auto_exposure=0, enable_auto_white_balance=0)
             self._apply_now(self.prof)
+
+            def set_eg(e, g):
+                col["exposure"], col["gain"] = float(e), float(g)
+                self._apply_now({"color": {"enable_auto_exposure": 0, "exposure": float(e), "gain": float(g)}})
+            res, _trace = autotune(set_eg, self._measure_roi, hz,
+                                   log=lambda m: self.tab._ui(lambda m_=m: self.log(m_)))
+            self.last_tune = res
 
             def ui():
                 self.v_exp.set(str(col["exposure"]))
                 self.v_gain.set(str(col["gain"]))
                 self.v_wb.set(str(col["white_balance"]))
+                st = res["stats"]
+                head = ("✓ 合格" + (f"（{res['note']}）" if res.get("note") else "")) if res["ok"] else \
+                    "✗ " + "；".join(res["issues"])
+                self.v_tune.set(f"一键调参结果：{head}\n曝光 {res['exposure_ms']} ms · 增益 {res['gain']:g} · 白平衡 "
+                                f"{col['white_balance']:g} K · 工作区平均 {st['mean']:.0f} · 最亮 {st['p995']:.0f} · 过曝 "
+                                f"{st['sat_pct']} %（{res['steps']} 步）"
+                                + ("\n合格：起个名字（例如「办公室白天」）→「保存为这一组」" if res["ok"] else
+                                   "\n不合格的原因见上；改善灯光后再点一次，或手动调整后「应用」"))
+                try:
+                    self.lb_tune.configure(foreground="#060" if res["ok"] else "#a00")
+                except Exception:
+                    pass
                 self.on_read_back()
-                self.log(f"[OK] [V3.79 camera lab] 自动调好并锁定：曝光 {col['exposure']} · 增益 {col['gain']} · "
-                         f"白平衡 {col['white_balance']}（满意就点「保存并锁定」）")
             self.tab._ui(ui)
-        self._run("自动调参", job)
+        self.log("[INFO] [V3.80 auto tune] 开始一键调参（约 10 s，画面别动）")
+        self._run("一键调参", job)
 
     def on_save_profile(self):
+        name = self.v_pname.get().strip()
+        if not name:
+            self.log("[WARN] [V3.80 camera lab] 先给这组参数起个名字（例如「办公室白天」）")
+            return
         try:
             self._manual_colour()
         except ValueError as exc:
             self.log(f"[WARN] [V3.79 camera lab] {exc}")
             return
+        src = self._src()
+        ref = None
+        if src is not None and src.frames()[0] is not None:
+            ref = dict(roi_stats(src.frames()[0], self.st.get("roi")), roi=list(self.st.get("roi") or DEFAULT_ROI))
         self.prof["locked"] = True
-        p = B378.save_profile(self.prof)
+        d = dict(json.loads(json.dumps(self.prof)), ref=ref, roi=list(self.st.get("roi") or DEFAULT_ROI))
+        p = save_named(name, d)
+        msg = f"[OK] [V3.80 camera lab] 参数组「{name}」已保存 → {p}"
+        if self.v_auto.get():
+            activate_named(name)
+            msg += "；设为 Camera 页连接时自动套用"
         self.prof = B378.load_profile()
         self.v_prof.set(self._prof_text())
-        self.log(f"[OK] [V3.79 camera lab] 相机参数已保存并锁定 → {p}（Camera 页下次连接自动套用）")
+        self.log(msg)
+        if src is not None:
+            self._run("应用相机参数", lambda: self._apply_now(self.prof))
+
+    def on_load_named(self):
+        name = self.v_pname.get().strip()
+        if name not in list_named():
+            self.log(f"[WARN] [V3.80 camera lab] 没有参数组「{name}」")
+            return
+        d = load_named(name)
+        for k in ("color", "depth", "filters"):
+            self.prof[k].update(d.get(k) or {})
+        if d.get("roi"):
+            self.st["roi"] = list(d["roi"])
+        col = self.prof["color"]
+        self.v_exp.set(str(col["exposure"]))
+        self.v_gain.set(str(col["gain"]))
+        self.v_wb.set(str(col["white_balance"]))
+        self.v_pl.set(next((n for n, v in POWER_CHOICES if v == int(col.get("power_line_frequency", 1))), "50 Hz"))
+        msg = f"[OK] [V3.80 camera lab] 套用参数组「{name}」"
+        if self.v_auto.get():
+            activate_named(name)
+            self.prof = B378.load_profile()
+            msg += "（并设为连接时自动套用）"
+        self.v_prof.set(self._prof_text())
+        self.log(msg)
         if self._src() is not None:
             self._run("应用相机参数", lambda: self._apply_now(self.prof))
 
@@ -833,11 +1303,14 @@ class CameraLab:
         ttk.Entry(r, textvariable=self.v_nframes, width=5).pack(side="left", padx=(2, 8))
         ttk.Button(r, text="▶ 开始测量（保持不动）", command=self.on_noise).pack(side="left")
         cols = ("setting", "valid", "std", "flat", "dist")
-        self.tv_noise = ttk.Treeview(p, columns=cols, show="headings", height=6)
+        self.tv_noise = ttk.Treeview(p, columns=cols, show="headings", height=6, style=self._tree_style())
         for c, t, w in zip(cols, ("深度处理", "有效像素 %", "抖动 mm", "平整度 mm", "距离 mm"), (220, 90, 90, 90, 90)):
             self.tv_noise.heading(c, text=t)
             self.tv_noise.column(c, width=w, anchor="w" if c == "setting" else "e")
         self.tv_noise.pack(fill="x", pady=3)
+        self.v_nverdict = self._var("")                 # V3.80: verdict after a measurement
+        self.lb_nverdict = ttk.Label(p, textvariable=self.v_nverdict, justify="left", wraplength=self.PW + 400)
+        self.lb_nverdict.pack(anchor="w", pady=(2, 4))
         ttk.Label(p, text="相机对准平整、不反光的桌面或卡纸，画面中央方框是测量区，测量时人和物都不要动。\n"
                           "「抖动」= 同一像素逐帧变化（越小越稳）；「平整度」= 平均深度离最佳平面的偏差（越小越平）。\n"
                           "Camera 页现在用的是「spatial+temporal」。",
@@ -856,13 +1329,21 @@ class CameraLab:
 
         def job():
             rows, roi = measure_noise(src, dict(src.K), n, log=lambda m: self.tab._ui(lambda m_=m: self.log(m_)))
-            stem = B378.write_results("noise", rows, {"roi": roi, "source": "camera lab"})
+            verdict = noise_verdict(rows)
+            stem = B378.write_results("noise", rows, {"roi": roi, "source": "camera lab", "verdict": verdict})
 
             def ui():
                 self.tv_noise.delete(*self.tv_noise.get_children())
                 for r_ in rows:
                     self.tv_noise.insert("", "end", values=(r_["setting"], r_["valid_pct"], r_["temporal_std_mm"],
                                                             r_["flatness_rms_mm"], r_["mean_dist_mm"]))
+                self.v_nverdict.set("\n".join(verdict["lines"]))
+                try:
+                    self.lb_nverdict.configure(foreground={"ok": "#060", "warn": "#a60", "fail": "#a00"}[verdict["level"]])
+                except Exception:
+                    pass
+                lv = {"ok": "OK", "warn": "WARN", "fail": "FAIL"}[verdict["level"]]
+                self.log(f"[{lv}] [V3.80 noise] {verdict['lines'][0]}")
                 self.log(f"[OK] [V3.79 noise] 结果已保存 → {stem}.csv")
             self.tab._ui(ui)
         self.log("[INFO] [V3.79 noise] 开始测量 5 种深度处理（约 30 s，保持不动）")
@@ -870,6 +1351,7 @@ class CameraLab:
 
     # ------------------------------------------------------------------ ③ locating accuracy
     def _build_accuracy(self):
+        # V3.80 CAMERA LAB UPGRADE: any object (egg / ball shape or general object)
         tk, ttk = self.tk, self.ttk
         p = ttk.Frame(self.nb, padding=6)
         self.nb.add(p, text="③ 定位精度")
@@ -877,29 +1359,40 @@ class CameraLab:
         self.cv_acc.pack(anchor="w")
         r = ttk.Frame(p)
         r.pack(fill="x", pady=3)
-        self.v_aprompt = self._var(self.st.get("acc_prompt", "egg"))
-        self.v_apose = self._var("竖放" if self.st.get("standing") else "横放")
+        self.v_aprompt = self._var(self.st.get("acc_prompt", ""))
+        self.v_ashape = self._var(dict(SHAPES).get(self.st.get("acc_shape"), SHAPES[0][1]))
+        self.v_aL, self.v_aW, self.v_aH = (self._var(self.st.get(k, "")) for k in ("acc_L", "acc_W", "acc_H"))
         self.v_atrials = self._var(self.st.get("trials", 10))
-        ttk.Label(r, text="物体").pack(side="left")
-        ttk.Entry(r, textvariable=self.v_aprompt, width=10).pack(side="left", padx=(2, 8))
-        ttk.Combobox(r, textvariable=self.v_apose, values=["横放", "竖放"], width=5, state="readonly").pack(side="left")
-        ttk.Label(r, text="次数").pack(side="left", padx=(8, 0))
-        ttk.Entry(r, textvariable=self.v_atrials, width=4).pack(side="left", padx=(2, 8))
-        ttk.Button(r, text="1 锁定标定板（先不放鸡蛋）", command=self.on_board).pack(side="left")
-        ttk.Button(r, text="2 ▶ 测量", command=self.on_accuracy).pack(side="left", padx=4)
+        ttk.Label(r, text="物体名").pack(side="left")
+        ttk.Entry(r, textvariable=self.v_aprompt, width=12).pack(side="left", padx=(2, 6))
+        ttk.Combobox(r, textvariable=self.v_ashape, values=[t for _k, t in SHAPES], width=20,
+                     state="readonly").pack(side="left")
+        for lab, var in (("长", self.v_aL), ("宽", self.v_aW), ("高 mm", self.v_aH)):
+            ttk.Label(r, text=lab).pack(side="left", padx=(6, 0))
+            ttk.Entry(r, textvariable=var, width=5).pack(side="left", padx=2)
+        ttk.Label(r, text="次数").pack(side="left", padx=(6, 0))
+        ttk.Entry(r, textvariable=self.v_atrials, width=4).pack(side="left", padx=2)
+        r2 = ttk.Frame(p)
+        r2.pack(fill="x", pady=2)
+        ttk.Button(r2, text="1 锁定标定板（先不放物体）", command=self.on_board).pack(side="left")
+        ttk.Button(r2, text="2 ▶ 测量", command=self.on_accuracy).pack(side="left", padx=4)
         self.v_board = self._var("标定板：未锁定")
         ttk.Label(p, textvariable=self.v_board).pack(anchor="w")
-        cols = ("setting", "det", "e3", "xy", "dz")
-        self.tv_acc = ttk.Treeview(p, columns=cols, show="headings", height=3)
-        for c, t, w in zip(cols, ("深度处理", "检出率 %", "3D 误差 均值/最大 mm", "水平 均值/最大 mm", "高度 均值/最大 mm"),
-                           (150, 80, 160, 150, 150)):
+        cols = ("setting", "det", "e3", "xy", "dz", "h")
+        self.tv_acc = ttk.Treeview(p, columns=cols, show="headings", height=3, style=self._tree_style())
+        for c, t, w in zip(cols, ("深度处理", "检出率 %", "3D 误差 均值/最大", "水平 均值/最大", "中心高度 均值/最大",
+                                  "高度测量 均值/最大"), (140, 70, 140, 130, 140, 140)):
             self.tv_acc.heading(c, text=t)
             self.tv_acc.column(c, width=w, anchor="w")
         self.tv_acc.pack(fill="x", pady=3)
-        ttk.Label(p, text="打印 7×5 ChArUco 板（32 mm 方格），去掉塑料袋，四边胶带贴平。\n"
-                          "① 不放鸡蛋点「锁定标定板」→ ② 鸡蛋放在画面上带编号的某个角点上 →「测量」。\n"
-                          "真值 = 角点正上方蛋宽一半（横放 21 mm / 竖放 27.5 mm）；误差里含手放的偏差（约 ±1–2 mm）。"
-                          "模型 / 置信度用 Camera 页「视觉定位」的设置。",
+        self.v_averdict = self._var("")
+        ttk.Label(p, textvariable=self.v_averdict, justify="left", wraplength=self.PW + 400).pack(anchor="w")
+        ttk.Label(p, text="打印 7×5 ChArUco 板（32 mm 方格），去掉塑料袋，四边胶带贴平。① 不放物体「锁定标定板」→ ② 物体中心"
+                          "放在画面上带编号的某个角点上 →「测量」（误差单位 mm）。\n"
+                          "真值 = 角点正上方、物体高度的一半（「高」填物体放好后的高度；横放的鸡蛋 = 蛋宽 42）。"
+                          "「蛋形 / 球形」用椭球拟合（填长、宽），「一般物体」用 Camera 页的通用定位，并比较它量出的高度。\n"
+                          "建议先用规则物体（方块、圆柱）测，容易放正；误差里含手放的偏差（约 ±1–2 mm）。模型 / 置信度用"
+                          " Camera 页「视觉定位」的设置。",
                   foreground="#555", justify="left").pack(anchor="w")
 
     def on_board(self):
@@ -951,25 +1444,37 @@ class CameraLab:
         if self.board_T is None:
             self.log("[WARN] [V3.79 accuracy] 先不放鸡蛋点「锁定标定板」")
             return
+        prompt = self.v_aprompt.get().strip()
+        shape = next((k for k, t in SHAPES if t == self.v_ashape.get()), "general")
         try:
+            if not prompt:
+                raise ValueError("先填物体名（YOLOE 文字提示，例如 cup、box、egg）")
             trials = int(self._fget(self.v_atrials, 1, 50, "次数"))
+            H = self._fget(self.v_aH, 5, 400, "高（物体放好后的高度 mm）")
+            LW = None
+            if shape == "egg":
+                LW = (self._fget(self.v_aL, 5, 400, "长"), self._fget(self.v_aW, 5, 400, "宽"))
+                if LW[1] > LW[0]:
+                    raise ValueError("宽不能大于长")
             YP, path, conf = self._yolo()
         except Exception as exc:
-            self.log(f"[WARN] [V3.79 accuracy] {exc}")
+            self.log(f"[WARN] [V3.80 accuracy] {exc}")
             return
-        prompt = self.v_aprompt.get().strip() or "egg"
-        standing = self.v_apose.get() == "竖放"
-        self.st.update(acc_prompt=prompt, standing=standing, trials=trials)
+        self.st.update(acc_prompt=prompt, acc_shape=shape, trials=trials, acc_H=self.v_aH.get(),
+                       acc_L=self.v_aL.get(), acc_W=self.v_aW.get())
         T, K = np.array(self.board_T), dict(src.K)
-        exp_z = B378.EGG_HALF_LENGTH_M if standing else B378.EGG_HALF_WIDTH_M
+        exp_z = H / 2000.0
+        loc = locate_fn(shape, LW)
 
         def job():
             rows, summ = accuracy_trials(lambda n: self.tab._grab_frames(n),
                                          lambda rgb: self.tab.det_yolo.detect(rgb, "text", path, prompts=[prompt],
                                                                               conf=conf),
-                                         K, T, B378.inner_corners(), exp_z, trials)
+                                         K, T, B378.inner_corners(), exp_z, trials, locate=loc,
+                                         height_mm=H if shape == "general" else None)
             summ["board"] = self.board_info
             summ["model"] = path
+            summ["object"] = {"name": prompt, "shape": shape, "height_mm": H, "size_lw_mm": LW}
             stem = B378.write_results("accuracy", rows, summ)
 
             def ui():
@@ -979,11 +1484,12 @@ class CameraLab:
                         continue
                     f = (lambda q: f"{q.get('mean', '-')} / {q.get('max', '-')}" if q.get("n") else "-")
                     self.tv_acc.insert("", "end", values=(name, s["detected_pct"], f(s["err_3d"]), f(s["xy"]),
-                                                          f(s["dz"])))
+                                                          f(s["dz"]), f(s.get("h") or {})))
                 corner = next((r_.get("corner") for r_ in rows if r_.get("corner") is not None), "?")
+                self.v_averdict.set(accuracy_verdict(summ))
                 self.log(f"[OK] [V3.79 accuracy] 角点 {corner}：结果已保存 → {stem}.csv")
             self.tab._ui(ui)
-        self.log(f"[INFO] [V3.79 accuracy] 开始测量（{prompt}，{'竖放' if standing else '横放'}，每种 {trials} 次）")
+        self.log(f"[INFO] [V3.80 accuracy] 开始测量（{prompt}，{dict(SHAPES)[shape]}，高 {H:g} mm，每种 {trials} 次）")
         self._run("定位精度", job)
 
     # ------------------------------------------------------------------ ④ capture + auto label + review
@@ -997,9 +1503,33 @@ class CameraLab:
         ttk.Label(top, text="数据文件夹").pack(side="left")
         ttk.Entry(top, textvariable=self.v_root, width=46).pack(side="left", padx=2)
         ttk.Button(top, text="选择…", command=self.on_pick_root).pack(side="left")
-        self.v_prompts = self._var(self.st.get("prompts", "egg"))
-        ttk.Label(top, text="物体名（逗号分隔，第 1 个 = 子文件夹）").pack(side="left", padx=(10, 2))
-        ttk.Entry(top, textvariable=self.v_prompts, width=22).pack(side="left")
+        # V3.80 CAMERA LAB UPGRADE: class list (no default class) + current class + counts
+        cl = ttk.Frame(p)
+        cl.pack(fill="x", pady=(4, 0))
+        self.lb_cls = tk.Listbox(cl, height=5, width=46, exportselection=False)
+        self.lb_cls.pack(side="left")
+        self.lb_cls.bind("<Double-Button-1>", lambda _e: self.on_toggle_class())
+        cr = ttk.Frame(cl)
+        cr.pack(side="left", fill="y", padx=6)
+        r_a = ttk.Frame(cr)
+        r_a.pack(anchor="w")
+        self.v_newcls = self._var("")
+        ttk.Combobox(r_a, textvariable=self.v_newcls, values=COMMON_CLASSES, width=16).pack(side="left")
+        ttk.Button(r_a, text="加入清单", command=self.on_add_class).pack(side="left", padx=2)
+        r_b = ttk.Frame(cr)
+        r_b.pack(anchor="w", pady=2)
+        ttk.Button(r_b, text="勾选 / 取消（双击）", command=self.on_toggle_class).pack(side="left")
+        ttk.Button(r_b, text="移出清单", command=self.on_remove_class).pack(side="left", padx=2)
+        r_c = ttk.Frame(cr)
+        r_c.pack(anchor="w", pady=2)
+        self.v_curcls = self._var(self.st.get("current", ""))
+        ttk.Label(r_c, text="当前采集类别（= 子文件夹）").pack(side="left")
+        self.cb_curcls = ttk.Combobox(r_c, textvariable=self.v_curcls, width=14, state="readonly",
+                                      postcommand=lambda: self.cb_curcls.configure(values=self._checked()))
+        self.cb_curcls.pack(side="left", padx=2)
+        ttk.Label(cr, text="勾选的类别都会自动标注（同一张图里的其他物体也要标，否则训练时会被当成背景）；\n"
+                           f"每类建议 ≥ {RECOMMENDED_IMAGES} 张，换位置 / 摆法 / 背景 / 光照。",
+                  foreground="#555", justify="left").pack(anchor="w")
         r2 = ttk.Frame(p)
         r2.pack(fill="x", pady=3)
         self.v_cconf = self._var(self.st.get("conf", 0.25))
@@ -1034,7 +1564,7 @@ class CameraLab:
         self.cb_folder.bind("<<ComboboxSelected>>", lambda _e: self._fill_list())
         ttk.Button(lr, text="刷新", command=self._fill_list).pack(side="left")
         cols = ("stem", "split", "n", "rev")
-        self.tv_items = ttk.Treeview(left, columns=cols, show="headings", height=9)
+        self.tv_items = ttk.Treeview(left, columns=cols, show="headings", height=9, style=self._tree_style())
         for c, t, w in zip(cols, ("图片", "集", "框", "已复核"), (250, 50, 40, 60)):
             self.tv_items.heading(c, text=t)
             self.tv_items.column(c, width=w, anchor="w")
@@ -1061,7 +1591,7 @@ class CameraLab:
         ttk.Button(rr, text="下一张 ▶", command=lambda: self._step(+1)).pack(side="left", padx=2)
         ttk.Button(rr, text="删除这张图", command=self.on_del_image).pack(side="left", padx=(10, 0))
         self.v_rev = self._var("在左边列表选一张图。点框 = 选中；拖框内 = 移动；拖白色角 = 改大小；在空白处拖 = 新框"
-                               "（类别 = 上面的框类别或物体名第 1 个）；Del = 删除。框改动后轮廓自动重算。")
+                               "（类别 = 上面的框类别或当前采集类别）；Del = 删除。框改动后轮廓自动重算。")
         ttk.Label(right, textvariable=self.v_rev, foreground="#555", wraplength=self.RW, justify="left").pack(anchor="w")
         self._update_cstat()
 
@@ -1085,19 +1615,93 @@ class CameraLab:
             self._update_cstat()
             self._save_st()
 
+    # ---- V3.80 class list
+    def _checked(self):
+        return [c for c in self.st.get("class_list", []) if c in self.st.get("checked", [])]
+
     def _prompts(self):
-        import NERO_V347_Yolo_Perception as YP
-        return [p for p in YP.parse_prompts(self.v_prompts.get()) if p.strip()]
+        return self._checked()
+
+    def _add_class(self, name):
+        name = str(name or "").strip()
+        if not name or "," in name:
+            return False
+        cl = self.st.setdefault("class_list", [])
+        if name not in cl:
+            cl.append(name)
+        ck = self.st.setdefault("checked", [])
+        if name not in ck:
+            ck.append(name)
+        if not self.st.get("current"):
+            self.st["current"] = name
+            self.v_curcls.set(name)
+        return True
+
+    def _toggle_class(self, name):
+        ck = self.st.setdefault("checked", [])
+        if name in ck:
+            ck.remove(name)
+            if self.st.get("current") == name:
+                self.st["current"] = (self._checked() or [""])[0]
+                self.v_curcls.set(self.st["current"])
+        elif name in self.st.get("class_list", []):
+            ck.append(name)
+
+    def _sel_class(self):
+        try:
+            sel = [int(i) for i in self.lb_cls.curselection()]
+        except Exception:
+            sel = []
+        cl = self.st.get("class_list", [])
+        return [cl[i] for i in sel if 0 <= i < len(cl)]
+
+    def on_add_class(self):
+        if self._add_class(self.v_newcls.get()):
+            self.v_newcls.set("")
+            self._update_cstat()
+            self._save_st()
+
+    def on_toggle_class(self):
+        for c in self._sel_class():
+            self._toggle_class(c)
+        self._update_cstat()
+
+    def on_remove_class(self):
+        for c in self._sel_class():
+            self.st["class_list"].remove(c)
+            if c in self.st.get("checked", []):
+                self.st["checked"].remove(c)
+            if self.st.get("current") == c:
+                self.st["current"] = (self._checked() or [""])[0]
+                self.v_curcls.set(self.st["current"])
+        self._update_cstat()
+
+    def _class_lines(self):
+        cc = self.ds.class_counts()
+        out = []
+        for c in self.st.get("class_list", []):
+            k = cc.get(c, {"images": 0, "objects": 0})
+            need = max(0, RECOMMENDED_IMAGES - k["images"])
+            out.append(f"{'☑' if c in self.st.get('checked', []) else '☐'} {c}   {k['images']} 张 · {k['objects']} 框"
+                       + (f" · 还差 {need} 张" if need else " · 够了 ✓"))
+        return out
 
     def _update_cstat(self):
+        try:
+            self.lb_cls.delete(0, "end")
+            for line in self._class_lines():
+                self.lb_cls.insert("end", line)
+        except Exception:
+            pass
         st = self.ds.stats()
         if not st:
-            self.v_cstat.set(f"{self.ds.root}：还没有图片")
+            self.v_cstat.set(f"{self.ds.root}：还没有图片" + ("" if self.st.get("class_list") else
+                                                          "；先在上面「加入清单」要采集的物体"))
             return
-        self.v_cstat.set("  ·  ".join(f"{k}: {v['images']} 张（训练 {v['train']} / 验证 {v['val']}，已复核 "
-                                      f"{v['reviewed']}，{v['objects']} 个框）" for k, v in st.items()))
+        self.v_cstat.set("文件夹：" + "  ·  ".join(f"{k}: {v['images']} 张（训练 {v['train']} / 验证 {v['val']}，已复核 "
+                                                f"{v['reviewed']}）" for k, v in st.items()))
 
-    def _capture_one(self, prompts, conf, depth_on, YP, path):
+    def _capture_one(self, prompts, conf, depth_on, YP, path, folder=None):
         src = self._src()
         if src is None:
             raise RuntimeError("相机未连接")
@@ -1106,22 +1710,28 @@ class CameraLab:
             raise RuntimeError("没有取到画面")
         dets = self.tab.det_yolo.detect(rgb, "text", path, prompts=prompts, conf=conf)
         anns = dets_to_anns(dets, prompts)
-        stem = self.ds.add_image(prompts[0], rgb, anns, depth=(depths[-1] if depth_on and depths else None),
-                                 extra={"prompts": prompts, "conf_min": conf, "model": os.path.basename(path),
+        folder = folder or prompts[0]
+        stem = self.ds.add_image(folder, rgb, anns, depth=(depths[-1] if depth_on and depths else None),
+                                 extra={"prompts": prompts, "current": folder, "conf_min": conf, "model": os.path.basename(path),
                                         "K": dict(src.K or {}), "profile_locked": bool(B378.load_profile().get("locked"))})
-        return safe_class(prompts[0]), stem, len(anns)
+        return safe_class(folder), stem, len(anns)
 
     def _capture_args(self):
         prompts = self._prompts()
         if not prompts:
-            raise ValueError("先填物体名（例如 egg 或 egg, cup）")
+            raise ValueError("先在类别清单里「加入清单」并勾选要采集的物体")
+        cur = self.v_curcls.get().strip()
+        if cur not in prompts:
+            cur = prompts[0]
+            self.v_curcls.set(cur)
+        self.st["current"] = cur
         conf = self._fget(self.v_cconf, 0.01, 0.99, "置信度")
         YP, path, _c = self._yolo()
         self._set_root(self.v_root.get())
-        self.st.update(prompts=", ".join(prompts), conf=conf, save_depth=bool(self.v_cdepth.get()))
+        self.st.update(conf=conf, save_depth=bool(self.v_cdepth.get()))
         if not B378.load_profile().get("locked"):
             self.log("[WARN] [V3.79 capture] 相机参数还没锁定（① 相机参数 →「保存并锁定」）：现在拍的图和以后的可能对不上")
-        return prompts, conf, bool(self.v_cdepth.get()), YP, path
+        return prompts, conf, bool(self.v_cdepth.get()), YP, path, cur
 
     def _after_shot(self, folder, stem, n):
         self._update_cstat()
@@ -1177,7 +1787,8 @@ class CameraLab:
         self.cb_folder.configure(values=self.ds.folders())
 
     def _refresh_cls(self):
-        self.cb_bcls.configure(values=list(dict.fromkeys(self.ds.classes() + self._prompts())))
+        self.cb_bcls.configure(values=list(dict.fromkeys(self._prompts() + self.st.get("class_list", []) +
+                                                         self.ds.classes())))
 
     def _fill_list(self, select=None):
         self._set_root(self.v_root.get())
@@ -1208,8 +1819,8 @@ class CameraLab:
             self.log(f"[WARN] [V3.79 review] 读不到图片 {stem}")
             return
         self.cur, self.cur_rgb, self.cur_meta = (folder, stem), rgb, meta
-        prompts = meta.get("prompts") or self._prompts() or [folder]
-        self.editor = BoxEditor(json.loads(json.dumps(meta.get("anns", []))), meta["size"], default_cls=prompts[0])
+        default = meta.get("current") or (meta.get("prompts") or self._prompts() or [folder])[0]
+        self.editor = BoxEditor(json.loads(json.dumps(meta.get("anns", []))), meta["size"], default_cls=default)
         self._dirty = False
         self._redraw()
 

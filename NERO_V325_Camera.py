@@ -1155,7 +1155,7 @@ class RealSenseSource:
             info["depth_res"] = f"{dw}×{dh}"
             try:                                   # V3.79 SAVED D435I PROFILE (camera lab, only when locked)
                 import NERO_V379_Camera_Lab as LAB379
-                info["profile"] = LAB379.apply_saved_profile(prof.get_device(), rs, self.log)
+                info["profile"] = LAB379.apply_saved_profile(prof.get_device(), rs, self.log, src=self)  # V3.80 light check
             except Exception as exc:
                 self.log(f"[WARN] [V3.79 camera lab] 相机参数没有套用：{exc}")
             scale = ds.get_depth_scale()

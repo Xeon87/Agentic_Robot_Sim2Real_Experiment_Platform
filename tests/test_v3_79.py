@@ -66,11 +66,11 @@ cv2 = YP._cv2()
 
 # ------------------------------------------------------------------ N1
 for m in (CON, RR, YP, W49, L):
-    assert m.VERSION == "V3.79", (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "V3.79"
+    assert m.VERSION in ("V3.79", "V3.80"), (m.__name__, m.VERSION)
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.79", "V3.80")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 for fn, h in (("NERO_V2_7_1_Unified_Backend.py", "5be2136f84ec4ccdfe6f8bc8d8998410ff9b3b827af4d571ea44373dc427527e"),
-              ("NERO_V325_Camera.py", "69aca871f32372e916eb9fd269d1bc42276f50fce1bd7828c07a8b2e62fe9639"),
+              ("NERO_V325_Camera.py", "013fc8c308092f863c7ccb1a37598c80536deed2cfbcef2b0daccc417da2806d"),
               ("NERO_V326_Wrist_Camera.py", "6b5c5d683073e4252b82c1c703ad664173960a179947f9e72775bb9683697d0a")):
     assert H((ROOT / fn).read_bytes()) == h, f"{fn} changed"
 s_cam = (ROOT / "NERO_V325_Camera.py").read_text(encoding="utf-8")
@@ -390,7 +390,9 @@ assert L.open_lab(tab) is lab
 texts = [c_.kwargs.get("text") for c_ in mttk.Notebook.return_value.add.call_args_list]
 assert texts == ["① 相机参数", "② 深度噪声", "③ 定位精度", "④ 采集标注"], texts
 lab.v_root.set(str(TMP / "shots"))
-lab.v_prompts.set("egg, cup")
+lab._add_class("egg")          # V3.80: the class list replaced the V3.79 prompt entry (intended)
+lab._add_class("cup")
+lab.v_curcls.set("egg")
 
 
 def wait_idle():
@@ -423,6 +425,7 @@ lab._step(+1, reviewed=True)
 m3 = ds2.load("egg", stem)[1]
 assert len(m3["anns"]) == 1 and m3["reviewed"] and ds2.classes() == ["egg", "cup"]
 lab.v_exp.set("190")
+lab.v_pname.set("office")       # V3.80: profiles are saved under a name (intended)
 lab.on_save_profile()
 assert B.load_profile()["locked"] and B.load_profile()["color"]["exposure"] == 190.0
 lab.close()
