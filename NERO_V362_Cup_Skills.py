@@ -1144,6 +1144,7 @@ class BackendIO:
         return [[float(pt.positions[i]) for i in idx] for pt in jt.points]
 
     def _exec(self, label, traj, slow, s0):
+        t0 = time.time()
         try:
             if slow and self.c.get("slow") is not None:
                 self.c["slow"](traj, factor=float(slow))
@@ -1151,10 +1152,46 @@ class BackendIO:
             return None
         except Exception as exc:
             m = str(exc)
-            return {"ok": False, "label": label, "error": m[:300], "tcp_error_mm": None,
-                    "safety": int(self.sh["safety_trip_count"].value) != s0 or any(
-                        k in m for k in ("PHYSICAL", "SAFETY", "RUNAWAY", "TRACKING")),
-                    "safety_trips": int(self.sh["safety_trip_count"].value) - s0}
+            out = {"ok": False, "label": label, "error": m[:300], "tcp_error_mm": None,
+                   "safety": int(self.sh["safety_trip_count"].value) != s0 or any(
+                       k in m for k in ("PHYSICAL", "SAFETY", "RUNAWAY", "TRACKING")),
+                   "safety_trips": int(self.sh["safety_trip_count"].value) - s0}
+            if out["safety"]:
+                out.update(self.v377_trip_info(t0))
+            return out
+
+    def v377_trip_info(self, t0):
+        """V3.77 TRIP REASON IN THE RESULT: the backend writes diag_trip_<n>_<reason>.csv (NERO_DIAG_DIR) at every
+        safety trip (runaway_j<k> = joint k faster than 6 rad/s or beyond its limit, penetration = a robot body in a
+        protected surface); the newest reason since t0 + the joint closest to its limit now go into the tool result
+        (user run V3.76: the log only said "STATE 2", the reason was in backend.log)"""
+        out = {}
+        d = os.environ.get("NERO_DIAG_DIR", "").strip()
+        try:
+            files = [(os.path.getmtime(os.path.join(d, f)), f) for f in os.listdir(d) if f.startswith("diag_trip_")]
+            files = sorted(x for x in files if x[0] >= t0 - 1.0)
+            if files:
+                reasons = [f[:-4].split("_", 3)[-1] for _t, f in files]
+                text = {"penetration": "a robot body pressed into a protected surface (table / bin / safe)"}
+                last = reasons[-1]
+                out["trip_reason"] = last
+                out["trip_reasons"] = reasons[-4:]
+                out["trip_meaning"] = text.get(last) or (
+                    f"joint {last.split('_j')[-1]} faster than 6 rad/s or beyond its limit (RUNAWAY)"
+                    if last.startswith("runaway") else last)
+        except Exception:
+            pass
+        try:
+            ms = joint_margins_deg(self.current_q())
+            k = min(range(7), key=lambda i: ms[i])
+            out["closest_joint_limit"] = {"joint": f"J{k + 1}", "margin_deg": round(ms[k], 1)}
+        except Exception:
+            pass
+        if out:
+            self.emit(f"[WARN] [V3.77 SAFETY] safety stop reason: {out.get('trip_reason', 'unknown')} "
+                      f"({out.get('trip_meaning', 'no diag file')}); closest joint limit now "
+                      f"{out.get('closest_joint_limit')}")
+        return out
 
     def move_line(self, label, xyz, quat, speed=0.05, slow=None):
         """Cartesian path from MoveIt; every point is checked (all joints >= PATH_MARGIN_DEG inside the MuJoCo limits,
@@ -1597,8 +1634,10 @@ class CupSkills:
 
     def _check(self, label, r):
         if r.get("safety") or r.get("safety_trips"):
-            raise self._Abort("SAFETY_STOP", {"during": label, "error": r.get("error"),
-                                              "safety_trips": r.get("safety_trips")})
+            raise self._Abort("SAFETY_STOP", dict({"during": label, "error": r.get("error"),
+                                                   "safety_trips": r.get("safety_trips")},
+                                                  **{k_: r[k_] for k_ in ("trip_reason", "trip_meaning",
+                                                                          "closest_joint_limit") if k_ in r}))
         if not r.get("ok"):
             raise self._Abort("MOTION_FAILED", {"during": label, "error": r.get("error"),
                                                 "tcp_error_mm": r.get("tcp_error_mm"),

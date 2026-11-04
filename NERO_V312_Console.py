@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V3.76"
+VERSION = "V3.77"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -885,6 +885,8 @@ def run_console(initial_tab="sim"):
         if pipe.active():
             log_append(sim_log, "[FAIL] 实机进程正在运行：仿真被互斥锁定（两者都会发布 /feedback/joint_states）")
             return
+        if not v377_clear_stale():
+            return
         tracker.start()
         refresh_sim_lamps()
         sim_log.configure(state="normal")
@@ -917,6 +919,47 @@ def run_console(initial_tab="sim"):
         btn_sim_start.configure(state="disabled")
         btn_sim_stop.configure(state="normal")
         update_mode()
+
+    def v377_clear_stale():
+        """V3.77 STALE PROCESS CHECK: leftovers of an earlier run (ROS / MoveIt / RViz / real driver / NERO scripts of
+        any release folder) are listed before the simulation starts; the operator decides; stopped INT -> TERM -> KILL
+        (the launcher's V3.07 check uses the same detector as a second line)"""
+        try:
+            import NERO_V377_Stale_Procs as SP
+            me = [os.getpid()]
+            try:
+                me += [int(p_) for p_ in (pipe.own_pids() or [])]
+            except Exception:
+                pass
+            hits = SP.stale_procs(me=me)
+        except Exception as exc:
+            log_append(sim_log, f"[WARN] [V3.77 STALE] 残余进程检查失败：{exc}（继续启动；启动脚本还会再查一次）")
+            return True
+        if not hits:
+            log_append(sim_log, "[OK] [V3.77 STALE] 启动前检查：没有残余的 ROS / MoveIt / RViz / NERO 进程")
+            return True
+        lines = "\n".join(f"  {pid}  {kind}" for pid, kind, _cmd in hits[:15]) + (
+            f"\n  …共 {len(hits)} 个" if len(hits) > 15 else "")
+        for pid, kind, cmd in hits:
+            log_append(sim_log, f"[WARN] [V3.77 STALE] 残余进程 {pid}: {cmd}")
+        if not messagebox.askyesno("启动前检查（V3.77）", f"发现上次运行留下的进程：\n{lines}\n\n关闭它们后再启动仿真？"
+                                   "\n（选“否”= 不启动；它们会和新仿真争用 ROS 话题）"):
+            log_append(sim_log, "[INFO] [V3.77 STALE] 没有关闭残余进程，仿真未启动")
+            return False
+        sim_status.set(f"正在关闭 {len(hits)} 个残余进程…")
+        done = {}
+        th = threading.Thread(target=lambda: done.update(SP.stop_procs([h[0] for h in hits], log=lambda m: done.setdefault("log", m))),
+                              daemon=True)
+        th.start()
+        t_end = time.time() + 15.0
+        while th.is_alive() and time.time() < t_end:
+            root.update()
+            time.sleep(0.05)
+        log_append(sim_log, done.get("log") or "[WARN] [V3.77 STALE] 关闭残余进程超时")
+        if "stopped" not in done or done.get("left"):
+            sim_status.set("残余进程没关掉 — 见日志")
+            return False
+        return True
 
     def on_sim_stop():
         if not runner.running():

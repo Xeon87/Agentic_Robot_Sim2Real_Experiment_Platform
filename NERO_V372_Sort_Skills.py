@@ -40,7 +40,7 @@ import NERO_V343_Scenes as SC                # noqa: E402
 import NERO_V362_Cup_Skills as CK            # noqa: E402
 import NERO_V375_Collision_Check as CC       # noqa: E402
 
-VERSION = "V3.76"
+VERSION = "V3.77"
 MARKER = "V3.72 SORT ITEMS AGENT"
 SCENE = "sort_items"
 ITEM_IDS = {f"item_{i + 1}": n for i, n in enumerate(SC.SORT_ITEM_NAMES)}
@@ -72,6 +72,10 @@ MIN_ITEM_GAP_M = 0.003       # V3.76 NO OVERLAP: a placed item keeps this from t
 MARKER_V375 = "V3.75 BIN FIT + COLLISION PRE-CHECK"
 # V3.76 CARRY SLOWER WITH AN ITEM: the V3.75 run diverged (joint 5 / 7 runaway) while rotating / carrying a held item
 HELD_SLOW = 3.0              # time stretch of the rotate / carry / lowering motions while an item is held (V3.75: 1.5-2)
+# V3.77 HELD MARGIN: every joint >= this from its limit in every motion with an item in the gripper (lift, rotate,
+# carry, lowering, release).  User run V3.76: J6 (range -42..+54 deg) was planned 5-10 deg from its limit while MuJoCo
+# tracked with up to 5.6 deg error; the backend trips at 2.9 deg (0.05 rad) beyond a limit.
+HELD_MARGIN_DEG = float(os.environ.get("NERO_V377_HELD_MARGIN_DEG", "10.0"))
 START_CLEAR_Z_M = 0.30       # V3.76 START CLEAR: below this TCP height the task first rises straight up, then goes home
 
 
@@ -101,6 +105,19 @@ def _turning_segment(tag, p0, R0, p1, R1, n=6):
         q = q0 if th < 1e-6 else (math.sin((1 - u) * th) * q0 + math.sin(u * th) * q1) / math.sin(th)
         out.append((f"~{tag}{i}", p0 + (p1 - p0) * u, CK.quat_xyzw_to_R(q / np.linalg.norm(q))))
     return out
+
+
+def _v377_rejects(v, rej):
+    """V3.75 collision rejects (MoveIt pairs / SO-101 boxes) and V3.77 joint-margin rejects into the tool result"""
+    col = [r_ for r_ in rej if "collision" in r_]
+    mar = sorted([r_ for r_ in rej if "joint_margin_deg" in r_], key=lambda r_: -float(r_["joint_margin_deg"]))
+    if col:
+        v["collision_rejects"] = col[:4]
+        v["collision_rejected_angles"] = len(col)
+    if mar:
+        v["margin_rejects"] = mar[:3]
+        v["note"] = (f"best plan only {mar[0]['joint_margin_deg']} deg from a joint limit while the item is held "
+                     f"(needs >= {HELD_MARGIN_DEG:.0f} deg)")
 
 
 def yaw_of_wxyz(q):
@@ -170,19 +187,27 @@ class SortBackendIO(CK.BackendIO):
         state: MoveIt contact pairs + the SO-101 coarse boxes vs table / bins.  Only if every MoveIt pair involves a
         link of MoveIt's gripper model (none an arm link 0-7) and the SO-101 is clear, that path is executed as one
         trajectory (NERO_V71 _make_incremental_joint_trajectory, 40 mm/s retime); otherwise the refusal stands (with
-        the colliding pairs in the log).  NERO_V375_SO101_OWN_PATH=0 switches this off."""
+        the colliding pairs in the log).  NERO_V375_SO101_OWN_PATH=0 switches this off.
+        V3.77 OWN PATH LIKE THE PLAN: the own path turns the wrist from the current to the target orientation along the
+        line (slerp) exactly like the plan (_turning_segment) and MoveIt's Cartesian path - V3.76 held the target
+        orientation from the first point, needed an IK branch change and fell back to a joint move with J6 at its
+        limit (user run V3.76, apple).  It is also used when MoveIt's path was refused by the joint-path check (not
+        only for gripper-model contacts), as long as MoveIt confirms that no arm link collides."""
         r = super().move_line(label, xyz, quat, speed=speed, slow=slow)
         if not r.get("refused") or not self.v375_own_path:
             return r
         R = CK.quat_xyzw_to_R(quat)
         try:
             q0 = self.current_q()
-            p0 = np.asarray(self.tcp_pose()[0], float)
+            p0_, q0_ = self.tcp_pose()
+            p0, R0 = np.asarray(p0_, float), CK.quat_xyzw_to_R(q0_)
         except Exception:
             return r
         dist = float(np.linalg.norm(np.asarray(xyz, float) - p0))
-        n = int(min(40, max(2, math.ceil(dist / 0.004))))
-        ch = CK.segment_points("s", p0, xyz, R, n) + [("~end", np.asarray(xyz, float), R)]
+        Rd = R @ R0.T
+        turn = math.degrees(math.acos(max(-1.0, min(1.0, (np.trace(Rd) - 1.0) / 2.0))))
+        n = int(min(60, max(2, math.ceil(dist / 0.004), math.ceil(turn / 2.0))))
+        ch = _turning_segment("s", p0, R0, np.asarray(xyz, float), R, n) + [("~end", np.asarray(xyz, float), R)]
         rr = CK.ik_chain(ch, q0)
         if not rr["ok"]:
             r["why"] = f"{r.get('why')}; own straight path: {rr['why']}"
@@ -205,9 +230,8 @@ class SortBackendIO(CK.BackendIO):
                 r["collision"] = a
                 return r
             model += [p_ for p_ in a["model_only"] if p_ not in model]
-        if not avail or not model:
-            # MoveIt not reachable, or it refused for another reason (no gripper-model contact): keep the refusal
-            # (the skill's V3.64 fallback follows)
+        if not avail:
+            # MoveIt not reachable: no confirmation that no arm link collides -> keep the refusal (V3.64 fallback)
             return r
         pts = [p0] + [np.asarray(c[1], float) for c in ch]
         try:
@@ -215,9 +239,11 @@ class SortBackendIO(CK.BackendIO):
         except Exception as exc:
             r["why"] = f"{r.get('why')}; own path trajectory: {str(exc)[:120]}"
             return r
-        self.emit(f"[WARN] [V3.75 MOVEIT] {label}: MoveIt refused ({r.get('why')}) - its only contacts are with its "
-                  f"official-gripper model ({CC.pairs_text(model)}); the mounted SO-101 is clear of table / bins -> the "
-                  f"skill's own straight path ({len(path) - 1} points, min margin {chk['min_margin_deg']} deg)")
+        self.emit(f"[WARN] [V3.75 MOVEIT] {label}: MoveIt refused ({r.get('why')}) - "
+                  + (f"its only contacts are with its official-gripper model ({CC.pairs_text(model)})" if model else
+                     "no arm link collides (V3.77: its own path failed the joint-path check)")
+                  + f"; the mounted SO-101 is clear of table / bins -> the skill's own straight path ({len(path) - 1} "
+                  f"points, wrist turn {turn:.0f} deg, min margin {chk['min_margin_deg']} deg)")
         s0 = int(self.sh["safety_trip_count"].value)
         f = max(1.0, 0.04 / max(float(speed), 1e-3))
         err = self._exec(label, traj, (f * float(slow)) if slow else (f if f > 1.0 else None), s0)
@@ -444,6 +470,12 @@ class SortSkills(CK.CupSkills):
             names = [c[0] for c in chain]
             q = dict(zip(names, r["q"]))
             i_g, i_l = names.index("grasp"), names.index("lift")
+            # V3.77 HELD MARGIN: the lift (grasp -> lift) carries the item
+            m_held = min(min(CK.joint_margins_deg(qq)) for qq in r["q"][i_g:i_l + 1])
+            if m_held < HELD_MARGIN_DEG:
+                self.v375_rejects.append({"phi_deg": round(_wrap(ph), 1),
+                                          "joint_margin_deg": round(m_held, 1), "need_deg": HELD_MARGIN_DEG})
+                continue
             # V3.75 COLLISION PRE-CHECK: pregrasp, the descent, the grasp (jaws open) and the lift (jaws closed)
             ok_o, why_o = self._v375_states_ok([r["q"][0], r["q"][2], r["q"][4], r["q"][i_g]], open_v)
             ok_c, why_c = (self._v375_states_ok([r["q"][i_l]], held_v) if ok_o else (False, None))
@@ -494,10 +526,7 @@ class SortSkills(CK.CupSkills):
             v["warning_place"] = ("no grasp found from which the item can be laid into "
                                   + (f"the {box} bin" if box in BOXES else "a bin") + " (lengthwise) - placing may fail")
         if plan is None:
-            rej = getattr(self, "v375_rejects", [])
-            if rej:                                   # V3.75: what collided (MoveIt pairs / SO-101 boxes)
-                v["collision_rejects"] = rej[:4]
-                v["collision_rejected_angles"] = len(rej)
+            _v377_rejects(v, getattr(self, "v375_rejects", []))
             return self._res(tool, False, v, reason="GRASP_UNREACHABLE", nxt=["observe_scene", "stop_and_report"])
         v.update(closing_yaw_deg=plan["phi_deg"], min_joint_margin_deg=plan["margin"], binding=plan["binding"],
                  jaw_clear_mm=plan["jaw_clear_mm"])
@@ -663,6 +692,10 @@ class SortSkills(CK.CupSkills):
                         r = CK.ik_chain(chain, q_now, start_first=False)
                     if not r["ok"] or r["min_margin_deg"] < CK.MIN_MARGIN_RELAXED_DEG:
                         continue
+                    if r["min_margin_deg"] < HELD_MARGIN_DEG:      # V3.77 HELD MARGIN (item in the gripper throughout)
+                        rejects.append({"phi_deg": ph, "joint_margin_deg": r["min_margin_deg"], "binding": r["binding"],
+                                        "need_deg": HELD_MARGIN_DEG})
+                        continue
                     names = [c[0] for c in chain]
                     # V3.75 COLLISION PRE-CHECK: above / lowering / release with the held item's box at the release
                     i_a, i_r = names.index("above"), names.index("release")
@@ -716,8 +749,7 @@ class SortSkills(CK.CupSkills):
         best, self.v375_rejects = self._plan_place(box, iid, it, q_now, tcp0, R_now, self.held_off, self.held_phi,
                                                    float(it["c"][2]))
         if best is None:
-            if self.v375_rejects:
-                v["collision_rejects"] = self.v375_rejects[:4]
+            _v377_rejects(v, self.v375_rejects)
             return self._res(tool, False, v, reason="PLACE_UNREACHABLE", nxt=["place_in_box", "stop_and_report"])
         v.update(min_joint_margin_deg=best["margin"], binding=best["binding"], closing_yaw_deg=best["phi"],
                  slot_xy_m=best["slot"], rotate_in_place=best["rotate_first"], item_yaw_deg=best["item_yaw_deg"])
