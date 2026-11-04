@@ -71,8 +71,8 @@ except Exception:
 
 # ------------------------------------------------------------------ G1
 for m in (CON, RR, YP, W49, S, CC):
-    assert m.VERSION == "V3.75", (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "V3.75" and SC.SCENES_REV == "V3.75"
+    assert m.VERSION in ("V3.75", "V3.76"), (m.__name__, m.VERSION)
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.75", "V3.76") and SC.SCENES_REV in ("V3.75", "V3.76")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 for fn, h in (("NERO_V2_7_1_Unified_Backend.py", "5be2136f84ec4ccdfe6f8bc8d8998410ff9b3b827af4d571ea44373dc427527e"),
               ("NERO_V2_7_1_Agent.py", "3e52d05ea84d94c8359d5875fa0fee8c2cc42d612b52e59109e1166912439696"),
@@ -129,24 +129,25 @@ assert CC.rect_dist(r1, ((0.02, 0.0), (0.05, 0.01), 0.5)) == 0.0
 print("[G3] banana 201 x 64 mm fits a bin only lengthwise (0/180 deg yes, 45/90 deg no); rectangle clearance ok")
 
 # ------------------------------------------------------------------ G4
-assert G.MOUNT["roll_deg"] == 0.0 and G.describe()["roll_deg"] == 0.0
+# V3.76 (intended change): the SO-101 opens up / down -> roll default +90 (V3.75: 0); migration rev V3.76
+assert G.MOUNT["roll_deg"] == 90.0 and G.describe()["roll_deg"] == 90.0
 gp = G.describe()["grasp_point_in_tcp_mm"]
-assert abs(gp[0]) < 0.2 and abs(gp[1] + 2.0) < 0.2 and abs(gp[2] + 18.8) < 0.2, gp
+assert abs(math.hypot(gp[0], gp[1]) - 2.0) < 0.2 and abs(gp[2] + 18.8) < 0.2, gp
 r = subprocess.run([sys.executable, "-c", "import NERO_V364_SO101_Gripper as G; print(G.MOUNT['roll_deg'])"],
                    cwd=str(ROOT), env=dict(os.environ, NERO_V364_SO101_ROLL_DEG="-45"), capture_output=True, text=True)
 assert r.stdout.strip() == "-45.0", r.stdout + r.stderr
 _T, _Tg, mnt = RT.real_mount({})
-assert mnt["roll_deg"] == 0.0 and mnt["ring_mm"] == 7.0
+assert mnt["roll_deg"] == 90.0 and mnt["ring_mm"] == 7.0
 old = {"clearance_mm": 8.0, "roll_deg": -45.0, "tip_corr_mm": [1.5, -2.0, 0.5], "ring_mm": 7.0, "seat_mm": 37.5}
 logs = []
 new, lines = RT.migrate_geometry_v375(old, log=logs.append)
-assert new["roll_deg"] == 0.0 and new["tip_corr_mm"] == [0.0, 0.0, 0.0] and new["mount_rev"] == "V3.75"
+assert new["roll_deg"] == 90.0 and new["tip_corr_mm"] == [0.0, 0.0, 0.0] and new["mount_rev"] == "V3.76"
 assert new["pre_v375"]["roll_deg"] == -45.0 and new["pre_v375"]["tip_corr_mm"] == [1.5, -2.0, 0.5] and len(lines) == 2
 assert logs and "转接环" in logs[0] and new["clearance_mm"] == 8.0
-assert RT.migrate_geometry_v375(new)[1] == [] and RT.migrate_geometry_v375({"roll_deg": -43.0})[0]["roll_deg"] == 2.0
+assert RT.migrate_geometry_v375(new)[1] == [] and RT.migrate_geometry_v375({"roll_deg": -43.0})[0]["roll_deg"] == 92.0
 assert RT.migrate_geometry_v375({})[0] == {}
-print("[G4] SO-101 roll 0 (env override still works); real mount 0 deg; old settings: -45 -> 0, fingertip "
-      "correction reset, kept in pre_v375; V3.75 settings untouched")
+print("[G4] SO-101 roll +90 (V3.76; env override still works); real mount +90 deg; old settings: -45 -> +90, "
+      "fingertip correction reset, kept in pre_v375; current settings untouched")
 
 # ------------------------------------------------------------------ G5
 if HAVE_MJ:

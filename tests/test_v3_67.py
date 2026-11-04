@@ -74,8 +74,8 @@ except Exception:
 
 # ------------------------------------------------------------------ Y1
 for m in (CON, RR, YP, W49, RT, GR, YC):
-    assert m.VERSION in ("V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72", "V3.73", "V3.74", "V3.75"), (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72", "V3.73", "V3.74", "V3.75")
+    assert m.VERSION in ("V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72", "V3.73", "V3.74", "V3.75", "V3.76"), (m.__name__, m.VERSION)
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72", "V3.73", "V3.74", "V3.75", "V3.76")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 for fn, h in (("NERO_V326_Wrist_Camera.py", "6b5c5d683073e4252b82c1c703ad664173960a179947f9e72775bb9683697d0a"),
               ("NERO_V2_7_1_Agent.py", "3e52d05ea84d94c8359d5875fa0fee8c2cc42d612b52e59109e1166912439696"),
@@ -100,10 +100,10 @@ print("[Y1] V3.67; frozen modules unchanged; simulation gripper profiles keep th
 # ------------------------------------------------------------------ Y2
 T_l7g, T_tg, mnt = RT.real_mount({})
 assert np.abs(T_l7g - G.T_l7_gripper()).max() < 1e-12 and np.abs(T_tg - G.T_tcp_grasp()).max() < 1e-12
-assert mnt == {"seat_mm": 37.5, "ring_mm": 7.0, "roll_deg": 0.0, "tip_corr_mm": [0.0, 0.0, 0.0]}   # V3.75 new ring (was -45)
+assert mnt == {"seat_mm": 37.5, "ring_mm": 7.0, "roll_deg": 90.0, "tip_corr_mm": [0.0, 0.0, 0.0]}   # V3.76 (V3.75: 0, before: -45)
 T2 = RT.real_mount({"roll_deg": -30.0})[0]
 dR = T2[:3, :3] @ T_l7g[:3, :3].T
-assert np.abs(dR - G._rx(-30.0)).max() < 1e-9                    # V3.75: relative to the new default 0 (was +15 from -45)
+assert np.abs(dR - G._rx(-120.0)).max() < 1e-9                   # V3.76: relative to the default +90 (V3.75: -30 from 0)
 T3 = RT.real_mount({"seat_mm": 40.0, "ring_mm": 9.0})[0]
 assert abs(T3[0, 3] - 0.049) < 1e-12
 off = np.array([0.002, -0.003, 0.004])
@@ -303,7 +303,7 @@ tab = RT.RealCupTaskTabUI(mtk, mttk, mock.MagicMock(), _Pipe(), types.SimpleName
                           log=logs7.append, visible_fn=lambda: False)
 gc = tab.geometry_cfg()
 assert gc["clearance_mm"] == 8.0 and gc["align_rotate_mm"] == 60.0 and gc["descent_stop_mm"] == 10.0
-assert gc["seat_mm"] == 37.5 and gc["ring_mm"] == 7.0 and gc["roll_deg"] == 0.0     # V3.75 new ring (was -45)
+assert gc["seat_mm"] == 37.5 and gc["ring_mm"] == 7.0 and gc["roll_deg"] == 90.0     # V3.76 (V3.75: 0, before: -45)
 assert "原地转腕" in tab.v_geo.get() and "固定指离杯壁 8 mm" in tab.v_geo.get()
 tab.v_clear.set("1")
 try:

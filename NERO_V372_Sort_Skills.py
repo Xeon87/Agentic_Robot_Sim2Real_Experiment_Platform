@@ -40,7 +40,7 @@ import NERO_V343_Scenes as SC                # noqa: E402
 import NERO_V362_Cup_Skills as CK            # noqa: E402
 import NERO_V375_Collision_Check as CC       # noqa: E402
 
-VERSION = "V3.75"
+VERSION = "V3.76"
 MARKER = "V3.72 SORT ITEMS AGENT"
 SCENE = "sort_items"
 ITEM_IDS = {f"item_{i + 1}": n for i, n in enumerate(SC.SORT_ITEM_NAMES)}
@@ -69,6 +69,9 @@ PREFERRED_MARGIN_DEG = 8.0
 FIT_MARGIN_M = 0.008         # an item placed in a bin keeps its footprint this far inside the inner walls
 ITEM_WALL_MARGIN_M = 0.004   # 3-D check: held item box vs bin walls at the release pose
 MARKER_V375 = "V3.75 BIN FIT + COLLISION PRE-CHECK"
+# V3.76 CARRY SLOWER WITH AN ITEM: the V3.75 run diverged (joint 5 / 7 runaway) while rotating / carrying a held item
+HELD_SLOW = 3.0              # time stretch of the rotate / carry / lowering motions while an item is held (V3.75: 1.5-2)
+START_CLEAR_Z_M = 0.30       # V3.76 START CLEAR: below this TCP height the task first rises straight up, then goes home
 
 
 def tf_name(body):
@@ -99,7 +102,8 @@ class SortTwinIO(CK.TwinIO):
 
     def __init__(self, log=None, seed=None, poses=None):
         world = SC.sort_world_xml(seed, bare=True, poses=poses)
-        super().__init__(log=log, gripper="so101", world_xml=world, hold_names=SC.SORT_ITEM_NAMES)
+        super().__init__(log=log, gripper="so101", world_xml=world, hold_names=SC.SORT_ITEM_NAMES,
+                         soft_pads=True)                    # V3.76 SOFT PADS, like the sorting scene
 
     def object_pose(self, body):
         b = self.d.body(body)
@@ -277,6 +281,57 @@ class SortSkills(CK.CupSkills):
         nxt = ["place_in_box"] if self.held else ["pick_object"]
         return self._res("observe_scene", True, {"items": len(sc["items"])}, nxt=nxt, scene=sc)
 
+    # -- V3.76 STATE AFTER A SAFETY STOP
+    def _v376_sync_held(self):
+        """the backend may let go of the item after a safety stop (V3.75 run: RESTORE KEEP HOLD, a second runaway,
+        then "HOLD CONTINUITY released"): the skill's "held" follows the gripper and the item, not its own record.
+        -> None (still held / nothing held) or {"item", "now_in_bin"} when the item is no longer in the gripper"""
+        if not self.held:
+            return None
+        st = self.io.gripper_state()
+        it = self._item(self.held)
+        tcp, _q = self.io.tcp_pose()
+        near = float(np.linalg.norm(it["c"] - np.asarray(tcp, float))) < 0.15
+        if near and (st.get("hold_active") or (st.get("contact_left") and st.get("contact_right"))):
+            return None
+        iid = self.held
+        self.held, self.held_off = None, None
+        self.stage = "PLACED" if it["in_bin"] else "OBSERVED"
+        self.io.emit(f"[WARN] [V3.76 SORT] {iid} ({it['spec']['label']}) is no longer in the gripper (let go by the safety "
+                     f"stop); it lies " + (f"in the {it['in_bin']} bin" if it["in_bin"] else "on the table / floor"))
+        return {"item": iid, "now_in_bin": it["in_bin"]}
+
+    def v376_clear_start(self):
+        """V3.76 START CLEAR: the V3.75 run's second task started low next to a bin and the backend's start check
+        refused its own straight retreat (MoveIt's official-gripper model).  Below START_CLEAR_Z_M: rise straight up
+        (the IO's checked straight path, V3.75 own path where only MoveIt's gripper model collides), then go home."""
+        tcp, q = self.io.tcp_pose()
+        if float(tcp[2]) >= START_CLEAR_Z_M:
+            return {"moved": False, "tcp_z_m": round(float(tcp[2]), 3)}
+        # as high as a straight vertical line with the current wrist orientation reaches (>= +50 mm), then home
+        z0 = float(tcp[2])
+        goals = [z for z in (START_CLEAR_Z_M, 0.25, z0 + 0.10, z0 + 0.05) if z > z0 + 0.045]
+        self.io.emit(f"[INFO] [V3.76 SORT] task start: TCP {z0 * 1000:.0f} mm high (< {START_CLEAR_Z_M * 1000:.0f} mm) -> "
+                     "straight up, then home")
+        last = None
+        for z in sorted(set(goals), reverse=True):
+            try:
+                self._go_line(f"start clear (straight up to {z * 1000:.0f} mm)", [tcp[0], tcp[1], z],
+                              CK.quat_xyzw_to_R(q), LIFT_SPEED, slow=HELD_SLOW if self.held else None)
+                break
+            except self._Abort as e:
+                last = e
+                if e.reason != "TARGET_UNREACHABLE":
+                    break
+        else:
+            last = last or self._Abort("TARGET_UNREACHABLE", {})
+        if last is not None and float(self.io.tcp_pose()[0][2]) < z0 + 0.04:
+            self.io.emit(f"[WARN] [V3.76 SORT] start clear failed: {last.reason} "
+                         f"{last.info.get('error') or last.info.get('detail') or ''}")
+            return {"moved": False, "error": last.reason}
+        r = self.io.go_home("V3.76 sort task start")
+        return {"moved": True, "home": bool(r.get("ok", True)), "rose_to_mm": round(float(self.io.tcp_pose()[0][2]) * 1000)}
+
     # -- V3.75 COLLISION PRE-CHECK
     def _v375_states_ok(self, states, opening_mm, extra=None):
         """every state: MoveIt pairs (backend) + SO-101 coarse boxes; MoveIt-gripper-model pairs are accepted only if
@@ -373,6 +428,7 @@ class SortSkills(CK.CupSkills):
         tool = "pick_object"
         if item_id not in ITEM_IDS:
             return self._res(tool, False, reason="UNKNOWN_ITEM", nxt=["observe_scene"])
+        self._v376_sync_held()
         if self.held:
             return self._res(tool, False, reason="ALREADY_HOLDING", nxt=["place_in_box"])
         it = self._item(item_id)
@@ -405,8 +461,14 @@ class SortSkills(CK.CupSkills):
             self.held = item_id                     # dip check of the carry fallback while lifting
             self._go_line(f"lift {item_id}", p, R, LIFT_SPEED, q_hint=plan["q"]["lift"], q_path=plan["q_up"])
         except self._Abort as e:
-            self.held = None
-            return self._abort_result(tool, e, v)
+            res = self._abort_result(tool, e, v)
+            if self.held and self._v376_sync_held() is None:
+                res["state_after"]["held_item"] = self.held       # V3.76: still in the gripper after the stop
+                res["recommended_next_actions"] = ["place_in_box", "observe_scene"]
+            else:
+                self.held = None
+                res["state_after"]["held_item"] = None
+            return res
         it2 = self._item(item_id)
         rise = float(it2["c"][2]) - z0
         st = self.io.gripper_state()
@@ -468,6 +530,7 @@ class SortSkills(CK.CupSkills):
         tool = "place_in_box"
         if box not in BOXES:
             return self._res(tool, False, reason="UNKNOWN_BOX", nxt=["observe_scene"])
+        self._v376_sync_held()
         if not self.held or self.held_off is None:
             return self._res(tool, False, reason="NO_ITEM_HELD", nxt=["observe_scene", "pick_object"])
         iid = self.held
@@ -544,17 +607,29 @@ class SortSkills(CK.CupSkills):
         v.update(min_joint_margin_deg=best["margin"], binding=best["binding"], closing_yaw_deg=best["phi"],
                  slot_xy_m=best["slot"], rotate_in_place=best["rotate_first"], item_yaw_deg=best["item_yaw_deg"])
         try:
+            # V3.76 CARRY SLOWER WITH AN ITEM: every motion with the item in the gripper is stretched HELD_SLOW x
             if np.linalg.norm(np.asarray(tcp0) - best["p_rot"]) > 0.003:
-                self._go_line(f"up with {iid}", best["p_rot"], CK.quat_xyzw_to_R(_q0), LIFT_SPEED)
+                self._go_line(f"up with {iid}", best["p_rot"], CK.quat_xyzw_to_R(_q0), LIFT_SPEED, slow=HELD_SLOW)
             if best["rotate_first"]:
-                self._go_joints(f"rotate {iid} for the {box} bin", best["q"]["rotate"], slow=2.0)
+                self._go_joints(f"rotate {iid} for the {box} bin", best["q"]["rotate"], slow=HELD_SLOW)
             self._go_line(f"carry {iid} over the {box} bin", best["p_above"], best["Rt"], CK.CARRY_SPEED,
-                          slow=1.5, free_fallback=True, q_hint=best["q"]["above"])
+                          slow=HELD_SLOW, free_fallback=True, q_hint=best["q"]["above"])
             self.io.sleep(0.5)
             self._go_line(f"lower {iid} into the {box} bin", best["p_rel"], best["Rt"], LOWER_SPEED,
-                          q_hint=best["q"]["release"], q_path=best["q_down"])
+                          slow=HELD_SLOW, q_hint=best["q"]["release"], q_path=best["q_down"])
         except self._Abort as e:
-            return self._abort_result(tool, e, v)
+            res = self._abort_result(tool, e, v)
+            d = self._v376_sync_held()                 # V3.76 STATE AFTER A SAFETY STOP
+            if d is None:
+                return res
+            v2 = dict(res["physical_verification"], dropped_by_safety_stop=True, now_in_bin=d["now_in_bin"])
+            v2.pop("reason", None)
+            if d["now_in_bin"] == box:
+                self.placed[iid] = box
+                return self._res(tool, True, v2, reason="ITEM_DROPPED_IN_BOX", nxt=["observe_scene", "check_bins"],
+                                 warnings=[f"{iid} fell into the {box} bin when the safety stop let go of it - it was not "
+                                           "lowered and released normally"])
+            return self._res(tool, False, v2, reason="ITEM_DROPPED", nxt=["observe_scene", "pick_object"])
         self.io.gripper_open(G.opening_mm_for_tip_gap(sp["width"] * 1000.0 + 18.0))
         self.io.sleep(0.8)
         self.held, self.held_off = None, None
@@ -582,6 +657,7 @@ class SortSkills(CK.CupSkills):
                          nxt=["finish_and_report"] if not on_table else ["pick_object"])
 
     def return_to_safe_pose(self, **_):
+        self._v376_sync_held()                         # V3.76: the gripper decides whether an item is held
         if self.held:
             return self._res("return_to_safe_pose", False, reason="ITEM_HELD_PLACE_FIRST", nxt=["place_in_box"])
         if self.io.latch_pending():
@@ -672,21 +748,28 @@ def _score(history, elapsed_s, rounds, skill, task):
     """V3.73 SCORE BY THE AGENT'S ITEMS: s = items the agent put into a bin AND still there (last check_bins) /
     items the agent decided to move (every item it called pick_object for).  V3.72 divided by all 4 items, so a task
     that sorts only the fruit could never reach 1.0."""
-    placed, tried = {}, []
+    placed, tried, requested = {}, [], {}
     for h in history:
         r = h["result"] if isinstance(h["result"], dict) else {}
         if h["tool"] == "pick_object":
             iid = (r.get("physical_verification") or {}).get("item") or (h.get("args") or {}).get("item_id")
             if iid in ITEM_IDS and iid not in tried:
                 tried.append(iid)
-        if h["tool"] == "place_in_box" and r.get("ok"):
+        if h["tool"] == "place_in_box":
             pv = r.get("physical_verification") or {}
-            placed[pv.get("item")] = pv.get("box")
+            if r.get("ok"):
+                placed[pv.get("item")] = pv.get("box")
+            elif pv.get("item") in ITEM_IDS and pv.get("box"):
+                requested[pv["item"]] = pv["box"]       # V3.76: a failed place still says where the agent wanted it
     last = None
     for h in history:
         if h["tool"] == "check_bins" and isinstance(h["result"], dict) and h["result"].get("ok"):
             last = (h["result"].get("physical_verification") or {}).get("items")
     good = sum(1 for k, b in placed.items() if last is None or (last.get(k) or {}).get("in_bin") == b)
+    # V3.76 SCORE BY THE FINAL POSITION: an item whose place failed but that lies in the bin the agent asked for at the
+    # last check_bins counts too (V3.75 run: the banana fell into the blue bin on a safety stop, s was 0)
+    if last is not None:
+        good += sum(1 for k, b in requested.items() if k not in placed and (last.get(k) or {}).get("in_bin") == b)
     total = len(tried)
     s = good / float(total) if total else 0.0
     t_min = max(0.0, float(elapsed_s)) / 60.0
@@ -828,6 +911,7 @@ def gui_run_task(ctx):
 
     def _run():
         if not bool(cfg.get("dry_run", False)):
+            skills.v376_clear_start()                  # V3.76 START CLEAR (low next to a bin -> straight up, home)
             ctx["start_check"](False)
         return run_sort_task(ctx["agent"], skills, cfg["task"], cfg["model"], cfg["api_key"], cfg["reasoning_effort"],
                              max(10, min(60, int(cfg["max_tool_steps"]))), emit=io.emit,

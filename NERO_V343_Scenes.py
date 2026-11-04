@@ -52,7 +52,7 @@ SCENES = {
                    "summary": "banana, apple, mouse, marker on the table; sort them into the open red / blue bins by the prompt",
                    "gripper": "so101"},
 }
-SCENES_REV = "V3.75"       # VERSION above stays "V3.44" (tests pin it); stack_cups V3.61, stack_cups_so101 V3.64, sort_items V3.72 (bins V3.75)
+SCENES_REV = "V3.76"       # VERSION above stays "V3.44" (tests pin it); stack_cups V3.61, stack_cups_so101 V3.64, sort_items V3.72 (bins V3.75)
 HERE = Path(__file__).resolve().parent
 
 # ----------------------------------------------------------------------------- geometry (store_in_safe)
@@ -670,6 +670,43 @@ def sort_bin_boxes():
     return out
 
 
+# V3.76 BIN WALLS OUT OF THE OLD BASKET-RIM RULE: the frozen backend (V2-44 R2 BASKET RIM, top of the file) cuts every
+# thin box (half thickness <= 20 mm, half length >= 45 mm) within +-0.14 m of the old egg basket (-0.425, -0.155) to
+# 14 mm - in the user's V3.75 run it cut the red bin's x- and y+ walls (50 -> 14 mm).  The MuJoCo walls are therefore
+# built from short segments (half length < 45 mm, same outline / height / thickness); MoveIt keeps the full walls
+# (sort_bin_boxes / planning_boxes).
+WALL_SEG_HALF_MAX = 0.040
+
+
+def sort_bin_geoms():
+    """(geom name, centre, half size, rgba) of the MuJoCo bin geoms: floors + wall segments (V3.76)"""
+    out = []
+    for n, c, h, rgba in sort_bin_boxes():
+        if n.endswith("_floor"):
+            out.append((n, c, h, rgba))
+            continue
+        ax = 0 if h[0] >= h[1] else 1                  # the wall's long axis
+        k = max(1, int(math.ceil(h[ax] / WALL_SEG_HALF_MAX)))
+        for i in range(k):
+            cc, hh = list(c), list(h)
+            hh[ax] = h[ax] / k
+            cc[ax] = c[ax] - h[ax] + hh[ax] * (2 * i + 1)
+            out.append((f"{n}_{i}", tuple(cc), tuple(hh), rgba))
+    return out
+
+
+def legacy_rim_hits(geoms):
+    """V3.76: the boxes the backend's V2-44 R2 BASKET RIM rule would cut (same criteria, for the tests / log)"""
+    hits = []
+    for n, c, h, _rgba in geoms:
+        thin = min(h[0], h[1]) <= 0.020 and max(h[0], h[1]) >= 0.045
+        near = abs(c[0] - (-0.425)) <= 0.14 and abs(c[1] - (-0.155)) <= 0.14
+        excluded = any(k in n.lower() for k in ("floor", "bottom", "base_plate"))
+        if thin and near and not excluded and 2.0 * h[2] > 0.0145:
+            hits.append(n)
+    return hits
+
+
 def _yaw_quat(deg):
     a = math.radians(deg) / 2.0
     return (math.cos(a), 0.0, 0.0, math.sin(a))
@@ -748,7 +785,7 @@ def sort_world_xml(seed=None, bare=False, poses=None):
     items = "\n    ".join(sort_item_body_xml(n, *poses[n]) for n in SORT_ITEM_NAMES)
     bins = "\n    ".join(f'<geom name="{n}" type="box" pos="{_f(*c)}" size="{_f(*h)}" rgba="{rgba}" '
                           'friction="1.0 0.02 0.002" solref="0.006 1" solimp="0.95 0.99 0.001" contype="1" conaffinity="1"/>'
-                          for n, c, h, rgba in sort_bin_boxes())
+                          for n, c, h, rgba in sort_bin_geoms())             # V3.76 wall segments
     legacy = "\n".join(
         f'    <body name="{n}" pos="{-8 - 0.1 * i:.1f} -8 -8"><freejoint/><geom name="{n}_geom" type="sphere" size="0.001" '
         f'mass="0.001" rgba="0 0 0 0" contype="0" conaffinity="0"/></body>' for i, n in enumerate(LEGACY_HIDDEN))
@@ -812,8 +849,10 @@ def make_sort_items_xml(original_xml_path, visual_quality=None):
     if visual_quality is not None:
         xml = visual_quality(xml)
     import NERO_V364_SO101_Gripper as _G364
-    xml = _G364.insert_into_model_xml(xml)
+    xml = _G364.insert_into_model_xml(xml, soft_pads=True)          # V3.76 SOFT PADS (sorting scene only)
     print(f"[V3.72 SCENE] sort_items: SO-101 gripper mounted on link7 {_G364.describe()}", flush=True)
+    print(f"[V3.76 SCENE] sort_items: soft SO-101 pads; bin walls as {len(sort_bin_geoms()) - 2} segments (outside the "
+          f"old basket-rim rule: {legacy_rim_hits(sort_bin_geoms()) or 'no wall cut'})", flush=True)
     eq = "\n        ".join(
         f'<connect name="hold_{o}" body1="link7" body2="{o}" anchor="0 0 0" active="false" '
         f'solref="0.008 1" solimp="0.98 0.995 0.001"/>' for o in hold_object_names())

@@ -1,7 +1,7 @@
-# NERO 项目开发与交接文档（V3.75 · Sim2Real 与自动寻优路线版）
+# NERO 项目开发与交接文档（V3.76 · Sim2Real 与自动寻优路线版）
 
 > 放在仓库根目录，命名为 `AGENTS.md`（Codex / 后续开发 Agent 会自动读取）。
-> 更新时间：2026-11-04。当前已交付最新版本：**V3.75**（仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`）。
+> 更新时间：2026-11-04。当前已交付最新版本：**V3.76**（仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`）。
 > 接手者请在做任何修改前通读本文件。本文件里“用户”指项目所有者 Jimmy。
 
 ## 0. 一句话现状
@@ -24,8 +24,9 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 - **V3.73（已交付）**：sort_items 首跑失败修复——后端 `object_pose(name)` 查 `sim_obj_{name}`，所以 `SortBackendIO` 必须传去掉 `obj_` 的名字（`tf_name`）；测试替身 `tests/v372_backend_twin.SortCore` 严格按后端规则查 TF；分类得分按 Agent 处理过的物体。**只在替身里验证过**。
 - **V3.74（已交付）**：实机杯子识别“几何只测量、不下结论”（`NERO_V366` 默认不按杯高分类，`classify_by_height=True` 才用 V3.66 分档）+ LLM 看图复核（新模块 `NERO_V374_Vision_Review.py`：带编号轮廓的主相机画面 → 所选模型，回答单杯 / 已叠好 / 不是杯子 / 在夹爪里；只在关键识别时刻；按布局缓存）+ “在夹爪里”需夹爪下到杯子高度 + 桌面偏差提示。**用户原则：不要加画蛇添足的判断准则；几何只量位置和尺寸，“是什么”交给看图的 LLM**。**看图复核未连真实 API；真机未验证**。
 - **V3.75（已交付）**：sort_items 框缩小外移（内 23 × 17 cm、壁高 5 cm、中心 y = ±0.28，离物体 ≥ 7 cm）+ 放入前按物体占地检查放不放得下（`sort_item_footprint`）；新模块 `NERO_V375_Collision_Check.py`：候选抓放姿态先做 MoveIt `/check_state_validity`（全部碰撞对）+ SO-101 粗略盒子检查，MoveIt 拒绝时日志 `[V3.75 MOVEIT]` 写碰撞对；**MoveIt 机器人模型仍是原装 AgileX 夹爪**（`effector_type:=agx_gripper`），只有它的夹爪连杆碰、SO-101 与 link0–7 都不碰时，`SortBackendIO` 执行技能自己逐点检查过的直线路径（`NERO_V375_SO101_OWN_PATH=0` 关闭）；替身加同一套碰撞检查，`tests/v375_moveit_twin.py` 模拟 MoveIt。**SO-101 新转接环：偏转默认 0°（原 −45°）**，实机旧设置（无 `mount_rev`）打开时迁移一次（偏转 +45°、指尖修正清零）。**只在替身和 MoveIt 模拟里验证过；仿真链路待复测，真机未验证**。
-- **已和用户确认的后续路线（V3.76 → V3.78，原 V3.75 → V3.77 再顺延一版）**：仿真页用“任务登记表”按场景固定提示词 / 快捷按钮 / 工具调试栏（A2 钩子事后调整，不动后端冻结部分）；**实机页做成真正通用**：通用识别（任务提取物体名 → YOLOE + 深度 → 物体 / 容器 / 颜色 / 尺寸 / 关系；**用户要求开启“把相机画面发给支持看图的 LLM”**辅助识别）+ 通用动作库（observe / pick / place_into / place_on / place_at / verify，仿真与实机共用，仿真 sort_items 改用它）+ 专用技能库（叠杯子等带技能卡，由 LLM 选择）+ 档位 ①②③ 在运动层统一实现（② 统一截断到悬停高度）。V3.76：通用识别 + 实机新外壳（只开 ①）+ 仿真登记表；V3.77：通用动作库 + 实机 ②；V3.78：实机 ③ + 检查 + LLM 选专用技能。叠杯子必须保持不退化（V3.65–V3.71 测试原样通过）。
-- **接下来的核心路线（V3.79 起，再顺延；先请用户在实机上按 ①→②→③ 复测叠杯子）**：遵循**“一套大脑、两套身体（仿真与实机除眼睛和手脚外 100% 通用）”**原则，将算法拆分为**“铁打的底层骨架 + 可拨动的控制旋钮（Control Knobs / Strategy Profile）”**，通过**带噪仿真自动寻优试验（DOE / 贝叶斯优化）**自动搜索各场景鲁棒最优参数包，并按 `纯视觉干跑 → 5 cm 悬停预演 → 实机柔顺抓放` 稳步完成真机迁移。
+- **V3.76（已交付）**：V3.75 仿真复测后的修复：夹着物体搬运时 MuJoCo 发散（关节 5 / 7 RUNAWAY）→ 分类场景 SO-101 指垫改软（`soft_pads`，solref 0.006；叠杯子不变）+ 持物运动慢 3 倍（`HELD_SLOW`）；后端冻结的 `V2-44 R2 BASKET RIM` 会把旧鸡蛋篮附近的薄盒子削到 14 mm → 框壁在 MuJoCo 里拆成半长 < 45 mm 的短段（`sort_bin_geoms`，MoveIt 仍用整墙，`legacy_rim_hits` 复刻规则供测试）；安全停后按夹爪 + 物体实际位置对齐（`_v376_sync_held`，`ITEM_DROPPED_IN_BOX` / `ITEM_DROPPED`），打分按最后位置；开始前低于 0.30 m 先竖直升高再回家（`v376_clear_start`）；**SO-101 偏转默认 +90°**（用户：上下开合、动指在上，从上往下看顺时针 90°），实机设置 `mount_rev` V3.76 迁移；`start_nero_sim.sh` 限时停止（`v376_stop` INT→TERM→KILL）+ 控制台倒计时。**发散只做了缓解、未拿到 diag CSV 确认；只在替身和 MoveIt 模拟里验证过，真机未验证**。
+- **已和用户确认的后续路线（V3.77 → V3.79，原 V3.76 → V3.78 再顺延一版）**：仿真页用“任务登记表”按场景固定提示词 / 快捷按钮 / 工具调试栏（A2 钩子事后调整，不动后端冻结部分）；**实机页做成真正通用**：通用识别（任务提取物体名 → YOLOE + 深度 → 物体 / 容器 / 颜色 / 尺寸 / 关系；**用户要求开启“把相机画面发给支持看图的 LLM”**辅助识别）+ 通用动作库（observe / pick / place_into / place_on / place_at / verify，仿真与实机共用，仿真 sort_items 改用它）+ 专用技能库（叠杯子等带技能卡，由 LLM 选择）+ 档位 ①②③ 在运动层统一实现（② 统一截断到悬停高度）。V3.77：通用识别 + 实机新外壳（只开 ①）+ 仿真登记表；V3.78：通用动作库 + 实机 ②；V3.79：实机 ③ + 检查 + LLM 选专用技能。叠杯子必须保持不退化（V3.65–V3.71 测试原样通过）。
+- **接下来的核心路线（V3.80 起，再顺延；先请用户在实机上按 ①→②→③ 复测叠杯子）**：遵循**“一套大脑、两套身体（仿真与实机除眼睛和手脚外 100% 通用）”**原则，将算法拆分为**“铁打的底层骨架 + 可拨动的控制旋钮（Control Knobs / Strategy Profile）”**，通过**带噪仿真自动寻优试验（DOE / 贝叶斯优化）**自动搜索各场景鲁棒最优参数包，并按 `纯视觉干跑 → 5 cm 悬停预演 → 实机柔顺抓放` 稳步完成真机迁移。
 
 ## 1. 用户的沟通规则（必须遵守，原话优先）
 
@@ -100,7 +101,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 7. **默认技能 EB = 原逻辑（V3.60）**：`BASELINE_KNOBS` 代入后必须与后端 / V3.58 原代码零偏差（`test_v3_60` F2 从后端源码 AST 抽取原函数比对）；改默认值等于改行为，要先和用户确认。
 8. **叠杯子（V3.62）/ 分类（V3.72）**：后端对叠杯子 / sort_items 只允许在 RUN TASK 的已有 A2 钩子段里分别调用 `NERO_V362_Cup_Skills.gui_run_task()` / `NERO_V372_Sort_Skills.gui_run_task()`（`test_v3_62` P1：去掉这段后与 V3.60 后端字节级一致；sort_items 分支必须留在这段内）；sort_items 物体原点 = 顶面中心（`SC.sort_item_centre` 换算中心）；杯子技能逻辑只写在 `NERO_V362_Cup_Skills.py`，`BackendIO` 与 `TwinIO` 共用同一套 `CupSkills`。场景杯子的原点是杯口中心（`SC.CUP_ORIGIN="rim"`），判断套叠用 `cup_task_state(..., origin="rim")`。
 9. **叠杯子运动安全（V3.63）**：持杯运动只朝规划时检查过余量的关节解执行；任何直线插补轨迹先经 `check_joint_path`（≥ 4°、≤ 5°/点）才执行；技能遇急停必须停下并经后端 `_v337_clear_latch` 解锁，不能在锁住时继续发运动。固定相机杯子感知只在 `NERO_V331_Fixed_Camera.py` 的 stack_cups 分支里，鸡蛋场景路径不变（`test_v3_31`）。
-10. **夹爪变体（V3.64 / V3.67–V3.69）**：`GripperProfile` 的实机选项（V3.67 `align_rotate_m`、`descent_stop_above_rim_m`、`wide_search_below_deg`；V3.68 `lenient_pick`、`plan_time_budget_s`、`remember_angles`；V3.69 `clear_view_before_verify`、`camera_decides_grip`；V3.71 `recheck_held_before_place`、`stack_by_cluster`、`perception_retries`、`recover_after_motion_failure`、`nested_dz_real_mm`）在 `OFFICIAL_PROFILE` / `so101_profile()` 中必须保持关闭（`test_v3_67` Y1）；新夹爪只能作为场景变体（`SCENES[...]['base']` + `'gripper'`）接入，`active_scene()` 返回基础场景；变体夹爪的 MJCF 必须保留后端用到的名字（`gripper_joint1` 开口 = 2000·q1、`gripper_joint2` = −q1、`gripper_link1/2`、`finger1/2_rubber_pad`、`gripper`/`gripper_force` 执行器、`gripper_coupling`）。原夹爪档案 `OFFICIAL_PROFILE` 的参数不能改（等于 V3.63 行为）。V3.75 起 SO-101 安装偏转默认 0°（新转接环，用户确认；V3.64–V3.74 为 −45°）。
+10. **夹爪变体（V3.64 / V3.67–V3.69）**：`GripperProfile` 的实机选项（V3.67 `align_rotate_m`、`descent_stop_above_rim_m`、`wide_search_below_deg`；V3.68 `lenient_pick`、`plan_time_budget_s`、`remember_angles`；V3.69 `clear_view_before_verify`、`camera_decides_grip`；V3.71 `recheck_held_before_place`、`stack_by_cluster`、`perception_retries`、`recover_after_motion_failure`、`nested_dz_real_mm`）在 `OFFICIAL_PROFILE` / `so101_profile()` 中必须保持关闭（`test_v3_67` Y1）；新夹爪只能作为场景变体（`SCENES[...]['base']` + `'gripper'`）接入，`active_scene()` 返回基础场景；变体夹爪的 MJCF 必须保留后端用到的名字（`gripper_joint1` 开口 = 2000·q1、`gripper_joint2` = −q1、`gripper_link1/2`、`finger1/2_rubber_pad`、`gripper`/`gripper_force` 执行器、`gripper_coupling`）。原夹爪档案 `OFFICIAL_PROFILE` 的参数不能改（等于 V3.63 行为）。V3.76 起 SO-101 安装偏转默认 +90°（用户：SO-101 上下开合、动指在上；V3.75 为 0°，V3.64–V3.74 为 −45°）。分类场景的框壁在 MuJoCo 里必须保持短段（半长 < 45 mm），否则后端冻结的 `V2-44 R2 BASKET RIM` 会把它削到 14 mm（`test_v3_76` I2）。
 11. **实机叠杯子（V3.65 / V3.66）**：实机杯子识别只能走 Camera调试页的 YOLOE 流水线（`NERO_V366`，复用 `det_yolo` / `_grab_frames` / `YP.fuse_depth` / `YP.locate_objects`），不另写识别方法、不退回颜色法；实机只能复用仿真的 `CupSkills` / 旋钮 / 夹爪档案（不在实机模块里另写一套技能逻辑）；实机运动只走 `RealPipeline.move_joint_path`（或 `move_and_settle`），必须经过关节限位 + 目标围栏 + 路径围栏检查；运行档位 ② ③ 必须先弹窗确认；`NERO_V365` 运行时只写 `NERO_CALIB_DIR/real_cup_task.json`。
 
 ## 5. 代码地图（截至 V3.60）
@@ -150,7 +151,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
    - **痛点 B（画面下沿黑色夹爪阴影与塑封膜反光拉偏角点）**：**V3.58 方案**：开启 `CORNER_REFINE_SUBPIX` + `tryRefineMarkers`，并通过**干净子集去畸变 + 平面 RANSAC 单应性检验（`_clean_outlier_corners`）**自动剥离每张图里偏离 `> 1.15 px` 的 1–3 个孤立反光/夹爪遮挡坏角点（保留其余干净角点），而对 `>= 4` 个坏角点的运动模糊帧则整张剔除。
    - **痛点 C（起点偏左导致采样集中在左侧 + 纸面微翘）**：**V3.58 方案**：`plan_intr_auto_targets` 读取起点标定板实际位置 `s0_board["center_frac"]` 作为最远点采样种子，将四向及对角倾视基线提升至 `18°–28°`；`calibrate_eye_in_hand` 将 2D 深度比例因子 `alpha_z` 拓宽至 `[0.12, 1.85]`（以 `axy=1.0` 起算），并在自动采集达标后**一键同步保存 `wrist_intrinsics.json` 与 `wrist_handeye_calib.json`**。
 
-## 7. 版本简史（V3.43 – V3.75）
+## 7. 版本简史（V3.43 – V3.76）
 
 | 版本 | 核心改动内容 |
 | :--- | :--- |
@@ -174,6 +175,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 | **V3.62** | 叠杯子 Agent 技能（填 API key + 输入任务即可在仿真里叠杯子）；后端 RUN TASK A2 块加 `stack_cups` 分支；杯子原点改杯口中心 + 卷边硬接触 + 与质量无关的杯子接触；第 ⑥ 组 11 旋钮 `[仿真技能✓]`；修正 V3.61 抓放翻转不一致；替身试验 16/16 |
 | **V3.63** | 修复叠杯子放置 J7 越限急停（联合规划 + 逐点轨迹检查 + 先转腕再平移 + 急停即停解锁重试 + 不做小修正）；固定主相机 D435i 杯子感知（相机进程分支）；替身带 URDF 运动学与相机渲染；试验 20/20（相机 4/4） |
 | **V3.64** | 新场景 `stack_cups_so101`（SO-101 夹爪 + 7 mm 转接环 + 偏转 45°，后端不变）；夹爪档案（抓取坐标系、固定指在外、沿杯壁下探、抬起 / 搬运后摆正等待、低位松手 + 松手后外移）；通用：全角度回退、搬运优先规划关节解、关节停稳等待；SO-101 替身试验 |
+| **V3.76** | 搬运防发散（软指垫 + 持物慢 3 倍）+ 框壁短段避开后端削壁 + 安全停后状态对齐 / 按最后位置打分 + 开始前退开；SO-101 偏转 +90°；停止仿真限时 + 倒计时 |
 | **V3.75** | sort_items 框缩小外移 + 放入前占地检查；MoveIt 碰撞预检 + 碰撞对日志 + 只有 MoveIt 原装夹爪模型碰撞时走自己检查过的直线路径；替身碰撞检查；SO-101 新转接环偏转 0°（实机旧设置迁移） |
 | **V3.74** | 实机杯子识别：几何只测量 + LLM 看图复核（`NERO_V374_Vision_Review.py`）+ 夹爪须下到杯子高度才算夹起 + 桌面偏差提示 |
 | **V3.73** | sort_items TF 帧名修复（`sim_obj_banana`）+ 测试替身严格按后端 TF 规则 + 分类得分按 Agent 处理的物体 |

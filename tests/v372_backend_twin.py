@@ -34,7 +34,7 @@ class SyncedSortTwin(HB.SyncedTwin):
     def __init__(self, shared, log=None, seed=None):
         self.sh = shared
         S.CK.TwinIO.__init__(self, log=log, gripper="so101", world_xml=SC.sort_world_xml(seed, bare=True),
-                             hold_names=SC.SORT_ITEM_NAMES)
+                             hold_names=SC.SORT_ITEM_NAMES, soft_pads=True)   # V3.76 SOFT PADS
 
     def object_pose(self, body):
         b = self.d.body(body)

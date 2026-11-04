@@ -18,6 +18,14 @@ Geometry: SO-101 MJCF / meshes from TheRobotStudio/SO-ARM100 (Simulation/SO101, 
   * V3.75 NEW ADAPTER RING (user): the ring was redesigned - no 45 deg offset any more; the gripper sits like on the
     SO-101 arm (moving jaw on top, opening upwards) = the nominal roll -> MOUNT roll_deg default 0 (was -45).  The ring
     thickness was not re-measured: still 7 mm (NERO_V364_SO101_RING_MM / the real tab's field).
+  * V3.76 SO-101 STANDARD ORIENTATION (user correction of V3.75): the SO-101 jaws open up / down (moving jaw on top,
+    fixed jaw below); mounted on NERO that is - looking from above along the vertical axis - 90 deg clockwise from the
+    V3.75 model.  With the tool pointing down, "from above" looks along link7 +x, so clockwise = +90 deg right-hand about
+    +x7 -> MOUNT roll_deg default +90 (V3.75: 0, V3.64-V3.74: -45).
+  * V3.76 SOFT PADS (sort_items only, soft_pads=True): the user's V3.75 run diverged (joint 5 / 7 at 6 -> 1168 rad/s)
+    while an item was carried by the backend's CONNECT hold AND clamped by the stiff pads (solref 0.003); the sorting
+    scene / twin use softer pad contacts (solref 0.006, solimp 0.95 0.99 0.001 - the items' own values).  The cup
+    scene keeps the V3.64 pads.
 
 Backend compatibility without touching the backend (its run_sim keeps the V3.42 bytes): the backend only adds the
 official gripper if the model has no joint "gripper_joint1" (add_official_gripper_to_xml) and it drives / reads
@@ -38,6 +46,9 @@ import os
 VERSION = "V3.64"
 MARKER = "V3.64 SO-101 GRIPPER ON NERO"
 MARKER_V375 = "V3.75 NEW ADAPTER RING"
+MARKER_V376 = "V3.76 SO-101 STANDARD ORIENTATION"
+PAD_STIFF = ('solref="0.003 1" solimp="0.97 0.997 0.0003"')
+PAD_SOFT = ('solref="0.006 1" solimp="0.95 0.99 0.001"')         # V3.76 SOFT PADS
 HERE = os.path.dirname(os.path.realpath(__file__))
 ASSET_DIR = os.path.join(HERE, "assets", "so101")
 SCENE = "stack_cups_so101"
@@ -56,8 +67,8 @@ MOUNT = {
     "seat_x_m": _env_f("NERO_V364_SO101_SEAT_X_MM", 37.5) / 1000.0,   # NERO gripper seat face along link7 x
     "axis_z_m": -0.0235,                                             # official tool axis (link7 z)
     "ring_m": _env_f("NERO_V364_SO101_RING_MM", 7.0) / 1000.0,         # adapter ring thickness
-    # V3.75 NEW ADAPTER RING: 0 = no offset (V3.64-V3.74: -45, the old ring); right-hand about link7 +x
-    "roll_deg": _env_f("NERO_V364_SO101_ROLL_DEG", 0.0),
+    # V3.76 SO-101 STANDARD ORIENTATION: +90 (V3.75: 0; V3.64-V3.74: -45, the old ring); right-hand about link7 +x
+    "roll_deg": _env_f("NERO_V364_SO101_ROLL_DEG", 90.0),
 }
 JAW = {"theta_min": math.radians(-10.0), "theta_max": math.radians(100.0), "q1_max": 0.05}
 HINGE_POS = (0.0202, 0.0188, -0.0234)
@@ -172,7 +183,7 @@ def _f(*v):
     return " ".join(f"{float(x):.6g}" for x in v)
 
 
-def gripper_parts(asset_dir=None, angle_unit="radian"):
+def gripper_parts(asset_dir=None, angle_unit="radian", soft_pads=False):
     """MJCF snippets for link7's children + asset / equality / actuator / contact sections (scene module + twin).
     angle_unit = the model's <compiler angle> (MJCF default: degree) - the hinge range is written in it; the coupling
     polycoef is joint data (radian per metre) and is not converted by MuJoCo."""
@@ -186,7 +197,7 @@ def gripper_parts(asset_dir=None, angle_unit="radian"):
     # carry stayed tipped (8.7 deg) on the CONNECT hold; the line contact lets it hang upright again (twin).
     pad2_c = Rj.T @ (np.array([-PAD_FIXED_CENTRE[0], 0.0, PAD_FIXED_CENTRE[2]]) - np.asarray(HINGE_POS))
     fin2_c = Rj.T @ (np.array([0.0170, 0.0, -0.0720]) - np.asarray(HINGE_POS))
-    pad = ('density="0" friction="10 0.3 0.05" condim="6" solref="0.003 1" solimp="0.97 0.997 0.0003" '
+    pad = ('density="0" friction="10 0.3 0.05" condim="6" ' + (PAD_SOFT if soft_pads else PAD_STIFF) + ' '
            'margin="0.00025" rgba="0.15 0.15 0.15 1"')
     asset = (f'<mesh name="so101_follower" file="{a}/wrist_roll_follower_so101_v1.stl"/>'
              f'<mesh name="so101_servo" file="{a}/sts3215_03a_v1.stl"/>'
@@ -247,10 +258,10 @@ def angle_unit_of(xml):
     return "radian" if (m and m.group(1).lower().startswith("rad")) else "degree"
 
 
-def insert_into_model_xml(xml):
+def insert_into_model_xml(xml, soft_pads=False):
     """put the SO-101 gripper into a full NERO model XML string (link7 body, asset / equality / actuator / contact)"""
     import re
-    p = gripper_parts(angle_unit=angle_unit_of(xml))
+    p = gripper_parts(angle_unit=angle_unit_of(xml), soft_pads=soft_pads)
     m = re.search(r"<body\b[^>]*name=[\"']link7[\"'][^>]*>", xml)
     if not m:
         raise RuntimeError("link7 body not found - cannot mount the SO-101 gripper")

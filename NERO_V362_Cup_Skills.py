@@ -642,12 +642,12 @@ def _finger_xml(name, quat, axis, rng, pad):
             + "".join(studs) + "</body>")
 
 
-def twin_xml(cup_xy=None, gripper="official", world_xml=None, hold_names=None):
+def twin_xml(cup_xy=None, gripper="official", world_xml=None, hold_names=None, soft_pads=False):
     """V3.72 TWIN WORLD: world_xml / hold_names replace the two cups (sort_items twin); defaults = the cup twin"""
     xy = dict(SC.CUP_XY if cup_xy is None else cup_xy)
     if gripper == "so101":                   # V3.64: the same SO-101 gripper parts the scene module mounts
         import NERO_V364_SO101_Gripper as G
-        gp = G.gripper_parts(angle_unit="degree")             # the twin XML has no <compiler angle> (MJCF default)
+        gp = G.gripper_parts(angle_unit="degree", soft_pads=soft_pads)   # the twin XML has no <compiler angle>; V3.76 SOFT PADS
         g_asset, g_link7, g_eq, g_act, g_contact = gp["asset"], gp["link7"], gp["equality"], gp["actuator"], gp["contact"]
     else:
         g_asset = ""
@@ -702,13 +702,13 @@ class TwinIO:
     name = "twin"
 
     def __init__(self, log=None, cup_xy=None, start_tcp=None, pose_mode="truth", gripper="official", world_xml=None,
-                 hold_names=None):
+                 hold_names=None, soft_pads=False):
         import mujoco
         self._pose_mode = pose_mode
         self._gripper = gripper
         self.mj = mujoco
         self.hold_names = list(hold_names or SC.CUP_NAMES)          # V3.72 TWIN WORLD
-        self.m = mujoco.MjModel.from_xml_string(twin_xml(cup_xy, gripper, world_xml, hold_names))
+        self.m = mujoco.MjModel.from_xml_string(twin_xml(cup_xy, gripper, world_xml, hold_names, soft_pads))
         self.d = mujoco.MjData(self.m)
         self.log = log or (lambda s: None)
         self.mid = self.m.body("link7").mocapid[0]

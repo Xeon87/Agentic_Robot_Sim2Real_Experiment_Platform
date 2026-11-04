@@ -74,8 +74,8 @@ except Exception:
 
 # ------------------------------------------------------------------ U1
 for m in (CON, RR, YP, W49, ST, CK, G):
-    assert m.VERSION in ("V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72", "V3.73", "V3.74", "V3.75"), (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72", "V3.73", "V3.74", "V3.75") and SC.SCENES_REV in ("V3.64", "V3.72", "V3.73", "V3.74", "V3.75")
+    assert m.VERSION in ("V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72", "V3.73", "V3.74", "V3.75", "V3.76"), (m.__name__, m.VERSION)
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72", "V3.73", "V3.74", "V3.75", "V3.76") and SC.SCENES_REV in ("V3.64", "V3.72", "V3.73", "V3.74", "V3.75", "V3.76")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 assert H((ROOT / "NERO_V326_Wrist_Camera.py").read_bytes()) == "6b5c5d683073e4252b82c1c703ad664173960a179947f9e72775bb9683697d0a"
 assert H((ROOT / "NERO_V2_7_1_Agent.py").read_bytes()) == "3e52d05ea84d94c8359d5875fa0fee8c2cc42d612b52e59109e1166912439696"
@@ -110,7 +110,7 @@ x_off = np.array([0.0, 0.0, -1.0])                               # official clos
 x_g = T[:3, 0]
 ang = math.degrees(math.atan2(np.dot(np.cross(x_off, x_g), [1, 0, 0]), np.dot(x_off, x_g)))
 # V3.75 NEW ADAPTER RING (intended change): roll default 0 (V3.64-V3.74: -45 deg right-hand about +x7)
-assert abs(ang - G.MOUNT["roll_deg"]) < 1e-6 and G.MOUNT["roll_deg"] in (-45.0, 0.0), ang
+assert abs(ang - G.MOUNT["roll_deg"]) < 1e-6 and G.MOUNT["roll_deg"] in (-45.0, 0.0, 90.0), ang
 th2 = G.jaw_angle_deg(G.opening_mm_for_tip_gap(2.0))
 assert -10.0 < th2 < -3.0 and abs(G.tip_gap_mm(th2) - 2.0) < 0.05 and G.tip_gap_mm(-10.0) < 2.0
 th32 = G.jaw_angle_deg(G.opening_mm_for_tip_gap(32.0))
@@ -249,7 +249,7 @@ if HAVE_MJ:
     import v362_backend_twin as HB  # noqa: E402
     r7 = HB.run_backend_episode(gripper="so101")
     assert r7["state"]["nested_full"] and r7["scores"][0]["s"] == 1.0, r7["log"][-8:]
-    assert any("gripper: SO-101 gripper on a 7 mm ring, roll +0 deg" in l for l in r7["log"])     # V3.75 new ring
+    assert any("gripper: SO-101 gripper on a 7 mm ring, roll +90 deg" in l for l in r7["log"])     # V3.76 SO-101 standard orientation
     assert os.environ.get("NERO_SCENE") is None
     gl_ok = False
     try:

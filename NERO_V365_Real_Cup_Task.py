@@ -28,7 +28,7 @@ import time
 
 import numpy as np
 
-VERSION = "V3.74"
+VERSION = "V3.76"
 MARKER = "V3.65 NERO REAL CUP TASK"
 CALIB_DIR = os.environ.get("NERO_CALIB_DIR") or os.path.expanduser("~/Downloads/cameracalib")
 SETTINGS_NAME = "real_cup_task.json"
@@ -95,31 +95,37 @@ def load_settings(path=None):
         return {}
 
 
-MOUNT_REV = "V3.75"
+MOUNT_REV = "V3.76"
+# roll change of each mount revision (settings saved without "mount_rev" = before V3.75, the old ring at -45 deg)
+_ROLL_STEP = {None: 135.0, "V3.75": 90.0}
 
 
 def migrate_geometry_v375(geo, log=None):
-    """V3.75 NEW ADAPTER RING: settings saved before V3.75 (no "mount_rev") describe the OLD ring with its 45 deg
-    offset.  The new ring has none -> roll = old roll + 45 deg (old default -45 -> 0); the fingertip correction was
-    measured on the old ring -> reset to 0 (old value kept under "pre_v375"); seat / ring thickness are kept (the
-    ring thickness should be re-measured).  -> (new geometry dict, list of change lines)"""
+    """V3.75 NEW ADAPTER RING + V3.76 SO-101 STANDARD ORIENTATION: the saved roll belongs to the mount model of the
+    version that saved it.  Before V3.75 (no "mount_rev"): old ring, -45 deg -> +90 = +135; V3.75 (model 0 deg, which
+    the user corrected: the SO-101 opens up / down, 90 deg clockwise seen from above) -> +90.  The fingertip correction
+    was measured on another mount model -> reset to 0 (old value kept under "pre_<rev>"); seat / ring thickness kept.
+    -> (new geometry dict, list of change lines)"""
     g = dict(geo or {})
-    if not g or g.get("mount_rev") == MOUNT_REV:
+    rev = g.get("mount_rev")
+    if not g or rev == MOUNT_REV:
         return g, []
+    step = _ROLL_STEP.get(rev, 0.0)
     lines = []
-    old = {k: g.get(k) for k in ("roll_deg", "tip_corr_mm", "ring_mm", "seat_mm")}
-    if g.get("roll_deg") is not None:
-        r = float(g["roll_deg"]) + 45.0
+    old = {k: g.get(k) for k in ("roll_deg", "tip_corr_mm", "ring_mm", "seat_mm", "mount_rev")}
+    if g.get("roll_deg") is not None and step:
+        r = float(g["roll_deg"]) + step
         g["roll_deg"] = round((r + 180.0) % 360.0 - 180.0, 2)
-        lines.append(f"偏转 {float(old['roll_deg']):+.1f}° → {g['roll_deg']:+.1f}°（新转接环去掉了 45° 偏转）")
+        lines.append(f"偏转 {float(old['roll_deg']):+.1f}° → {g['roll_deg']:+.1f}°"
+                     + ("（新转接环 + SO-101 标准方向：动指在上、上下开合）" if rev is None else "（SO-101 标准方向：上下开合，V3.75 少转了 90°）"))
     tc = [float(v) for v in (g.get("tip_corr_mm") or [0.0, 0.0, 0.0])]
     if any(abs(v) > 1e-9 for v in tc):
         g["tip_corr_mm"] = [0.0, 0.0, 0.0]
-        lines.append(f"指尖修正 {tc} mm 清零（是旧转接环上测的，请重新做 4 姿态碰点）")
-    g["pre_v375"] = old
+        lines.append(f"指尖修正 {tc} mm 清零（是按旧的安装模型测的，请重新做 4 姿态碰点）")
+    g["pre_v375" if rev is None else f"pre_{MOUNT_REV.lower().replace('.', '')}"] = old
     g["mount_rev"] = MOUNT_REV
     if log and lines:
-        log("[INFO] [V3.75 REAL] 转接环已换新设计：" + "；".join(lines) + "；转接环厚度仍按 "
+        log("[INFO] [V3.76 REAL] SO-101 安装方向已更新：" + "；".join(lines) + "；转接环厚度仍按 "
             f"{old['ring_mm'] if old['ring_mm'] is not None else 7.0} mm，请实测后填写。")
     return g, lines
 
@@ -947,7 +953,7 @@ class RealCupTaskTabUI:
         self._build(parent)
         self.after_id = None
         if getattr(self, "_v375_mount_lines", None):                  # V3.75 NEW ADAPTER RING (once, at start)
-            self._log("[INFO] [V3.75 REAL] 转接环已换新设计（无 45° 偏转，动指在上往上开）：" + "；".join(self._v375_mount_lines)
+            self._log("[INFO] [V3.76 REAL] SO-101 安装方向已更新（上下开合、动指在上，偏转默认 +90°）：" + "；".join(self._v375_mount_lines)
                       + "。转接环厚度仍按旧值，请实测后在“实机夹爪几何”里填写并保存。")
         self._schedule()
 

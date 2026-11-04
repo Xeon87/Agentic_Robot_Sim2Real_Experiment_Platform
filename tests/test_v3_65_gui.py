@@ -157,7 +157,7 @@ pump(0.5)
 st = tab.v_status.get()
 for k in ("机械臂 MoveIt", "关节路径执行", "主相机 D435i", "手眼标定", "腕部相机", "SO-101 夹爪"):
     assert k in st, st
-assert "[CS]" in tab.v_skill.get() and "偏转 +0°" in tab.v_skill.get()   # V3.75 new ring (was -45)
+assert "[CS]" in tab.v_skill.get() and "偏转 +90°" in tab.v_skill.get()   # V3.76 (V3.75: 0, before: -45)
 print("[R1] tab builds; readiness lamps + CS skill / SO-101 profile shown")
 
 tab.v_port.set(GR.SIM_PORT)

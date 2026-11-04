@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V3.75"
+VERSION = "V3.76"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -926,10 +926,20 @@ def run_console(initial_tab="sim"):
         log_append(sim_log, "[V3.12 CONSOLE] stop requested -> SIGINT to launcher (cleanup + restore kinematics.yaml)")
         sim_status.set("正在停止…")
         btn_sim_stop.configure(state="disabled")
+        stop_t0[0] = time.time()                    # V3.76 STOP COUNTDOWN
         runner.stop()
 
     btn_sim_start.configure(command=on_sim_start)
     btn_sim_stop.configure(command=on_sim_stop)
+    stop_t0 = [None]
+
+    def stop_countdown():
+        """V3.76 STOP COUNTDOWN: the launcher stops every process within ~8 s (INT -> TERM -> KILL); the console's
+        SIGKILL of the whole session follows after STOP_GRACE_S at the latest"""
+        if stop_t0[0] is None or not runner.running() or not runner.stop_requested():
+            return
+        left = max(0, int(round(STOP_GRACE_S - (time.time() - stop_t0[0]))))
+        sim_status.set(f"正在停止…（MoveIt / RViz / MuJoCo / 仿真 GUI，最多再等 {left} s）")
 
     def poll():
         changed = False
@@ -947,7 +957,9 @@ def run_console(initial_tab="sim"):
                         sim_status.set(f"仿真已结束 (exit {rc})")
                     else:
                         sim_status.set(f"启动失败 (exit {rc}) — 见日志")
-                    log_append(sim_log, f"[V3.12 CONSOLE] launcher exited rc={rc}")
+                    log_append(sim_log, f"[V3.12 CONSOLE] launcher exited rc={rc}"
+                               + (f" | V3.76 stop took {time.time() - stop_t0[0]:.1f} s" if stop_t0[0] else ""))
+                    stop_t0[0] = None
                     btn_sim_start.configure(state="normal")
                     btn_sim_stop.configure(state="disabled")
                     update_mode()
@@ -965,6 +977,7 @@ def run_console(initial_tab="sim"):
             pass
         if changed:
             refresh_sim_lamps()
+        stop_countdown()
         root.after(100, poll)
 
     def on_close():
