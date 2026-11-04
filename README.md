@@ -1,4 +1,12 @@
-# NERO V3.77 — single-folder release
+# NERO V3.78 — single-folder release
+
+**V3.78**（D435i 单机工具，不需要机械臂）
+1. `python3 NERO_V378_D435i_Bench.py profile`：锁定曝光 / 增益 / 白平衡 / 60 Hz 防闪烁并保存，之后都按这组参数。
+2. `noise`：对着平整表面，对比 5 种深度处理的抖动和平整度。
+3. `accuracy`：标定板铺在桌上当坐标系，鸡蛋放在角点上，测定位误差（用 Camera 页同一套识别和求中心方法）。
+4. `capture`：按固定参数采集训练图（+ 深度图）。
+5. **没有在真实 D435i 上运行过**，请按 CHANGELOG 的步骤实测。
+
 
 **V3.77**（启动前清理残余进程 + 分类场景夹物安全）
 1. 点「启动仿真」先列出上次运行留下的进程（ROS / MoveIt / RViz / 实机驱动 / 任何文件夹里的 NERO 脚本），你确认后关闭再启动。

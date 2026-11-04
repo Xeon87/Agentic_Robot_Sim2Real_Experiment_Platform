@@ -40,8 +40,8 @@ H = lambda b: hashlib.sha256(b).hexdigest()
 
 # ---------------------------------------------------------------- A1
 for m in (CON, RR, YP, W49, RCT):
-    assert m.VERSION in ("V3.70", "V3.71", "V3.72", "V3.73", "V3.74", "V3.75", "V3.76", "V3.77"), (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.70", "V3.71", "V3.72", "V3.73", "V3.74", "V3.75", "V3.76", "V3.77")
+    assert m.VERSION in ("V3.70", "V3.71", "V3.72", "V3.73", "V3.74", "V3.75", "V3.76", "V3.77", "V3.78"), (m.__name__, m.VERSION)
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.70", "V3.71", "V3.72", "V3.73", "V3.74", "V3.75", "V3.76", "V3.77", "V3.78")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 s_con = (ROOT / "NERO_V312_Console.py").read_text(encoding="utf-8")
 s_rr = (ROOT / "NERO_V313_Real_Robot.py").read_text(encoding="utf-8")
