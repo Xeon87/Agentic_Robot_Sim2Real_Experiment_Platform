@@ -95,6 +95,35 @@ def load_settings(path=None):
         return {}
 
 
+MOUNT_REV = "V3.75"
+
+
+def migrate_geometry_v375(geo, log=None):
+    """V3.75 NEW ADAPTER RING: settings saved before V3.75 (no "mount_rev") describe the OLD ring with its 45 deg
+    offset.  The new ring has none -> roll = old roll + 45 deg (old default -45 -> 0); the fingertip correction was
+    measured on the old ring -> reset to 0 (old value kept under "pre_v375"); seat / ring thickness are kept (the
+    ring thickness should be re-measured).  -> (new geometry dict, list of change lines)"""
+    g = dict(geo or {})
+    if not g or g.get("mount_rev") == MOUNT_REV:
+        return g, []
+    lines = []
+    old = {k: g.get(k) for k in ("roll_deg", "tip_corr_mm", "ring_mm", "seat_mm")}
+    if g.get("roll_deg") is not None:
+        r = float(g["roll_deg"]) + 45.0
+        g["roll_deg"] = round((r + 180.0) % 360.0 - 180.0, 2)
+        lines.append(f"偏转 {float(old['roll_deg']):+.1f}° → {g['roll_deg']:+.1f}°（新转接环去掉了 45° 偏转）")
+    tc = [float(v) for v in (g.get("tip_corr_mm") or [0.0, 0.0, 0.0])]
+    if any(abs(v) > 1e-9 for v in tc):
+        g["tip_corr_mm"] = [0.0, 0.0, 0.0]
+        lines.append(f"指尖修正 {tc} mm 清零（是旧转接环上测的，请重新做 4 姿态碰点）")
+    g["pre_v375"] = old
+    g["mount_rev"] = MOUNT_REV
+    if log and lines:
+        log("[INFO] [V3.75 REAL] 转接环已换新设计：" + "；".join(lines) + "；转接环厚度仍按 "
+            f"{old['ring_mm'] if old['ring_mm'] is not None else 7.0} mm，请实测后填写。")
+    return g, lines
+
+
 def save_settings(d, path=None):
     p = path or os.path.join(CALIB_DIR, SETTINGS_NAME)
     try:
@@ -903,6 +932,8 @@ class RealCupTaskTabUI:
         self.GR = GR
         self.settings_path = settings_path
         self.st = load_settings(settings_path)
+        if self.st.get("geometry"):                                   # V3.75 NEW ADAPTER RING
+            self.st["geometry"], self._v375_mount_lines = migrate_geometry_v375(self.st["geometry"])
         self.grip = gripper or GR.SO101RealGripper(self.st.get("gripper") or {}, log=self._log)
         self.q = queue.Queue()
         self.worker = None
@@ -915,6 +946,9 @@ class RealCupTaskTabUI:
         self._shown = (-1, -1)
         self._build(parent)
         self.after_id = None
+        if getattr(self, "_v375_mount_lines", None):                  # V3.75 NEW ADAPTER RING (once, at start)
+            self._log("[INFO] [V3.75 REAL] 转接环已换新设计（无 45° 偏转，动指在上往上开）：" + "；".join(self._v375_mount_lines)
+                      + "。转接环厚度仍按旧值，请实测后在“实机夹爪几何”里填写并保存。")
         self._schedule()
 
     # ---------------------------------------------------------------- helpers
@@ -1536,7 +1570,7 @@ class RealCupTaskTabUI:
             c = {"clearance_mm": float(self.v_clear.get()), "align_rotate_mm": float(self.v_align.get()),
                  "descent_stop_mm": float(self.v_stop.get()) if self.v_stop.get().strip() else None,
                  "seat_mm": float(self.v_seat.get()), "ring_mm": float(self.v_ring.get()),
-                 "roll_deg": float(self.v_roll.get()), "tip_corr_mm": list(self.tip_corr),
+                 "roll_deg": float(self.v_roll.get()), "tip_corr_mm": list(self.tip_corr), "mount_rev": MOUNT_REV,
                  "nested_dz_mm": (float(self.v_nested.get()) if hasattr(self, "v_nested") and self.v_nested.get().strip()
                                   else None)}
         except ValueError:

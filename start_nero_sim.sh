@@ -164,7 +164,7 @@ case "$SCENE344" in
       [[ -f "$HERE/assets/so101/$f364" ]] || fatal "Missing SO-101 mesh assets/so101/$f364 (V3.64 SO-101 GRIPPER)"
     done ;;
   sort_items)                                    # V3.72 SORT ITEMS SCENE (SO-101 gripper, skills NERO_V372_Sort_Skills.py)
-    python3 -m py_compile "$HERE/NERO_V364_SO101_Gripper.py" "$HERE/NERO_V372_Sort_Skills.py" || fatal "py_compile failed: NERO_V364_SO101_Gripper.py / NERO_V372_Sort_Skills.py (V3.72 SORT ITEMS)"
+    python3 -m py_compile "$HERE/NERO_V364_SO101_Gripper.py" "$HERE/NERO_V372_Sort_Skills.py" "$HERE/NERO_V375_Collision_Check.py" || fatal "py_compile failed: NERO_V364_SO101_Gripper.py / NERO_V372_Sort_Skills.py / NERO_V375_Collision_Check.py (V3.72 SORT ITEMS, V3.75 COLLISION PRE-CHECK)"
     for f364 in wrist_roll_follower_so101_v1.stl moving_jaw_so101_v1.stl sts3215_03a_v1.stl; do
       [[ -f "$HERE/assets/so101/$f364" ]] || fatal "Missing SO-101 mesh assets/so101/$f364 (V3.72 SORT ITEMS)"
     done ;;

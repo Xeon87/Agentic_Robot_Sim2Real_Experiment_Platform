@@ -38,8 +38,9 @@ if HERE not in sys.path:
 import numpy as np                           # noqa: E402
 import NERO_V343_Scenes as SC                # noqa: E402
 import NERO_V362_Cup_Skills as CK            # noqa: E402
+import NERO_V375_Collision_Check as CC       # noqa: E402
 
-VERSION = "V3.73"
+VERSION = "V3.75"
 MARKER = "V3.72 SORT ITEMS AGENT"
 SCENE = "sort_items"
 ITEM_IDS = {f"item_{i + 1}": n for i, n in enumerate(SC.SORT_ITEM_NAMES)}
@@ -64,6 +65,10 @@ ABOVE_WALL_M = 0.035         # item bottom this far above the bin walls while ca
 SLOT_DX_M = 0.045            # slots: bin centre -+ 45 mm along the closing direction (items lie side by side)
 JAW_CLEAR_M = 0.008          # open jaws keep this from every other item (candidate filter)
 PREFERRED_MARGIN_DEG = 8.0
+# V3.75 BIN FIT + COLLISION PRE-CHECK
+FIT_MARGIN_M = 0.008         # an item placed in a bin keeps its footprint this far inside the inner walls
+ITEM_WALL_MARGIN_M = 0.004   # 3-D check: held item box vs bin walls at the release pose
+MARKER_V375 = "V3.75 BIN FIT + COLLISION PRE-CHECK"
 
 
 def tf_name(body):
@@ -100,6 +105,16 @@ class SortTwinIO(CK.TwinIO):
         b = self.d.body(body)
         return [float(v) for v in b.xpos], [float(v) for v in b.xquat]
 
+    def state_check(self, q, opening_mm=None, extra_parts=None):
+        """V3.75 COLLISION PRE-CHECK (twin): no MoveIt here - SO-101 + wrist coarse boxes vs table / bins"""
+        if opening_mm is None:
+            opening_mm = self.gripper_state().get("opening_mm")
+        return CC.assess(None, q, opening_mm, CC.world_boxes(SCENE), extra_parts=extra_parts)
+
+
+def _own_path_enabled():
+    return os.environ.get("NERO_V375_SO101_OWN_PATH", "1").strip() != "0"
+
 
 class SortBackendIO(CK.BackendIO):
     """the V3.62 backend adapter + item poses from TF (sim_obj_*) + the SO-101 profile"""
@@ -116,6 +131,80 @@ class SortBackendIO(CK.BackendIO):
 
     def pose_mode(self):
         return "truth"
+
+    # -- V3.75 COLLISION PRE-CHECK (backend): MoveIt (all contact pairs) + the SO-101 coarse geometry
+    @property
+    def v375_own_path(self):
+        return _own_path_enabled()
+
+    def state_check(self, q, opening_mm=None, extra_parts=None):
+        if opening_mm is None:
+            opening_mm = self.gripper_state().get("opening_mm")
+        return CC.assess(self.core, q, opening_mm, CC.world_boxes(SCENE), extra_parts=extra_parts)
+
+    def move_line(self, label, xyz, quat, speed=0.05, slow=None):
+        """V3.75 OWN PATH WHEN ONLY MOVEIT'S GRIPPER MODEL COLLIDES: MoveIt's robot model carries the official AgileX
+        gripper (its fingers ~19 mm below the SO-101 grasp point).  When MoveIt refuses a straight segment, the
+        skill's own straight path (strict-continuity IK, every point checked by check_joint_path) is checked state by
+        state: MoveIt contact pairs + the SO-101 coarse boxes vs table / bins.  Only if every MoveIt pair involves a
+        link of MoveIt's gripper model (none an arm link 0-7) and the SO-101 is clear, that path is executed as one
+        trajectory (NERO_V71 _make_incremental_joint_trajectory, 40 mm/s retime); otherwise the refusal stands (with
+        the colliding pairs in the log).  NERO_V375_SO101_OWN_PATH=0 switches this off."""
+        r = super().move_line(label, xyz, quat, speed=speed, slow=slow)
+        if not r.get("refused") or not self.v375_own_path:
+            return r
+        R = CK.quat_xyzw_to_R(quat)
+        try:
+            q0 = self.current_q()
+            p0 = np.asarray(self.tcp_pose()[0], float)
+        except Exception:
+            return r
+        dist = float(np.linalg.norm(np.asarray(xyz, float) - p0))
+        n = int(min(40, max(2, math.ceil(dist / 0.004))))
+        ch = CK.segment_points("s", p0, xyz, R, n) + [("~end", np.asarray(xyz, float), R)]
+        rr = CK.ik_chain(ch, q0)
+        if not rr["ok"]:
+            r["why"] = f"{r.get('why')}; own straight path: {rr['why']}"
+            return r
+        path = [q0] + rr["q"]
+        chk = CK.check_joint_path(path)
+        if not chk["ok"]:
+            r["why"] = f"{r.get('why')}; own straight path: {chk['why']}"
+            return r
+        opening = self.gripper_state().get("opening_mm")
+        idx = sorted(set(list(range(1, len(path), 3)) + [len(path) - 1]))
+        model, avail = [], True
+        for i in idx:
+            a = self.state_check(path[i], opening)
+            avail = avail and a["moveit_available"]
+            if not a["ok"]:
+                self.emit(f"[FAIL] [V3.75 MOVEIT] {label}: refused and the own straight path collides at point {i}/"
+                          f"{len(path) - 1}: " + CC.pairs_text(a["blocking"] + a["so101"]))
+                r["why"] = f"{r.get('why')}; collision: {CC.pairs_text(a['blocking'] + a['so101'])}"
+                r["collision"] = a
+                return r
+            model += [p_ for p_ in a["model_only"] if p_ not in model]
+        if not avail or not model:
+            # MoveIt not reachable, or it refused for another reason (no gripper-model contact): keep the refusal
+            # (the skill's V3.64 fallback follows)
+            return r
+        pts = [p0] + [np.asarray(c[1], float) for c in ch]
+        try:
+            traj = self.core._make_incremental_joint_trajectory(path, [list(map(float, p_)) for p_ in pts])
+        except Exception as exc:
+            r["why"] = f"{r.get('why')}; own path trajectory: {str(exc)[:120]}"
+            return r
+        self.emit(f"[WARN] [V3.75 MOVEIT] {label}: MoveIt refused ({r.get('why')}) - its only contacts are with its "
+                  f"official-gripper model ({CC.pairs_text(model)}); the mounted SO-101 is clear of table / bins -> the "
+                  f"skill's own straight path ({len(path) - 1} points, min margin {chk['min_margin_deg']} deg)")
+        s0 = int(self.sh["safety_trip_count"].value)
+        f = max(1.0, 0.04 / max(float(speed), 1e-3))
+        err = self._exec(label, traj, (f * float(slow)) if slow else (f if f > 1.0 else None), s0)
+        if err:
+            return err
+        out = self._post(label, xyz, s0)
+        out.update(path_check=chk, own_path=True, model_only_pairs=model)
+        return out
 
 
 # =============================================================================================== skills
@@ -188,6 +277,21 @@ class SortSkills(CK.CupSkills):
         nxt = ["place_in_box"] if self.held else ["pick_object"]
         return self._res("observe_scene", True, {"items": len(sc["items"])}, nxt=nxt, scene=sc)
 
+    # -- V3.75 COLLISION PRE-CHECK
+    def _v375_states_ok(self, states, opening_mm, extra=None):
+        """every state: MoveIt pairs (backend) + SO-101 coarse boxes; MoveIt-gripper-model pairs are accepted only if
+        the IO can drive the own checked path.  -> (ok, pairs text / None)"""
+        fn = getattr(self.io, "state_check", None)
+        if fn is None:
+            return True, None
+        own = bool(getattr(self.io, "v375_own_path", False))
+        for i, q in enumerate(states):
+            a = fn(q, opening_mm, extra_parts=(extra or {}).get(i))
+            bad = a["blocking"] + a["so101"] + ([] if own else a["model_only"])
+            if bad:
+                return False, CC.pairs_text(bad, 3)
+        return True, None
+
     # -- grasp planning
     def _jaw_clear(self, it, p_a, yG, gap_m, others):
         """smallest distance of the two open jaw tips to any other item (centre segment minus half width)"""
@@ -223,6 +327,9 @@ class SortSkills(CK.CupSkills):
         half = math.sqrt(max((width / 2.0) ** 2 - dz * dz, (width / 4.0) ** 2))
         import NERO_V364_SO101_Gripper as G
         cands = []
+        self.v375_rejects = []
+        open_v = G.opening_mm_for_tip_gap(gap_m * 1000.0)
+        held_v = G.opening_mm_for_tip_gap(max(2.0, width * 1000.0))
         for ph in phis:
             phi = math.radians(ph)
             R = grasp_R(phi)
@@ -246,6 +353,12 @@ class SortSkills(CK.CupSkills):
             names = [c[0] for c in chain]
             q = dict(zip(names, r["q"]))
             i_g, i_l = names.index("grasp"), names.index("lift")
+            # V3.75 COLLISION PRE-CHECK: pregrasp, the descent, the grasp (jaws open) and the lift (jaws closed)
+            ok_o, why_o = self._v375_states_ok([r["q"][0], r["q"][2], r["q"][4], r["q"][i_g]], open_v)
+            ok_c, why_c = (self._v375_states_ok([r["q"][i_l]], held_v) if ok_o else (False, None))
+            if not (ok_o and ok_c):
+                self.v375_rejects.append({"phi_deg": round(_wrap(ph), 1), "collision": why_o or why_c})
+                continue
             cands.append({"phi_deg": round(_wrap(ph), 1), "margin": r["min_margin_deg"], "binding": r["binding"],
                           "jaw_clear_mm": round(clear * 1000, 1), "tcp": tcp, "q": q,
                           "q_down": r["q"][:i_g + 1], "q_up": r["q"][i_g:i_l + 1], "gap_mm": gap_m * 1000.0,
@@ -272,6 +385,10 @@ class SortSkills(CK.CupSkills):
             q_now = None
         plan = self._plan_pick(it, q_now)
         if plan is None:
+            rej = getattr(self, "v375_rejects", [])
+            if rej:                                   # V3.75: what collided (MoveIt pairs / SO-101 boxes)
+                v["collision_rejects"] = rej[:4]
+                v["collision_rejected_angles"] = len(rej)
             return self._res(tool, False, v, reason="GRASP_UNREACHABLE", nxt=["observe_scene", "stop_and_report"])
         v.update(closing_yaw_deg=plan["phi_deg"], min_joint_margin_deg=plan["margin"], binding=plan["binding"],
                  jaw_clear_mm=plan["jaw_clear_mm"])
@@ -308,17 +425,44 @@ class SortSkills(CK.CupSkills):
         return self._res(tool, True, v, nxt=["place_in_box"])
 
     # -- place
-    def _slot(self, box, iid, phi):
-        """the freer of the two slots centre -+ SLOT_DX along the closing direction phi (the long axis is
-        perpendicular to it, so two long items lie side by side); an empty bin -> the slot nearer the robot"""
+    def _slot(self, box, iid, phi, yaw_deg=None):
+        """V3.75 BIN FIT: item centre in the bin for the closing direction phi and the item's long-axis yaw at the
+        release (yaw_deg).  Candidate centres on a grid; the item footprint (NERO_V343 sort_item_footprint) must stay
+        FIT_MARGIN_M inside the inner walls.  Items already in the bin -> the candidate with the largest clearance to
+        their footprints; an empty bin -> pushed to the side nearer the robot (room for the next item).  -> (x, y) or
+        None when the item does not fit in this orientation.  (yaw_deg None: the V3.72 rule, slots +-45 mm along phi)"""
         b = SC.SORT_BINS[box]
         cx, cy = b["centre"]
         inside = [o for k, o in self._items().items() if k != iid and o["in_bin"] == box]
-        u = np.array([math.cos(phi), math.sin(phi)])
-        slots = [np.array([cx, cy]) + SLOT_DX_M * u, np.array([cx, cy]) - SLOT_DX_M * u]
-        if not inside:
-            return min(slots, key=lambda s_: float(np.hypot(*s_)))
-        return max(slots, key=lambda s_: min(float(np.hypot(*(s_ - o["c"][:2]))) for o in inside))
+        if yaw_deg is None:
+            u = np.array([math.cos(phi), math.sin(phi)])
+            slots = [np.array([cx, cy]) + SLOT_DX_M * u, np.array([cx, cy]) - SLOT_DX_M * u]
+            if not inside:
+                return min(slots, key=lambda s_: float(np.hypot(*s_)))
+            return max(slots, key=lambda s_: min(float(np.hypot(*(s_ - o["c"][:2]))) for o in inside))
+        sp = SC.SORT_ITEMS[ITEM_IDS[iid]]
+        a = math.radians(yaw_deg)
+        ul, uc = np.array([math.cos(a), math.sin(a)]), np.array([-math.sin(a), math.cos(a)])
+        ix, iy = b["inner"][0] / 2.0 - FIT_MARGIN_M, b["inner"][1] / 2.0 - FIT_MARGIN_M
+        fits = []
+        for t in np.linspace(-0.08, 0.08, 17):
+            for s_ in (0.0, -0.02, 0.02, -0.04, 0.04):
+                c = np.array([cx, cy]) + t * uc + s_ * ul
+                rc, half, ang = SC.sort_item_footprint(ITEM_IDS[iid], c, yaw_deg)
+                if all(abs(px - cx) <= ix and abs(py - cy) <= iy for px, py in CC.rect_corners(rc, half, ang)):
+                    fits.append((c, (rc, half, ang), t, s_))
+        if not fits:
+            return None
+        if inside:
+            def clear(f):
+                return min(CC.rect_dist(f[1], SC.sort_item_footprint(o["body"], o["c"][:2], o["yaw_deg"]))
+                           for o in inside)
+            best = max(fits, key=lambda f: (round(clear(f), 3), -abs(f[3]), -float(np.hypot(*f[0]))))
+        else:
+            mid = [f for f in fits if f[3] == 0.0] or fits
+            ends = [min(mid, key=lambda f: f[2]), max(mid, key=lambda f: f[2])]      # against either side wall
+            best = min(ends, key=lambda f: float(np.hypot(*f[0])))
+        return float(best[0][0]), float(best[0][1])
 
     def place_in_box(self, box="red", **_):
         tool = "place_in_box"
@@ -335,15 +479,35 @@ class SortSkills(CK.CupSkills):
         c_above = b["wall_h"] + ABOVE_WALL_M + sp["cz"]
         q_now = self.io.current_q()
         tcp0, _q0 = self.io.tcp_pose()
-        phis = list(range(0, 360, 30))
+        import NERO_V364_SO101_Gripper as G
+        # V3.75 BIN FIT: the item's long-axis yaw at the release follows the wrist rotation; orientations whose
+        # footprint does not fit the (smaller) bin are skipped; the long axis along the bin's long side first
+        R_now = CK.quat_xyzw_to_R(_q0)
+        yaw_item = float(it["yaw_deg"])
+        held_v = G.opening_mm_for_tip_gap(max(2.0, sp["width"] * 1000.0))
+        long_x = b["inner"][0] >= b["inner"][1]
+
+        def yaw_at(Rt_):
+            Rr = Rt_ @ R_now.T
+            return yaw_item + math.degrees(math.atan2(Rr[1, 0], Rr[0, 0]))
+
+        def pref(ph_):
+            ya = math.radians(yaw_at(grasp_R(math.radians(ph_)) @ self.prof.T_grasp_tcp[:3, :3]))
+            return abs(math.sin(ya)) if long_x else abs(math.cos(ya))
+        phis = sorted(range(0, 360, 15), key=lambda ph_: (round(pref(ph_), 2), ph_ % 30 != 0))
         best = None
+        self.v375_rejects = []
         for rotate_first in (True, False):
             for ph in phis:
                 # the long axis is perpendicular to the closing direction phi; the slot is offset along phi
                 R = grasp_R(math.radians(ph))
                 Rt = R @ self.prof.T_grasp_tcp[:3, :3]
                 off = Rt @ self.held_off
-                sx, sy = self._slot(box, iid, math.radians(ph))
+                y_rel = yaw_at(Rt)
+                slot = self._slot(box, iid, math.radians(ph), yaw_deg=y_rel)
+                if slot is None:
+                    continue
+                sx, sy = slot
                 p_above = np.array([sx, sy, max(c_above, float(it["c"][2]))]) - off
                 p_rel = np.array([sx, sy, c_rel]) - off
                 p_rot = np.array([tcp0[0], tcp0[1], max(tcp0[2], p_above[2])])
@@ -355,7 +519,16 @@ class SortSkills(CK.CupSkills):
                 if not r["ok"] or r["min_margin_deg"] < CK.MIN_MARGIN_RELAXED_DEG:
                     continue
                 names = [c[0] for c in chain]
-                cand = {"phi": ph, "margin": r["min_margin_deg"], "binding": r["binding"], "q": dict(zip(names, r["q"])),
+                # V3.75 COLLISION PRE-CHECK: above / lowering / release with the held item's box at the release
+                i_a, i_r = names.index("above"), names.index("release")
+                sts = [r["q"][i_a], r["q"][(i_a + i_r) // 2], r["q"][i_r]]
+                ibox = CC.item_box((sx, sy), c_rel - sp["cz"], y_rel, sp)
+                ok_s, why_s = self._v375_states_ok(sts, held_v)
+                hit = CC.check_parts([ibox], CC.world_boxes(SCENE)[1:], ITEM_WALL_MARGIN_M) if ok_s else []
+                if not ok_s or hit:
+                    self.v375_rejects.append({"phi_deg": ph, "collision": why_s or CC.pairs_text(hit, 3)})
+                    continue
+                cand = {"phi": ph, "margin": r["min_margin_deg"], "item_yaw_deg": round(_wrap(y_rel), 1), "binding": r["binding"], "q": dict(zip(names, r["q"])),
                         "q_down": r["q"][names.index("above"):], "p_rot": p_rot, "p_above": p_above, "p_rel": p_rel,
                         "Rt": Rt, "rotate_first": rotate_first, "slot": [round(float(sx), 3), round(float(sy), 3)]}
                 if best is None or cand["margin"] > best["margin"]:
@@ -365,10 +538,11 @@ class SortSkills(CK.CupSkills):
             if best is not None:
                 break
         if best is None:
+            if self.v375_rejects:
+                v["collision_rejects"] = self.v375_rejects[:4]
             return self._res(tool, False, v, reason="PLACE_UNREACHABLE", nxt=["place_in_box", "stop_and_report"])
         v.update(min_joint_margin_deg=best["margin"], binding=best["binding"], closing_yaw_deg=best["phi"],
-                 slot_xy_m=best["slot"], rotate_in_place=best["rotate_first"])
-        import NERO_V364_SO101_Gripper as G
+                 slot_xy_m=best["slot"], rotate_in_place=best["rotate_first"], item_yaw_deg=best["item_yaw_deg"])
         try:
             if np.linalg.norm(np.asarray(tcp0) - best["p_rot"]) > 0.003:
                 self._go_line(f"up with {iid}", best["p_rot"], CK.quat_xyzw_to_R(_q0), LIFT_SPEED)

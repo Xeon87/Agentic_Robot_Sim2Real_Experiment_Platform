@@ -15,6 +15,9 @@ Geometry: SO-101 MJCF / meshes from TheRobotStudio/SO-ARM100 (Simulation/SO101, 
     (link7 y = 0, z = -23.5 mm); ring 7 mm; SO-101 interface face on the ring; nominal roll = closing axis along the
     official gripper's closing axis; plus the measured 45 deg offset.   ALL OF THIS IS CONFIGURABLE (MOUNT below, or
     NERO_V364_SO101_SEAT_X_MM / _RING_MM / _ROLL_DEG) - measure your adapter and correct it.
+  * V3.75 NEW ADAPTER RING (user): the ring was redesigned - no 45 deg offset any more; the gripper sits like on the
+    SO-101 arm (moving jaw on top, opening upwards) = the nominal roll -> MOUNT roll_deg default 0 (was -45).  The ring
+    thickness was not re-measured: still 7 mm (NERO_V364_SO101_RING_MM / the real tab's field).
 
 Backend compatibility without touching the backend (its run_sim keeps the V3.42 bytes): the backend only adds the
 official gripper if the model has no joint "gripper_joint1" (add_official_gripper_to_xml) and it drives / reads
@@ -34,6 +37,7 @@ import os
 
 VERSION = "V3.64"
 MARKER = "V3.64 SO-101 GRIPPER ON NERO"
+MARKER_V375 = "V3.75 NEW ADAPTER RING"
 HERE = os.path.dirname(os.path.realpath(__file__))
 ASSET_DIR = os.path.join(HERE, "assets", "so101")
 SCENE = "stack_cups_so101"
@@ -52,7 +56,8 @@ MOUNT = {
     "seat_x_m": _env_f("NERO_V364_SO101_SEAT_X_MM", 37.5) / 1000.0,   # NERO gripper seat face along link7 x
     "axis_z_m": -0.0235,                                             # official tool axis (link7 z)
     "ring_m": _env_f("NERO_V364_SO101_RING_MM", 7.0) / 1000.0,         # adapter ring thickness
-    "roll_deg": _env_f("NERO_V364_SO101_ROLL_DEG", -45.0),             # right-hand about link7 +x (= 45 deg left-hand)
+    # V3.75 NEW ADAPTER RING: 0 = no offset (V3.64-V3.74: -45, the old ring); right-hand about link7 +x
+    "roll_deg": _env_f("NERO_V364_SO101_ROLL_DEG", 0.0),
 }
 JAW = {"theta_min": math.radians(-10.0), "theta_max": math.radians(100.0), "q1_max": 0.05}
 HINGE_POS = (0.0202, 0.0188, -0.0234)

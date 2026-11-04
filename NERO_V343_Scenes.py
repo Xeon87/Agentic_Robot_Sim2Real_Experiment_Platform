@@ -52,7 +52,7 @@ SCENES = {
                    "summary": "banana, apple, mouse, marker on the table; sort them into the open red / blue bins by the prompt",
                    "gripper": "so101"},
 }
-SCENES_REV = "V3.72"       # VERSION above stays "V3.44" (tests pin it); stack_cups V3.61, stack_cups_so101 V3.64, sort_items V3.72
+SCENES_REV = "V3.75"       # VERSION above stays "V3.44" (tests pin it); stack_cups V3.61, stack_cups_so101 V3.64, sort_items V3.72 (bins V3.75)
 HERE = Path(__file__).resolve().parent
 
 # ----------------------------------------------------------------------------- geometry (store_in_safe)
@@ -615,12 +615,32 @@ SORT_ITEMS = {
 }
 SORT_ITEM_NAMES = tuple(SORT_ITEMS)
 # two open bins; the robot faces -x, so y < 0 is the robot's left
+# V3.75 SMALLER BINS FARTHER OUT (user, V3.74 run: "bin 太大，都贴到物体上了"): V3.72 inner 24 x 24 cm at y = +-0.25 left
+# only 1-2 cm between the inner walls (|y| = 0.125) and the items (|y| up to 0.115); now inner 23 (x, depth) x 17 (y) cm,
+# walls 5 cm, centre y = +-0.28 -> inner walls at |y| = 0.195 (>= 7 cm from every item), outer walls 9 mm inside the table
+# edge.  23 cm depth: the banana is 20 cm end to end (chord 16.7 cm + the 17 mm capsule radius at each end) and lies
+# along x in the bin; 17 cm width: two items side by side (banana 6.4 + apple 7.4 cm).
 SORT_BINS = {
-    "red": {"centre": (-0.37, -0.25), "inner": (0.24, 0.24), "wall_h": 0.06, "wall_t": 0.006, "floor_t": 0.004,
+    "red": {"centre": (-0.37, -0.28), "inner": (0.23, 0.17), "wall_h": 0.05, "wall_t": 0.006, "floor_t": 0.004,
             "rgba": "0.82 0.12 0.10 1", "side": "left (robot view, y < 0)"},
-    "blue": {"centre": (-0.37, 0.25), "inner": (0.24, 0.24), "wall_h": 0.06, "wall_t": 0.006, "floor_t": 0.004,
+    "blue": {"centre": (-0.37, 0.28), "inner": (0.23, 0.17), "wall_h": 0.05, "wall_t": 0.006, "floor_t": 0.004,
              "rgba": "0.12 0.30 0.85 1", "side": "right (robot view, y > 0)"},
 }
+# V3.75 ITEM FOOTPRINT: (half length along the long axis, across-axis extent min / max) about the item centre in the
+# item frame; the banana arc (R 130 mm, 80 deg, capsule r 17 mm) bends towards local +y from its middle
+SORT_FOOTPRINT = {"obj_banana": (0.1006, -0.017, 0.0474)}
+
+
+def sort_item_footprint(spec_or_name, centre_xy, yaw_deg):
+    """V3.75 ITEM FOOTPRINT: (rect centre xy, (half along, half across), long-axis angle rad) of an item lying flat"""
+    name = spec_or_name if isinstance(spec_or_name, str) else next(
+        (k for k, v in SORT_ITEMS.items() if v is spec_or_name), None)
+    sp = SORT_ITEMS[name] if isinstance(spec_or_name, str) else spec_or_name
+    ha, y0, y1 = SORT_FOOTPRINT.get(name, (sp["length"] / 2.0, -sp["width"] / 2.0, sp["width"] / 2.0))
+    a = math.radians(float(yaw_deg))
+    off = (y0 + y1) / 2.0
+    c = (float(centre_xy[0]) - math.sin(a) * off, float(centre_xy[1]) + math.cos(a) * off)
+    return c, (ha, (y1 - y0) / 2.0), a
 
 
 def sort_item_poses(seed=None):

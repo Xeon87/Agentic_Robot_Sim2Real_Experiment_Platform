@@ -1167,7 +1167,9 @@ class BackendIO:
             traj = self.core._cartesian_waypoint_plan([list(xyz)], list(quat), label=label, max_step=0.004,
                                                       max_speed=float(speed))
         except Exception as exc:
-            return {"ok": False, "refused": True, "label": label, "why": str(exc)[:200]}
+            r = {"ok": False, "refused": True, "label": label, "why": str(exc)[:200]}
+            self._v375_report(label, None, xyz, quat, r)
+            return r
         if traj is None:
             return self._post(label, xyz, s0)
         chk = check_joint_path([q0] + self.traj_q(traj))
@@ -1189,7 +1191,9 @@ class BackendIO:
             traj = self.core._plan_joint_solution([float(v) for v in q], velocity_scale=0.10, accel_scale=0.08,
                                                   planning_attempts=6, planning_time=5.0)
         except Exception as exc:
-            return {"ok": False, "label": label, "error": f"joint plan failed: {str(exc)[:200]}"}
+            r = {"ok": False, "label": label, "error": f"joint plan failed: {str(exc)[:200]}"}
+            self._v375_report(label, q, None, None, r)
+            return r
         if traj is None:
             return {"ok": False, "label": label, "error": "joint plan returned no trajectory"}
         chk = check_joint_path([q0] + self.traj_q(traj), jump_deg=30.0)
@@ -1212,6 +1216,36 @@ class BackendIO:
         trips = int(self.sh["safety_trip_count"].value) - s0
         return {"ok": jerr <= 4.0 and trips == 0, "label": label, "joint_error_deg": round(jerr, 2),
                 "safety_trips": trips, "safety": trips > 0, "kind": "joints"}
+
+    def _v375_report(self, label, q, xyz, quat, r):
+        """V3.75 COLLISION PRE-CHECK: MoveIt refused / failed -> log WHICH bodies collide at the target state (MoveIt
+        /check_state_validity, every contact pair) and whether the mounted SO-101 itself (coarse boxes) touches the
+        table / bins; the pairs also go into the result ("collision").  Logging only - never changes the motion."""
+        try:
+            import NERO_V375_Collision_Check as CC
+            if q is None and xyz is not None:
+                q = ik_from(self.current_q(), xyz, quat_xyzw_to_R(quat))
+            if q is None:
+                return None
+            so101 = SC.gripper_variant() == "so101"
+            opening = float(self.sh["gripper_actual_mm"].value) if "gripper_actual_mm" in self.sh else None
+            a = CC.assess(self.core, q, opening, CC.world_boxes(SC.active_scene()))
+            if not so101:                                  # the official gripper: MoveIt's model is the real one
+                a["so101"] = []
+        except Exception as exc:
+            self.emit(f"[WARN] [V3.75 MOVEIT] {label}: collision report failed: {str(exc)[:160]}")
+            return None
+        r["collision"] = {k: a[k] for k in ("blocking", "model_only", "so101", "moveit_available")}
+        if not a["moveit_available"]:
+            self.emit(f"[INFO] [V3.75 MOVEIT] {label}: MoveIt state check not available - colliding bodies unknown"
+                      + (f"; SO-101 boxes touch: {CC.pairs_text(a['so101'])}" if a["so101"] else ""))
+        else:
+            self.emit(f"[INFO] [V3.75 MOVEIT] {label}: target state "
+                      + ("valid in MoveIt" if not (a["blocking"] or a["model_only"]) else
+                         "collides in MoveIt: " + CC.pairs_text(a["blocking"] + a["model_only"], 6))
+                      + (f" (MoveIt gripper model only: {CC.pairs_text(a['model_only'])})" if a["model_only"] else "")
+                      + (f"; SO-101 boxes touch: {CC.pairs_text(a['so101'])}" if a["so101"] else "; SO-101 boxes clear"))
+        return a
 
     def latch_pending(self):
         f = self.c.get("latch_pending")
