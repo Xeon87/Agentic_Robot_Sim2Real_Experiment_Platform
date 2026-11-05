@@ -31,6 +31,7 @@ VISION374="$HERE/NERO_V374_Vision_Review.py"    # V3.74 LLM vision review of the
 TASKREC368="$HERE/NERO_V368_Real_Task_Record.py"  # V3.68 task records (before / after images) + summary
 BENCH378="$HERE/NERO_V378_D435i_Bench.py"    # V3.78 D435I BENCH (standalone: profile / noise / accuracy / capture)
 LAB379="$HERE/NERO_V379_Camera_Lab.py"      # V3.79 CAMERA LAB (Camera tab 「相机高级测试」 window)
+TRAIN381="$HERE/NERO_V381_Yolo_Train.py"   # V3.81 YOLOE TRAIN (camera lab page 5 + training child)
 STALE377="$HERE/NERO_V377_Stale_Procs.py"     # V3.77 STALE PROCESS CHECK (console: before a simulation starts)
 COLL375="$HERE/NERO_V375_Collision_Check.py"   # V3.75 COLLISION PRE-CHECK (sort / cup skills, MoveIt contact pairs)
 SORT372="$HERE/NERO_V372_Sort_Skills.py"      # V3.72 SORT ITEMS AGENT (sort_items scene skills, imported by the backend)
@@ -52,7 +53,7 @@ echo "============================================================"
 echo " NERO ${RELEASE} — console"
 echo " Folder: $HERE"
 echo "============================================================"
-for f in "$SIM" "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" "$CAM" "$YOLO347" "$WRIST349" "$STRAT359" "$REALCUP365" "$GRIP365" "$CUPYOLO366" "$TASKREC368" "$SORT372" "$VISION374" "$COLL375" "$STALE377" "$BENCH378" "$LAB379" "$HERE/SHA256SUMS.txt"; do
+for f in "$SIM" "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" "$CAM" "$YOLO347" "$WRIST349" "$STRAT359" "$REALCUP365" "$GRIP365" "$CUPYOLO366" "$TASKREC368" "$SORT372" "$VISION374" "$COLL375" "$STALE377" "$BENCH378" "$LAB379" "$TRAIN381" "$HERE/SHA256SUMS.txt"; do
   [[ -f "$f" ]] || die "NERO file missing from this folder: $f"
 done
 if ( cd "$HERE" && sha256sum --quiet -c SHA256SUMS.txt ) >/dev/null 2>&1; then
@@ -66,7 +67,7 @@ fi
 # The console uses only the Python standard library + tkinter.
 PY="${NERO_CONSOLE_PYTHON:-/usr/bin/python3}"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
-"$PY" -m py_compile "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" "$STRAT359" "$REALCUP365" "$GRIP365" "$CUPYOLO366" "$TASKREC368" "$VISION374" "$COLL375" "$STALE377" "$BENCH378" "$LAB379" || die "py_compile failed: $CONSOLE / $REAL / $JOINT / $CONS / $SAFE"
+"$PY" -m py_compile "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" "$STRAT359" "$REALCUP365" "$GRIP365" "$CUPYOLO366" "$TASKREC368" "$VISION374" "$COLL375" "$STALE377" "$BENCH378" "$LAB379" "$TRAIN381" || die "py_compile failed: $CONSOLE / $REAL / $JOINT / $CONS / $SAFE"
 "$PY" -c "import tkinter" 2>/dev/null || die "tkinter missing for $PY (sudo apt install python3-tk), or run the simulation directly: ./start_nero.sh --sim"
 bash -n "$SIM" || die "syntax error in $SIM"
 

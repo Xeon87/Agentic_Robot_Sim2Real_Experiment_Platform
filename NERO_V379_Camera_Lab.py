@@ -42,9 +42,10 @@ import numpy as np
 
 import NERO_V378_D435i_Bench as B378
 
-VERSION = "V3.80"
+VERSION = "V3.81"
 MARKER = "V3.79 CAMERA LAB"
 MARKER_V380 = "V3.80 CAMERA LAB UPGRADE"
+MARKER_V381 = "V3.81 PROFILE FILES + TRAIN PAGE"
 CALIB_DIR = B378.CALIB_DIR
 LAB_SETTINGS = os.path.join(CALIB_DIR, "camera_lab.json")
 DEFAULT_ROOT = B378.DATA_DIR
@@ -291,6 +292,41 @@ def save_named(name, prof):
 def load_named(name):
     with open(_profile_file(name), encoding="utf-8") as f:
         return json.load(f)
+
+
+def save_profile_file(path, prof):
+    """V3.81: a profile anywhere the user chooses (same format as the named profiles)"""
+    d = dict(json.loads(json.dumps(prof)), version=VERSION, saved_at=time.strftime("%Y-%m-%d %H:%M:%S"))
+    d.setdefault("name", os.path.splitext(os.path.basename(path))[0])
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+    return path
+
+
+def load_profile_file(path):
+    """V3.81: read + check a profile file (named profiles, d435i_profile.json and V3.78 files all work)"""
+    with open(path, encoding="utf-8") as f:
+        d = json.load(f)
+    col = d.get("color")
+    if not isinstance(col, dict) or "exposure" not in col:
+        raise ValueError("不是相机参数文件（没有 color.exposure）")
+    for k in ("depth", "filters"):
+        d.setdefault(k, {})
+    d.setdefault("name", os.path.splitext(os.path.basename(path))[0])
+    return d
+
+
+def profile_summary(d):
+    c = d.get("color", {})
+    ref = d.get("ref") or {}
+    return (f"「{d.get('name')}」曝光 {c.get('exposure')}（{float(c.get('exposure', 0)) * EXP_UNIT_MS:.1f} ms）· 增益 "
+            f"{c.get('gain')} · 白平衡 {c.get('white_balance')} · 防闪烁 "
+            f"{B378.POWER_LINE.get(int(c.get('power_line_frequency', 0)), '?')}"
+            + (f" · 保存时工作区亮度 {ref.get('mean')}" if ref.get("mean") is not None else "")
+            + (f" · {d.get('saved_at')}" if d.get("saved_at") else ""))
 
 
 def activate_named(name):
@@ -916,6 +952,16 @@ class CameraLab:
         self._build_noise()
         self._build_accuracy()
         self._build_capture()
+        self.train_page = None
+        try:                                              # V3.81 PROFILE FILES + TRAIN PAGE: ⑤ 训练 / 评估
+            import NERO_V381_Yolo_Train as TR381
+            self.train_page = TR381.TrainPage(self)
+        except Exception as exc:
+            self.log(f"[FAIL] [V3.81 train] 「⑤ 训练 / 评估」打不开：{exc}")
+        try:
+            self.nb.bind("<<NotebookTabChanged>>", lambda _e: self._tab_changed())
+        except Exception:
+            pass
         self.log(f"[INFO] [{MARKER}] 打开相机高级测试（数据文件夹 {self.ds.root}）")
         self._tick()
 
@@ -992,9 +1038,19 @@ class CameraLab:
         except Exception:
             pass
 
+    def _tab_changed(self):
+        if self._page() == 4 and self.train_page is not None:      # V3.81: ⑤ shows the newest captures
+            self._set_root(self.v_root.get())
+            self.train_page.refresh()
+
     def _tick(self):
         if not self.alive:
             return
+        if getattr(self, "train_page", None) is not None:
+            try:
+                self.train_page.poll()
+            except Exception as exc:
+                self.log(f"[WARN] [V3.81 train] 进度读取：{exc}")
         try:
             self._refresh()
         except Exception as exc:
@@ -1093,6 +1149,13 @@ class CameraLab:
         ttk.Button(r2, text="套用这一组", command=self.on_load_named).pack(side="left", padx=2)
         self.v_auto = self.tk.BooleanVar(value=True)
         ttk.Checkbutton(r2, text="设为连接时自动套用", variable=self.v_auto).pack(side="left", padx=6)
+        r3 = ttk.Frame(p)                                 # V3.81 PROFILE FILES: any folder, any file name
+        r3.pack(fill="x", pady=(2, 2))
+        ttk.Label(r3, text="参数文件").pack(side="left")
+        ttk.Button(r3, text="另存为文件…", command=self.on_save_file).pack(side="left", padx=2)
+        ttk.Button(r3, text="打开文件…", command=self.on_open_file).pack(side="left", padx=2)
+        ttk.Label(r3, text="（存到你选的文件夹、自己起文件名；打开后立即套用，勾选了上面的选项也会设为连接时自动套用）",
+                  foreground="#555").pack(side="left", padx=4)
         self.v_prof = self._var(self._prof_text())
         ttk.Label(p, textvariable=self.v_prof, justify="left", foreground="#335").pack(anchor="w", pady=(4, 0))
         ttk.Label(p, text="目标：工作区平均亮度 110–150、最亮 0.5 % 的像素 < 245（白色物体不过曝）、增益尽量低、"
@@ -1251,6 +1314,81 @@ class CameraLab:
         self.log(msg)
         if src is not None:
             self._run("应用相机参数", lambda: self._apply_now(self.prof))
+
+    def _current_profile_dict(self):
+        src = self._src()
+        ref = None
+        if src is not None and src.frames()[0] is not None:
+            ref = dict(roi_stats(src.frames()[0], self.st.get("roi")), roi=list(self.st.get("roi") or DEFAULT_ROI))
+        return dict(json.loads(json.dumps(self.prof)), locked=True, ref=ref, roi=list(self.st.get("roi") or DEFAULT_ROI))
+
+    def on_save_file(self, path=None):
+        """V3.81 PROFILE FILES: save-as dialog"""
+        try:
+            self._manual_colour()
+        except ValueError as exc:
+            self.log(f"[WARN] [V3.79 camera lab] {exc}")
+            return None
+        if path is None:
+            try:
+                from tkinter import filedialog
+                path = filedialog.asksaveasfilename(
+                    title="另存相机参数文件", defaultextension=".json", filetypes=[("相机参数", "*.json")],
+                    initialdir=self.st.get("profile_dir") or PROFILES_DIR,
+                    initialfile=safe_class(self.v_pname.get().strip() or "d435i_profile") + ".json")
+            except Exception:
+                path = None
+        if not path:
+            return None
+        d = self._current_profile_dict()
+        if self.v_pname.get().strip():
+            d["name"] = self.v_pname.get().strip()
+        else:
+            d.pop("name", None)
+        save_profile_file(path, d)
+        self.st["profile_dir"] = os.path.dirname(os.path.abspath(path))
+        self._save_st()
+        self.log(f"[OK] [V3.81 camera lab] 相机参数已另存 → {path}")
+        return path
+
+    def on_open_file(self, path=None):
+        """V3.81 PROFILE FILES: open dialog -> fields + camera (+ connect profile when ticked)"""
+        if path is None:
+            try:
+                from tkinter import filedialog
+                path = filedialog.askopenfilename(title="打开相机参数文件", filetypes=[("相机参数", "*.json")],
+                                                  initialdir=self.st.get("profile_dir") or PROFILES_DIR)
+            except Exception:
+                path = None
+        if not path:
+            return None
+        try:
+            d = load_profile_file(path)
+        except Exception as exc:
+            self.log(f"[FAIL] [V3.81 camera lab] 打不开 {path}：{exc}")
+            return None
+        self.st["profile_dir"] = os.path.dirname(os.path.abspath(path))
+        for k in ("color", "depth", "filters"):
+            self.prof[k].update(d.get(k) or {})
+        if d.get("roi"):
+            self.st["roi"] = list(d["roi"])
+        col = self.prof["color"]
+        self.v_exp.set(str(col["exposure"]))
+        self.v_gain.set(str(col["gain"]))
+        self.v_wb.set(str(col["white_balance"]))
+        self.v_pl.set(next((n for n, v in POWER_CHOICES if v == int(col.get("power_line_frequency", 1))), "50 Hz"))
+        self.v_pname.set(str(d.get("name") or ""))
+        msg = f"[OK] [V3.81 camera lab] 已打开 {path}：{profile_summary(d)}"
+        if self.v_auto.get():
+            B378.save_profile(dict(d, locked=True))
+            self.prof = B378.load_profile()
+            msg += "；设为连接时自动套用"
+        self.v_prof.set(f"已打开：{profile_summary(d)}\n" + self._prof_text())
+        self.log(msg)
+        self._save_st()
+        if self._src() is not None:
+            self._run("应用相机参数", lambda: self._apply_now(self.prof))
+        return d
 
     def on_load_named(self):
         name = self.v_pname.get().strip()

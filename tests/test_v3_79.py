@@ -66,8 +66,8 @@ cv2 = YP._cv2()
 
 # ------------------------------------------------------------------ N1
 for m in (CON, RR, YP, W49, L):
-    assert m.VERSION in ("V3.79", "V3.80"), (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.79", "V3.80")
+    assert m.VERSION in ("V3.79", "V3.80", "V3.81"), (m.__name__, m.VERSION)
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.79", "V3.80", "V3.81")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 for fn, h in (("NERO_V2_7_1_Unified_Backend.py", "5be2136f84ec4ccdfe6f8bc8d8998410ff9b3b827af4d571ea44373dc427527e"),
               ("NERO_V325_Camera.py", "013fc8c308092f863c7ccb1a37598c80536deed2cfbcef2b0daccc417da2806d"),
@@ -388,7 +388,7 @@ tab = types.SimpleNamespace(tk=mtk, ttk=mttk, cv=mock.MagicMock(), log=labs_log.
 lab = L.open_lab(tab)
 assert L.open_lab(tab) is lab
 texts = [c_.kwargs.get("text") for c_ in mttk.Notebook.return_value.add.call_args_list]
-assert texts == ["① 相机参数", "② 深度噪声", "③ 定位精度", "④ 采集标注"], texts
+assert texts[:4] == ["① 相机参数", "② 深度噪声", "③ 定位精度", "④ 采集标注"], texts   # V3.81 adds ⑤
 lab.v_root.set(str(TMP / "shots"))
 lab._add_class("egg")          # V3.80: the class list replaced the V3.79 prompt entry (intended)
 lab._add_class("cup")

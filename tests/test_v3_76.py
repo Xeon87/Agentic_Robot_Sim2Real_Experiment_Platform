@@ -76,8 +76,8 @@ except Exception:
 
 # ------------------------------------------------------------------ I1
 for m in (CON, RR, YP, W49, S, RT):
-    assert m.VERSION in ("V3.76", "V3.77", "V3.78", "V3.79", "V3.80") or m.__name__ == "NERO_V365_Real_Cup_Task", (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.76", "V3.77", "V3.78", "V3.79", "V3.80") and SC.SCENES_REV == "V3.76"
+    assert m.VERSION in ("V3.76", "V3.77", "V3.78", "V3.79", "V3.80", "V3.81") or m.__name__ == "NERO_V365_Real_Cup_Task", (m.__name__, m.VERSION)
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.76", "V3.77", "V3.78", "V3.79", "V3.80", "V3.81") and SC.SCENES_REV == "V3.76"
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 for fn, h in (("NERO_V2_7_1_Unified_Backend.py", "5be2136f84ec4ccdfe6f8bc8d8998410ff9b3b827af4d571ea44373dc427527e"),
               ("NERO_V2_7_1_Agent.py", "3e52d05ea84d94c8359d5875fa0fee8c2cc42d612b52e59109e1166912439696"),
