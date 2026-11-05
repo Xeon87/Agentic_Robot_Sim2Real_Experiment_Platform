@@ -52,9 +52,9 @@ import NERO_V378_D435i_Bench as B           # noqa: E402
 
 # ------------------------------------------------------------------ M1
 for m in (CON, RR, YP, W49):
-    assert m.VERSION in ("V3.78", "V3.79", "V3.80", "V3.81"), (m.__name__, m.VERSION)
+    assert m.VERSION in ("V3.78", "V3.79", "V3.80", "V3.81", "V3.82"), (m.__name__, m.VERSION)
 assert B.VERSION == "V3.78"
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.78", "V3.79", "V3.80", "V3.81")
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.78", "V3.79", "V3.80", "V3.81", "V3.82")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 for fn, h in (("NERO_V2_7_1_Unified_Backend.py", "5be2136f84ec4ccdfe6f8bc8d8998410ff9b3b827af4d571ea44373dc427527e"),
               ("NERO_V325_Camera.py", "013fc8c308092f863c7ccb1a37598c80536deed2cfbcef2b0daccc417da2806d"),

@@ -69,8 +69,8 @@ cv2 = YP._cv2()
 
 # ------------------------------------------------------------------ Q1
 for m in (CON, RR, YP, W49, L, T):
-    assert m.VERSION == "V3.81", (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "V3.81"
+    assert m.VERSION in ("V3.81", "V3.82"), (m.__name__, m.VERSION)
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.81", "V3.82")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 v325_hash = [l_ for l_ in (ROOT / "tests" / "test_v3_80.py").read_text(encoding="utf-8").splitlines()
              if "NERO_V325_Camera.py" in l_ and '", "' in l_]
@@ -312,7 +312,7 @@ assert pl["ok"] and pl["classes"] == ["blue_block", "red_block"] and "✓ 可以
 assert states["▶ 开始训练"] == "normal" and tp.v_name.get().startswith("blue_block_red_block_")
 tp.v_mode.set("full")
 tp._mode_changed()
-assert tp.v_epochs.get() == "80" and tp.v_batch.get() == "8"
+assert tp.v_epochs.get() == "80" and tp.v_batch.get() == "2"   # V3.82: 1280, batch 2 (intended)
 tp.v_mode.set("quick")
 tp._mode_changed()
 tp.v_epochs.set("4")

@@ -63,8 +63,8 @@ cv2 = YP._cv2()
 
 # ------------------------------------------------------------------ P1
 for m in (CON, RR, YP, W49, L):
-    assert m.VERSION in ("V3.80", "V3.81"), (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.80", "V3.81")
+    assert m.VERSION in ("V3.80", "V3.81", "V3.82"), (m.__name__, m.VERSION)
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.80", "V3.81", "V3.82")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 for fn, h in (("NERO_V2_7_1_Unified_Backend.py", "5be2136f84ec4ccdfe6f8bc8d8998410ff9b3b827af4d571ea44373dc427527e"),
               ("NERO_V326_Wrist_Camera.py", "6b5c5d683073e4252b82c1c703ad664173960a179947f9e72775bb9683697d0a")):
@@ -282,6 +282,7 @@ tab = types.SimpleNamespace(tk=mtk, ttk=mttk, cv=mock.MagicMock(), log=labs_log.
                             v_yconf=FakeVar(value="0.25"), _ui=uiq.append,
                             _grab_frames=lambda n: (rgb_lab, [np.full((720, 1280), 0.7, np.float32)] * n))
 lab = L.open_lab(tab)
+lab._ldet = tab.det_yolo      # V3.82: the lab labels with its own detector (intended)
 styles = [c_.kwargs.get("style") for c_ in mttk.Treeview.call_args_list]
 assert len(styles) >= 3 and all(s_ == "V345Calib.Treeview" for s_ in styles), styles
 

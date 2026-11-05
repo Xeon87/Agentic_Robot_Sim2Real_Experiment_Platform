@@ -31,11 +31,14 @@ import traceback
 import numpy as np
 
 HERE = os.path.dirname(os.path.realpath(__file__))
-VERSION = "V3.81"
+VERSION = "V3.82"
 MARKER = "V3.81 YOLOE TRAIN"
+MARKER_V382 = "V3.82 APPLY FINE-TUNED + 1280 TRAINING"
+# V3.82 APPLY FINE-TUNED + 1280 TRAINING: train at the size the Camera tab detects at (1280; small eggs keep their
+# pixels), batch sized for an 8 GB laptop GPU; the evaluation always runs at the Camera tab's size
 MODES = {
-    "quick": {"label": "快速（只训分类头，推荐）", "epochs": 40, "batch": 16, "imgsz": 640, "lr0": 1e-3},
-    "full": {"label": "完整精调（数据多时更准，较慢）", "epochs": 80, "batch": 8, "imgsz": 640, "lr0": 2e-4},
+    "quick": {"label": "快速（只训分类头，推荐）", "epochs": 40, "batch": 4, "imgsz": 1280, "lr0": 1e-3},
+    "full": {"label": "完整精调（数据多时更准，较慢）", "epochs": 80, "batch": 2, "imgsz": 1280, "lr0": 2e-4},
 }
 MIN_TRAIN_IMAGES = 20             # per class: below -> warning (best >= 100)
 MIN_VAL_OBJECTS = 5               # per class: below -> the verdict is unreliable
@@ -87,7 +90,8 @@ def scan(root):
             if not os.path.isfile(img):
                 continue
             out.append({"folder": fo, "stem": m.get("stem", fn[:-5]), "split": m.get("split", "train"),
-                        "reviewed": bool(m.get("reviewed")), "anns": m.get("anns", []), "image": img,
+                        "reviewed": bool(m.get("reviewed")), "image": img,
+                        "anns": [a for a in m.get("anns", []) if not a.get("candidate")],     # V3.82: confirmed only
                         "size": m.get("size")})
     return out
 
@@ -488,7 +492,8 @@ def run_job(job_path, api=None):
         names = getattr(ft, "names", None) or {i: c for i, c in enumerate(classes)}
 
         def pred_new(bgr):
-            r = ft.predict(bgr, conf=EVAL_LOW_CONF, imgsz=int(job["imgsz"]), verbose=False, device=device)
+            r = ft.predict(bgr, conf=EVAL_LOW_CONF, imgsz=int(job.get("eval_imgsz", job["imgsz"])), verbose=False,
+                           device=device)
             return result_to_preds(r[0], names)
         ev_new = eval_model(pred_new, manifest, classes, conf)
         emit(stage="eval", which="base")
@@ -496,12 +501,14 @@ def run_job(job_path, api=None):
         base.set_classes(list(classes))                    # original model = text prompts (as the Camera tab)
 
         def pred_base(bgr):
-            r = base.predict(bgr, conf=EVAL_LOW_CONF, imgsz=int(job["imgsz"]), verbose=False, device=device)
+            r = base.predict(bgr, conf=EVAL_LOW_CONF, imgsz=int(job.get("eval_imgsz", job["imgsz"])), verbose=False,
+                             device=device)
             return result_to_preds(r[0], {i: c for i, c in enumerate(classes)})
         ev_base = eval_model(pred_base, manifest, classes, conf)
         verdict = compare(ev_base, ev_new)
         res = {"version": VERSION, "best": best, "base": ev_base, "new": ev_new, "verdict": verdict,
-               "job": {k: job[k] for k in ("mode", "epochs", "batch", "imgsz", "classes", "conf", "base_model")}}
+               "job": dict({k: job[k] for k in ("mode", "epochs", "batch", "imgsz", "classes", "conf", "base_model")},
+                           eval_imgsz=job.get("eval_imgsz", job["imgsz"]))}
         with open(os.path.join(run, "eval.json"), "w", encoding="utf-8") as f:
             json.dump(res, f, ensure_ascii=False, indent=1)
         emit(stage="done", verdict=verdict["level"])
@@ -610,7 +617,7 @@ def find_unfinished(runs_root):
     return None
 
 
-def save_model(run_dir, name, note=""):
+def save_model(run_dir, name, note="", synonyms=None):
     """copy the trained model + its card into finetune_dir()/<name>/ -> folder"""
     with open(os.path.join(run_dir, "eval.json"), encoding="utf-8") as f:
         ev = json.load(f)
@@ -628,7 +635,8 @@ def save_model(run_dir, name, note=""):
             "mode": ev["job"]["mode"], "base_model": os.path.basename(ev["job"]["base_model"]),
             "created": time.strftime("%Y-%m-%d %H:%M:%S"), "verdict": ev["verdict"]["level"],
             "overall_base": ev["base"]["overall"], "overall_new": ev["new"]["overall"], "note": note,
-            "use": "fixed classes: never call set_classes on this model (V3.82 applies it to the Camera tab)"}
+            "synonyms": {c: list(v) for c, v in (synonyms or {}).items() if c in ev["job"]["classes"]},
+            "use": "fixed classes: never call set_classes on this model (NERO_V347 treats it like a -pf model)"}
     with open(os.path.join(dest, "model_card.json"), "w", encoding="utf-8") as f:
         json.dump(card, f, ensure_ascii=False, indent=1)
     return dest
@@ -641,9 +649,11 @@ def list_saved():
         for n in sorted(os.listdir(d)):
             try:
                 with open(os.path.join(d, n, "model_card.json"), encoding="utf-8") as f:
-                    out.append(json.load(f))
+                    c = json.load(f)
             except Exception:
-                pass
+                continue
+            if c.get("name") and c.get("file") and os.path.isfile(os.path.join(d, n, c["file"])):   # V3.82: valid only
+                out.append(c)
     return out
 
 
@@ -707,7 +717,8 @@ class TrainPage:
         for lab_t, var in (("轮数", self.v_epochs), ("批大小", self.v_batch), ("图像尺寸", self.v_imgsz)):
             ttk.Label(r3, text=lab_t).pack(side="left")
             ttk.Entry(r3, textvariable=var, width=5).pack(side="left", padx=(2, 10))
-        ttk.Label(r3, text="（一般不用改；显存不够时把批大小减半）", foreground="#555").pack(side="left")
+        ttk.Label(r3, text="（一般不用改；1280 = 和 Camera 页识别时一样，小物体更准；显存不够时把批大小减半）",
+                  foreground="#555").pack(side="left")
         r4 = ttk.Frame(f2)
         r4.pack(fill="x", pady=2)
         self.b_train = ttk.Button(r4, text="▶ 开始训练", command=self.on_train)
@@ -747,6 +758,26 @@ class TrainPage:
         self.b_discard.pack(side="left", padx=4)
         self.v_saved = lab._var("")
         ttk.Label(f4, textvariable=self.v_saved, justify="left", foreground="#335", wraplength=900).pack(anchor="w")
+        # V3.82 APPLY FINE-TUNED + 1280 TRAINING: saved models -> Camera tab (and so the real task)
+        f5 = ttk.LabelFrame(p, text="5 已保存的模型 → 用到 Camera 页和实机任务", padding=4)
+        f5.pack(fill="x", pady=(6, 0))
+        r6 = ttk.Frame(f5)
+        r6.pack(fill="x")
+        self.v_pick = lab._var("")
+        self.cb_saved = ttk.Combobox(r6, textvariable=self.v_pick, width=34, state="readonly",
+                                     postcommand=self._refresh_saved)
+        self.cb_saved.pack(side="left")
+        self.cb_saved.bind("<<ComboboxSelected>>", lambda _e: self._show_card())
+        ttk.Button(r6, text="应用到 Camera 页", command=self.on_apply_model).pack(side="left", padx=6)
+        ttk.Button(r6, text="恢复原模型", command=self.on_restore_model).pack(side="left")
+        self.v_card = lab._var("")
+        ttk.Label(f5, textvariable=self.v_card, justify="left", wraplength=900).pack(anchor="w")
+        self.v_active = lab._var("")
+        ttk.Label(f5, textvariable=self.v_active, justify="left", foreground="#335").pack(anchor="w")
+        ttk.Label(f5, text="应用后 Camera 页的模型下拉框会切到它，实机任务的识别用的就是 Camera 页的设置。精调模型只认训练过的类别；"
+                           "要找的物体不在里面时，会自动用原模型找（日志里看得到）。",
+                  foreground="#555", justify="left", wraplength=900).pack(anchor="w")
+        self._refresh_saved()
         self.refresh()
         j = find_unfinished(self.runs_root())
         if j is not None:
@@ -864,6 +895,7 @@ class TrainPage:
             return
         job = {"version": VERSION, "run_dir": run, "data": data, "manifest": os.path.join(run, "dataset", "manifest.json"),
                "base_model": base, "mode": mode, "epochs": ep, "batch": bs, "imgsz": sz, "lr0": MODES[mode]["lr0"],
+               "eval_imgsz": int(YP.IMGSZ),
                "classes": self.plan["classes"], "conf": conf, "patience": 15, "workers": 2}
         try:
             import NERO_V313_Real_Robot as RR
@@ -975,15 +1007,98 @@ class TrainPage:
         if self.result["verdict"]["level"] == "worse":
             self.log("[WARN] [V3.81 train] 评估显示变差了，仍按你的要求保存")
         try:
-            dest = save_model(self.job.run_dir, name)
+            dest = save_model(self.job.run_dir, name, synonyms=self._synonyms())
         except Exception as exc:
             self.log(f"[FAIL] [V3.81 train] 保存失败：{exc}")
             return
-        self.v_saved.set(f"已保存 → {dest}\n下一版（V3.82）可以在 Camera 页和实机任务里选用它；原模型不受影响。")
+        self.v_saved.set(f"已保存 → {dest}\n在下面「已保存的模型」里选它 →「应用到 Camera 页」，实机任务同时生效；原模型不受影响。")
+        self._refresh_saved(select=name)
         self.log(f"[OK] [V3.81 train] 模型已保存 → {dest}")
         discard_run(self.job.run_dir, self.runs_root())
         self.job, self.result = None, None
         self._buttons()
+
+    # ------------------------------------------------------------------ 5 (V3.82)
+    def _synonyms(self):
+        cp = self.lab.st.get("class_prompts") or {}
+        import NERO_V347_Yolo_Perception as YP
+        return {c: YP.parse_prompts(v) for c, v in cp.items()}
+
+    def _refresh_saved(self, select=None):
+        self.saved = list_saved()
+        names = [c["name"] for c in self.saved]
+        try:
+            self.cb_saved.configure(values=names)
+        except Exception:
+            pass
+        if select:
+            self.v_pick.set(select)
+        elif self.v_pick.get() not in names:
+            self.v_pick.set(names[-1] if names else "")
+        self._show_card()
+        self._show_active()
+
+    def _card(self):
+        return next((c for c in getattr(self, "saved", []) if c["name"] == self.v_pick.get()), None)
+
+    def _show_card(self):
+        c = self._card()
+        if not c:
+            self.v_card.set("还没有保存的模型" if not getattr(self, "saved", None) else "")
+            return
+        ob, on = c.get("overall_base") or {}, c.get("overall_new") or {}
+        self.v_card.set(f"类别 {', '.join(c['classes'])} · {MODES.get(c.get('mode'), {}).get('label', c.get('mode'))} · "
+                        f"{c.get('created')} · 识别率 {ob.get('recall')} → {on.get('recall')} % · mAP50 {ob.get('ap50')} → "
+                        f"{on.get('ap50')} · 结论 {dict(better='有实质提升', same='没有实质提升', worse='变差了').get(c.get('verdict'), '?')}")
+
+    def _model_ref(self, card):
+        """the Camera tab's model entry for a saved model: relative to its model folder when inside it, else absolute"""
+        path = os.path.join(finetune_dir(), safe_name(card["name"]), card["file"])
+        try:
+            root = os.path.abspath(os.path.expanduser(self.lab.tab.v_ydir.get()))
+            rel = os.path.relpath(path, root)
+            if not rel.startswith(".."):
+                return rel.replace(os.sep, "/")
+        except Exception:
+            pass
+        return path
+
+    def _set_tab_model(self, ref):
+        tab = self.lab.tab
+        tab.v_ymodel.set(ref)
+        cb = getattr(tab, "cb_ymodel", None)
+        if cb is not None:
+            try:
+                import NERO_V347_Yolo_Perception as YP
+                vals = list(YP.list_models(tab.v_ydir.get()))
+                cb.configure(values=vals + ([ref] if ref not in vals else []))
+            except Exception:
+                pass
+        self._show_active()
+
+    def _show_active(self):
+        try:
+            cur = self.lab.tab.v_ymodel.get()
+        except Exception:
+            cur = "?"
+        self.v_active.set(f"Camera 页现在用的模型：{cur}")
+
+    def on_apply_model(self):
+        c = self._card()
+        if not c:
+            self.log("[WARN] [V3.82 train] 先在列表里选一个保存的模型")
+            return
+        if c.get("verdict") == "worse":
+            self.log("[WARN] [V3.82 train] 这个模型评估时变差了，仍按你的选择应用")
+        ref = self._model_ref(c)
+        self._set_tab_model(ref)
+        self.log(f"[OK] [V3.82 train] Camera 页改用精调模型「{c['name']}」（{ref}，类别 {', '.join(c['classes'])}）；"
+                 "实机任务的识别同时生效；不认识的物体自动用原模型")
+
+    def on_restore_model(self):
+        import NERO_V347_Yolo_Perception as YP
+        self._set_tab_model(YP.DEFAULT_MODEL)
+        self.log(f"[OK] [V3.82 train] Camera 页恢复原模型 {YP.DEFAULT_MODEL}")
 
     def on_discard(self):
         if self.job is None or self.job.running():

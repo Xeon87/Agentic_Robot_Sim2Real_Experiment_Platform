@@ -33,7 +33,7 @@ import os
 import threading
 import time
 
-VERSION = "V3.81"
+VERSION = "V3.82"
 HERE = os.path.dirname(os.path.realpath(__file__))
 DEFAULT_MODEL_DIR = os.environ.get("NERO_YOLO_DIR") or os.path.expanduser("~/Downloads/objectmodels")
 DEFAULT_MODEL = "yoloe-26s-seg.pt"
@@ -82,7 +82,63 @@ def model_dirs(primary=None):
 
 def list_models(model_dir):
     d = os.path.abspath(os.path.expanduser(model_dir or DEFAULT_MODEL_DIR))
-    return sorted(os.path.basename(p) for p in glob.glob(os.path.join(d, "yoloe*.pt")))
+    out = sorted(os.path.basename(p) for p in glob.glob(os.path.join(d, "yoloe*.pt")))
+    # V3.82 FINE-TUNED MODELS: saved fine-tuned models (finetuned/<name>/<file> + model_card.json) after the originals
+    for card_p in sorted(glob.glob(os.path.join(d, FINETUNE_SUB, "*", "model_card.json"))):
+        try:
+            with open(card_p, encoding="utf-8") as f:
+                fn = json.load(f).get("file")
+        except Exception:
+            continue
+        if fn and os.path.isfile(os.path.join(os.path.dirname(card_p), fn)):
+            out.append("/".join((FINETUNE_SUB, os.path.basename(os.path.dirname(card_p)), fn)))
+    return out
+
+
+# V3.82 FINE-TUNED MODELS: a fine-tuned YOLOE keeps its trained classes in the weights -> it is used like a -pf model
+# (fixed vocabulary, never set_classes, results filtered by the object names); objects it was not trained on are
+# looked for with the original model it was trained from (routing in YoloEDetector.detect)
+FINETUNE_SUB = "finetuned"
+_CARD_CACHE = {}
+
+
+def finetune_card(model_path):
+    """model_card.json next to a fine-tuned model (V3.81 save_model) -> dict or None"""
+    if not model_path:
+        return None
+    p = os.path.join(os.path.dirname(os.path.abspath(model_path)), "model_card.json")
+    try:
+        st = os.stat(p)
+    except OSError:
+        return None
+    key = (p, st.st_mtime)
+    if key not in _CARD_CACHE:
+        try:
+            with open(p, encoding="utf-8") as f:
+                card = json.load(f)
+            _CARD_CACHE[key] = card if card.get("file") == os.path.basename(model_path) else None
+        except Exception:
+            _CARD_CACHE[key] = None
+    return _CARD_CACHE[key]
+
+
+def finetune_covers(card, prompt):
+    """is an object name one of the model's trained classes (or a synonym saved with them)?"""
+    syn = card.get("synonyms") or {}
+    for c in card.get("classes", []):
+        if match_object_name(c, [prompt]) or prompt in (syn.get(c) or []):
+            return True
+    return False
+
+
+def finetune_base_path(model_path, card):
+    """the original model the fine-tuned one was trained from (the model folder above finetuned/<name>/)"""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(model_path))))
+    for d in (root,) + tuple(model_dirs(None)):
+        p = os.path.join(d, card.get("base_model") or DEFAULT_MODEL)
+        if os.path.isfile(p):
+            return p
+    return None
 
 
 def find_model(model_dir, name=DEFAULT_MODEL):
@@ -119,7 +175,7 @@ def parse_prompts(text):
 def is_pf_model(model_path):
     """V3.48 GENERAL OBJECTS + PF VOCABULARY: prompt-free checkpoints (*-pf.pt) ship a built-in 4,585-name vocabulary
     (LVIS + Objects365 via LRPC) and must be run without set_classes() or visual_prompts."""
-    return "-pf" in os.path.basename(model_path or "").lower()
+    return "-pf" in os.path.basename(model_path or "").lower() or finetune_card(model_path) is not None  # V3.82
 
 
 def is_wildcard_prompt(prompts):
@@ -328,6 +384,43 @@ class YoloEDetector:
             self.info["pf_seen"] = seen
             if not is_wildcard_prompt(prompts):
                 dets = [d for d in dets if match_object_name(d["name"], prompts)]
+        card = finetune_card(model_path) if eff_mode == "pf" else None
+        if card is not None:                             # V3.82 FINE-TUNED MODELS: route untrained objects
+            for d in dets:
+                d["model"] = "finetuned"
+            dets = self._route_untrained(rgb, model_path, card, raw_prompts, dets, conf)
+        return dets
+
+    def _route_untrained(self, rgb, model_path, card, prompts, dets, conf):
+        """objects the fine-tuned model was not trained on -> the original model (text prompts); boxes that overlap a
+        fine-tuned detection are dropped"""
+        if is_wildcard_prompt(prompts):
+            return dets
+        rest = [p for p in prompts if not finetune_covers(card, p)]
+        self.info["routed"] = rest
+        if not rest:
+            return dets
+        base = finetune_base_path(model_path, card)
+        if not base:
+            if not getattr(self, "_route_warned", False):
+                self._route_warned = True
+                self.log(f"[WARN] [V3.82 yolo] 精调模型不认识 {rest}，也找不到它的原模型 {card.get('base_model')}")
+            return dets
+        if getattr(self, "_fallback", None) is None:
+            self._fallback = YoloEDetector(log=self.log)
+            self._fallback.device = self.device
+        extra = self._fallback.detect(rgb, "text", base, prompts=rest, conf=conf)
+
+        def iou(a, b):
+            ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+            iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+            u = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - ix * iy
+            return ix * iy / u if u > 0 else 0.0
+        for e in extra:
+            if not any(iou(e["box"], d["box"]) >= 0.5 for d in dets):
+                e["model"] = "original"
+                dets.append(e)
+        dets.sort(key=lambda d: -d["conf"])
         return dets
 
 

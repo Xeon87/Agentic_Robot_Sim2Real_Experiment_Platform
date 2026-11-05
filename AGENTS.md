@@ -1,7 +1,7 @@
-# NERO 项目开发与交接文档（V3.81 · Sim2Real 与自动寻优路线版）
+# NERO 项目开发与交接文档（V3.82 · Sim2Real 与自动寻优路线版）
 
 > 放在仓库根目录，命名为 `AGENTS.md`（Codex / 后续开发 Agent 会自动读取）。
-> 更新时间：2026-11-05。当前已交付最新版本：**V3.81**（仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`）。
+> 更新时间：2026-11-05。当前已交付最新版本：**V3.82**（仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`）。
 > 接手者请在做任何修改前通读本文件。本文件里“用户”指项目所有者 Jimmy。
 
 ## 0. 一句话现状
@@ -30,6 +30,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 - **V3.79（已交付）**：Camera 页「相机信息」→「保存相机信息」右边「相机高级测试」窗口（`NERO_V379_Camera_Lab.py`，用 Camera 页的相机线程 `run_on_device` / `collect_depth`）：① 相机参数（保存并锁定 → Camera 页每次连接自动套用，深度预设仍按 Camera 页）② 深度噪声 ③ 定位精度 ④ 采集 + YOLOE 自动标注 + 框级复核（`BoxEditor`，改框后 `recompute_outline`：YOLOE 轮廓裁到框内 → GrabCut → 框）；数据集 `<root>/classes.json` + `<类别>/images|labels/{train,val}` + `meta/` + `depth/`，每 5 张 1 张 val。V325 哈希因此更新（tests 61–79）。**没有在真实 D435i / YOLOE / Tk 上运行过**。下一版 V3.80：训练 / YOLOE 精调 + 量化评估（固定验证集 mAP、召回、3D 误差对比）+ 生成可在 Camera 页选用的模型。
 - **V3.80（已交付）**：相机高级测试 4 项改进（仍在 `NERO_V379_Camera_Lab.py`，标记 `V3.80 CAMERA LAB UPGRADE`）：① `autotune`（工作区 ROI、曝光 = 闪烁周期整数倍、亮部 p99.5 < 245、最低增益到平均 110–150；反差大时以白色物体不过曝为先）+ 命名参数组 `cameracalib/d435i_profiles/` + 连接时自动套用 + `lighting_check`（亮度变化 > 20 % 提示重调；V325 只多传 `src=self`）② 表格用 `CAM.treeview_style` + `noise_verdict`（D435 理论 z²·0.08/(f·B)、平整度、最佳处理与代价、换算到 750 mm）③ 任意物体（`locate_fn`：一般物体 `locate_objects` + 高度误差 / 蛋形 `locate`）④ 类别清单（无默认类别、勾选的全部标注、当前类别 = 子文件夹、每类建议 150 张）。**没有在真实硬件上运行过**。计划见 8.5 / 8.6。
 - **V3.81（已交付）**：相机参数文件另存 / 打开（`save_profile_file` / `load_profile_file`）；新模块 `NERO_V381_Yolo_Train.py` = 相机高级测试「⑤ 训练 / 评估」：`scan` / `class_table` / `plan_dataset`（默认只用已复核）/ `export_dataset`（`<root>/_runs/<run>/dataset`，硬链接 + 重映射标签 + data.yaml + manifest）→ 子进程 `job`（`YOLOEPESegTrainer`；快速 = `linear_probe_freeze` 只训 *cv3 分支最后一层，完整 = 不冻结；`progress.jsonl` 事件、`STOP` 文件停止、90 s 后强杀）→ `evaluate` / `compare`（自写匹配：同一份 val，原模型 set_classes(类别名) vs 新模型自带类别，识别率 / 精确率 / 误检每张 / AP50 / AP50-95 / 轮廓 IoU / ms，结论 better / same / worse + 验证集太小）→ `save_model` 到 `finetuned/<名>/`（模型 + `model_card.json`，**V3.82 才接入 Camera 页 / 实机**；精调模型绝不能再 `set_classes`）。V325 / 后端未改。测试用 `tests/v381_fake_yolo.py`（真实子进程 + 假 YOLOE）。**没有在真实 ultralytics / GPU 上训练过**。
+- **V3.82（已交付）**：精调模型接入（**只改 V347**：`list_models` 列出 `finetuned/<名>/<文件>`、`finetune_card` / `finetune_covers` / `finetune_base_path`、`is_pf_model` 对精调模型为真 → 固定类别不 `set_classes`、`YoloEDetector._route_untrained` 把精调模型不认识的物体交给原模型并去重叠框；V325 / V366 字节未变）+ ⑤ 第 5 步「应用到 Camera 页 / 恢复原模型」；标注辅助（`DEFAULT_SYNONYMS` / 每类提示词 `class_prompts`、`AUTO_CONF` 0.10 找框 + `ACCEPT_CONF` 0.30 确认，低分 = `candidate`（不进标签 / 训练 / 计数，双击 / 回车确认，复核时丢弃）、来源：文字 / 视觉样例 `vp_ref` / 精调模型、`merge_relabel` 重新标注、实验窗口自己的检测器 `_ldet`）；曝光（`roi_stats` 镜面亮斑 `spots` / `p995_ex` / `sat_large_pct`、`mean_lo` 可调、`autotune` 伽马、B378 `apply_profile` 支持 `gamma`）；训练 1280（批 4 / 2），评估按 `YP.IMGSZ`。**没有在真实硬件上运行过**。
 - **用户的 V4 准备清单（22 项，8 组；SmolVLA 接入前的准备）**：当前先做第四组（感知精度：YOLO 微调、D435i 深度处理与蛋中心换算、两路相机分工与跟踪）；顺序：第 0 步（照明 / 相机参数 / 精度测试）→ 深度 → 两路相机 → YOLO 微调（必须在相机参数固定后采图）。仿真 sort_items 不再细调抓取规则（V3.77 后结论：主要卡在仿真里 SO-101 的物理稳定性与 MoveIt 夹爪模型）。
 - **已和用户确认的后续路线（V3.79 起，原 V3.78 → V3.80 顺延，可能被 V4 准备清单替代）**：仿真页用“任务登记表”按场景固定提示词 / 快捷按钮 / 工具调试栏（A2 钩子事后调整，不动后端冻结部分）；**实机页做成真正通用**：通用识别（任务提取物体名 → YOLOE + 深度 → 物体 / 容器 / 颜色 / 尺寸 / 关系；**用户要求开启“把相机画面发给支持看图的 LLM”**辅助识别）+ 通用动作库（observe / pick / place_into / place_on / place_at / verify，仿真与实机共用，仿真 sort_items 改用它）+ 专用技能库（叠杯子等带技能卡，由 LLM 选择）+ 档位 ①②③ 在运动层统一实现（② 统一截断到悬停高度）。V3.78：通用识别 + 实机新外壳（只开 ①）+ 仿真登记表；V3.79：通用动作库 + 实机 ②；V3.80：实机 ③ + 检查 + LLM 选专用技能。叠杯子必须保持不退化（V3.65–V3.71 测试原样通过）。
 - **接下来的核心路线（V3.81 起，再顺延；先请用户在实机上按 ①→②→③ 复测叠杯子）**：遵循**“一套大脑、两套身体（仿真与实机除眼睛和手脚外 100% 通用）”**原则，将算法拆分为**“铁打的底层骨架 + 可拨动的控制旋钮（Control Knobs / Strategy Profile）”**，通过**带噪仿真自动寻优试验（DOE / 贝叶斯优化）**自动搜索各场景鲁棒最优参数包，并按 `纯视觉干跑 → 5 cm 悬停预演 → 实机柔顺抓放` 稳步完成真机迁移。
@@ -122,7 +123,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 | `NERO_V315_Consistency_Safety.py` | URDF/FK/IK（`CS.fk`、`CS.ik_tool`）、一致性和 3D 安全围栏路径检查 |
 | `NERO_V316_Safety_Editor.py` | 安全区（fence 多边形 + `z_table`）可视化编辑器 |
 | `NERO_V325_Camera.py` | **Camera 调试 Tab**：主从相机双 `560×315` 16:9 实时监视画布、主相机手眼标定（V3.55 雅可比快速采样 + PnP/深度统一 + LOO 剔除）、4 姿态碰点 TCP 标定、腕部内参标定子页、腕部 Eye-in-Hand 标定子页、视觉定位与悬停预演子页 |
-| `NERO_V347_Yolo_Perception.py` | **实机主相机感知模块**：YOLOE-26 视觉/文字提示 + 无提示 PF 多类别检测、ROI 快速局部桌面拟合、`SilhouetteFit`、3D 椭球轮廓定位 |
+| `NERO_V347_Yolo_Perception.py` | **实机主相机感知模块**（V3.82：精调模型 = 固定类别 + 不认识的物体交给原模型）：YOLOE-26 视觉/文字提示 + 无提示 PF 多类别检测、ROI 快速局部桌面拟合、`SilhouetteFit`、3D 椭球轮廓定位 |
 | `NERO_V349_Real_Wrist_Camera.py` | **实机腕部相机模块（V3.49–V3.58）**：UVC 相机枚举与曝光/白平衡/对焦锁定、ChArUco/棋盘格检测与运动学锚定内参标定（`calibrate_intrinsics`）、24 角点 ChArUco 6-DoF 检测（`detect_charuco_pose`）、自适应四象限大倾角内参采样规划（`plan_intr_auto_targets`）、带杆臂约束与 2D 尺度自标定的 Eye-in-Hand 求解器（`calibrate_eye_in_hand`）、粗到精闭环（`wrist_refine_target`）、零先验蛋托识别（`locate_egg_holder`） |
 | `NERO_V359_Strategy.py` | **技能参数中心（V3.59–V3.60）**：`KNOB_SPECS` 45 项（每项 `wired` = `sim_env` 6 / `real` 8 / `none` 31）、`StrategyProfile`（skill_id + `short_name` + 两字母 `code` + `skill_card` + `knobs`）、内置技能 EB/DP/HD/QH、与后端等价的公式（`score_grasp_candidate`、`compute_gripper_prior`、手腕评分、`order_empty_slots`、`rank_detected_targets`）、`strategy_sim_env`（只注入与基准不同的 6 个环境变量）、多点悬停预演规划 / 执行、`SkillStrategyTabUI`（控制台 real 模式 / 仿真窗口 sim 模式）、`add_sim_strategy_tab` |
 | `NERO_V362_Cup_Skills.py` | **叠杯子 Agent 技能（V3.62）**：`CupSkills`（observe_scene / plan_cup_stack / pick_cup / place_cup_into / verify_stack / return_to_safe_pose）、`plan_cup_stack`（捏杯沿方位 + 同一翻转 + 严格 IK，余量 < 4° 拒绝）、`pinch_frame/pinch_tcp`（沿杯壁倾斜 8.2°、夹紧中心 TCP y +2 mm）、`BackendIO`（后端 skill_core + 共享变量）、`TwinIO`（官方指垫 + 后端夹爪逻辑的 MuJoCo 替身，不含机械臂）、`run_cup_task`（Agent 循环 + `[V3.62 SKILL SCORE]`）、`gui_run_task`（后端 A2 块入口）、`twin_study`（`--study`） |
@@ -131,7 +132,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 | `NERO_V365_Real_Cup_Task.py` | **NERO实机任务（V3.65）**：`RealIO`（CupSkills 的实机 IO：FastArm TCP、连续 IK 直线段 / 关节线性插值 → 关节路径执行、D435i 杯子感知（桌面 z 平移 + 围栏工作区）、STS3215 夹爪换算）、`run_plan_preview` / `run_hover` / `run_execute`、`PipelineArm`、`camera_from_tab`、`RealCupTaskTabUI` |
 | `NERO_V366_Real_Cup_Yolo.py` | **实机杯子识别（V3.66）**：`yolo_cfg_from_tab`（Camera 页 YOLOE 设置，文字提示 / -pf 选择同 `_resolve_object_query`）、`perceive_cups_yolo`（detect → fuse_depth → locate_objects → 每个实例轮廓：锥面杯轴、轮廓顶边杯高 `silhouette_height`、`classify` 单杯 / 已叠好、lifted / outside / edge、重复框合并）、`summary` |
 | `NERO_V372_Sort_Skills.py` | **分类场景 Agent 技能（V3.72）**：`SortSkills`（继承 `CupSkills` 的运动 / 安全 / 夹爪档案）、`SortTwinIO` / `SortBackendIO`、`SORT_TOOLS` / `SORT_SYSTEM_INSTRUCTIONS`、`run_sort_task`（Agent 循环 + `[V3.72 SKILL SCORE]` + `[V3.72 SORT RESULT]`）、`gui_run_task`（后端 A2 钩子入口）、`twin_episode`（`--twin`） |
-| `NERO_V381_Yolo_Train.py` | **YOLOE 精调与评估（V3.81）**：`scan` / `class_table` / `plan_dataset` / `export_dataset`、`linear_probe_freeze`、`evaluate` / `compare`、`run_job`（子进程：训练 → 原 / 新模型评估 → `eval.json`）、`TrainJob`（启动 / 进度 / 停止 / `pid_alive`）、`find_unfinished`、`save_model` / `list_saved` / `discard_run`、`TrainPage`（相机高级测试 ⑤） |
+| `NERO_V381_Yolo_Train.py` | **YOLOE 精调与评估（V3.81 / V3.82）**：V3.82 加 `TrainPage` 第 5 步（应用 / 恢复模型）、1280 训练；`scan` / `class_table` / `plan_dataset` / `export_dataset`、`linear_probe_freeze`、`evaluate` / `compare`、`run_job`（子进程：训练 → 原 / 新模型评估 → `eval.json`）、`TrainJob`（启动 / 进度 / 停止 / `pid_alive`）、`find_unfinished`、`save_model` / `list_saved` / `discard_run`、`TrainPage`（相机高级测试 ⑤） |
 | `NERO_V379_Camera_Lab.py` | **相机高级测试（V3.79 / V3.80）**：V3.80 加 `autotune` / `roi_stats` / `judge_brightness` / `save_named` / `activate_named` / `lighting_check` / `noise_verdict` / `locate_fn` / `accuracy_verdict` / `Dataset.class_counts`；`apply_saved_profile`、`Dataset`（类别子文件夹 + YOLO 分割标签 + meta）、`dets_to_anns`、`BoxEditor`、`recompute_outline` / `grabcut_poly` / `clip_poly`、`measure_noise`、`accuracy_trials`、`CameraLab` 窗口（4 页）、`open_lab` |
 | `NERO_V378_D435i_Bench.py` | **D435i 单机工具（V3.78）**：`load/save/apply_profile`（`NERO_CALIB_DIR/d435i_profile.json`）、`FilterChain`（空间 / 时间 / 补洞）、`median_stack`、`noise_report`、`board_pose` / `inner_corners` / `T_bench_cam_from_pose`（ChArUco 板 = 坐标系，z 朝上）、`accuracy_row` / `summarize` / `write_results`、交互模式 `profile` / `noise` / `accuracy` / `capture` |
 | `NERO_V377_Stale_Procs.py` | **残余进程检查（V3.77）**：`classify`（按 argv 认 ROS / MoveIt / RViz / 实机驱动 / 任何文件夹的 `NERO_*.py`，不认控制台和编辑器）、`stale_procs`、`stop_procs`（INT→TERM→KILL，进程组）、`--list` / `--stop`（启动脚本用） |
@@ -161,7 +162,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
    - **痛点 B（画面下沿黑色夹爪阴影与塑封膜反光拉偏角点）**：**V3.58 方案**：开启 `CORNER_REFINE_SUBPIX` + `tryRefineMarkers`，并通过**干净子集去畸变 + 平面 RANSAC 单应性检验（`_clean_outlier_corners`）**自动剥离每张图里偏离 `> 1.15 px` 的 1–3 个孤立反光/夹爪遮挡坏角点（保留其余干净角点），而对 `>= 4` 个坏角点的运动模糊帧则整张剔除。
    - **痛点 C（起点偏左导致采样集中在左侧 + 纸面微翘）**：**V3.58 方案**：`plan_intr_auto_targets` 读取起点标定板实际位置 `s0_board["center_frac"]` 作为最远点采样种子，将四向及对角倾视基线提升至 `18°–28°`；`calibrate_eye_in_hand` 将 2D 深度比例因子 `alpha_z` 拓宽至 `[0.12, 1.85]`（以 `axy=1.0` 起算），并在自动采集达标后**一键同步保存 `wrist_intrinsics.json` 与 `wrist_handeye_calib.json`**。
 
-## 7. 版本简史（V3.43 – V3.81）
+## 7. 版本简史（V3.43 – V3.82）
 
 | 版本 | 核心改动内容 |
 | :--- | :--- |
@@ -185,6 +186,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 | **V3.62** | 叠杯子 Agent 技能（填 API key + 输入任务即可在仿真里叠杯子）；后端 RUN TASK A2 块加 `stack_cups` 分支；杯子原点改杯口中心 + 卷边硬接触 + 与质量无关的杯子接触；第 ⑥ 组 11 旋钮 `[仿真技能✓]`；修正 V3.61 抓放翻转不一致；替身试验 16/16 |
 | **V3.63** | 修复叠杯子放置 J7 越限急停（联合规划 + 逐点轨迹检查 + 先转腕再平移 + 急停即停解锁重试 + 不做小修正）；固定主相机 D435i 杯子感知（相机进程分支）；替身带 URDF 运动学与相机渲染；试验 20/20（相机 4/4） |
 | **V3.64** | 新场景 `stack_cups_so101`（SO-101 夹爪 + 7 mm 转接环 + 偏转 45°，后端不变）；夹爪档案（抓取坐标系、固定指在外、沿杯壁下探、抬起 / 搬运后摆正等待、低位松手 + 松手后外移）；通用：全角度回退、搬运优先规划关节解、关节停稳等待；SO-101 替身试验 |
+| **V3.82** | 精调模型应用到 Camera 页 / 实机（V347 固定类别 + 不认识的物体交给原模型）；标注辅助（同义提示词、低分候选一键确认、视觉样例、精调模型重新标注）；镜面亮斑 / 亮度下限 / 伽马；训练 1280 |
 | **V3.81** | 相机参数文件另存 / 打开；「⑤ 训练 / 评估」：数据检查 → 一键 YOLOE 精调（快速 / 完整）→ 原 vs 新模型同一验证集评估与结论 → 保存模型 |
 | **V3.80** | 相机高级测试：一键调参 + 命名参数组 + 连接后光照检查；噪声结论；任意物体定位精度；类别清单采集 |
 | **V3.79** | Camera 页「相机高级测试」窗口：相机参数锁定并自动套用、深度噪声、定位精度、任意物体采集 + 自动标注 + 框级复核 |
@@ -293,19 +295,19 @@ ightarrow$ `回起点姿态`，方便在夹爪未就绪时完整验证视觉定�
 
 用户的 V4 准备清单（22 项、8 组，原文要点）与当前状态：
 
-| 组 | 项目 | 状态（V3.80） |
+| 组 | 项目 | 状态（V3.82） |
 | :--- | :--- | :--- |
 | 一 安全和硬件 | 1 急停 / 关节限位 / 工作空间边界 / 速度加速度上限 / 跟踪误差停止；2 SO-101 夹爪（开合、电流上限、位置 + 负载判断抓到）；3 统一机器人模型（新夹爪 TCP 与外形同一份 URDF → cuRobo 碰撞球 / MoveIt / MuJoCo） | 1 部分（围栏、限位、`ARM_NOT_AT_GOAL`、速度档）；2 部分（V3.65 STS3215 位置 + 扭矩上限，无力闭环）；3 未做（MoveIt 仍是原装夹爪，V3.75） |
-| 二 感知地基 | 4 照明和相机参数（漫射光、关自动曝光 / 白平衡、防闪烁，之后采图以此为准）；5 腕部 130° 内参（鱼眼 / 高阶畸变）；6 两路手眼标定 + TCP 到检测点实测偏差；7 桌面和蛋托位姿 | 4 V3.78–V3.80 工具已就绪（一键调参 + 参数组），待用户实测锁定；5、6 V3.58 已有，需按“实测偏差”验收；7 未做 |
+| 二 感知地基 | 4 照明和相机参数（漫射光、关自动曝光 / 白平衡、防闪烁，之后采图以此为准）；5 腕部 130° 内参（鱼眼 / 高阶畸变）；6 两路手眼标定 + TCP 到检测点实测偏差；7 桌面和蛋托位姿 | 4 V3.78–V3.82 工具已就绪（一键调参 + 参数组 + 参数文件 + 镜面亮斑 / 伽马）；用户车库实测：平均亮度 < 110 且鸡蛋过曝 ≥ 2 % → 结论是光太硬（点光源 + 暗环境），建议加柔光 / 深色哑光垫，待用户实测锁定；5、6 V3.58 已有，需按“实测偏差”验收；7 未做 |
 | 三 评测基线 | 8 统一记录（图像、关节、规划、agent 决策）+ 固定条件 20–30 次，按检测 / 规划 / 抓取 / 放置分别统计 | 部分（V3.68 `task/` 记录）；统计未做 |
-| 四 感知精度 | 9 微调 YOLO（第 4 步之后采图）；10 D435i 深度滤波 + 多帧平均 + 表面 → 蛋中心；11 两路相机分工 + 多帧跟踪 + 抓取前重检 | 9 采集标注 V3.79–V3.80 ✓、训练评估 V3.81 ✓（待真机训练验证）、应用到实机 V3.82；10 测量工具 ✓，接入 Camera 页 V3.83；11 V3.84 |
+| 四 感知精度 | 9 微调 YOLO（第 4 步之后采图）；10 D435i 深度滤波 + 多帧平均 + 表面 → 蛋中心；11 两路相机分工 + 多帧跟踪 + 抓取前重检 | 9 采集标注 V3.79–V3.80 ✓、训练评估 V3.81 ✓、应用到实机 + 标注辅助 V3.82 ✓（均待真机验证）；10 测量工具 ✓，接入 Camera 页 V3.83；11 V3.84 |
 | 五 规划成功率 | 12 IK 统一 cuRobo、MoveIt 只校验；13 放开绕竖直轴旋转 + 多候选抓取姿态；14 碰撞 padding、抓取段关夹爪-目标碰撞、当前构型作 IK 种子；15 标准化预抓取位（也是 V4 交接位） | 未做（叠杯子 / 分类技能里已有部分：多候选、当前构型起算） |
 | 六 动作流畅度 | 16 按轨迹时间参数执行（MuJoCo + 真机）；17 合并分段减少停顿 | 未做 |
 | 七 agent 鲁棒性 | 18 每步用感知验证；19 每个技能的失败恢复（重试 / 换姿态 / 放弃）；20 LLM 只能从技能表选、结构化输出、记录每次决策 | 部分（叠杯子 verify / recover、工具契约） |
 | 八 V4 准备 | 21 MuJoCo 相机内参和安装位置与真机一致；22 结合 store_in_safe 把大技能拆成原语 | 未做 |
 
 近期版本（每版先交付可在真机 / 实物上验证的东西；顺序可由用户调整）：
-- **V3.82 精调模型应用到实机（第 9 项收尾，2026-11-05 与用户确认分两版）**：Camera 页模型下拉框列出 `finetuned/` 里保存的模型（读 `model_card.json`）；精调模型按“固定类别”使用（V347 `YoloEDetector` 对它不调用 `set_classes`，按模型自带类别 + 物体名筛选，类似 -pf）；按物体名自动选模型（不在精调模型类别里的物体自动用原模型）；实机任务（V366 `yolo_cfg_from_tab`）随 Camera 页生效；一键切回原模型；会改 V347 / V325，需更新哈希校验与测试。
+- **（已交付 V3.82）精调模型应用到实机（第 9 项收尾）+ 标注辅助 + 曝光改进（2026-11-05 用户要求并入）**：Camera 页模型下拉框列出 `finetuned/` 里保存的模型（读 `model_card.json`）；精调模型按“固定类别”使用（V347 `YoloEDetector` 对它不调用 `set_classes`，按模型自带类别 + 物体名筛选，类似 -pf）；按物体名自动选模型（不在精调模型类别里的物体自动用原模型）；实机任务（V366 `yolo_cfg_from_tab`）随 Camera 页生效；一键切回原模型；会改 V347 / V325，需更新哈希校验与测试。
 - **（已交付 V3.81）训练与评估（第 9 项）**：相机高级测试新页「⑤ 训练 / 评估」——从 V3.79 数据集生成 data.yaml（每类子文件夹 → 全局类别号，val 固定不参与训练）；YOLOE-26 精调（ultralytics 8.4 的 YOLOE 训练器，先在用户电脑上用一条命令确认类名 / 参数；子进程 + `clean_child_env`，进度和日志回到界面，训练时提示停掉 Camera 页实时识别）；评估：同一份 val 上原模型 vs 新模型的 mAP50 / mAP50-95（框 + 轮廓）、精确率、召回、每帧 ms，再用 ③ 定位精度比 3D 误差；结果 `metrics.json` + 对比表；模型存 `~/Downloads/objectmodels/finetuned/<名字>/`，Camera 页模型下拉框可选，原模型保留（精调模型只认训练过的类别）。
 - **V3.83 深度处理接入（第 10 项）**：Camera 页定位可选“滤波 + N 帧中值”（按 ② 的建议，静止物体抓取前用）；蛋表面 → 蛋中心的换算按 ③ 的实测误差校正并验收。
 - **V3.84 两路相机分工 + 跟踪（第 11 项）**：固定相机三维定位、腕部相机最后对准；多帧跟踪平滑（同一物体 ID、位置滤波）；抓取前在预抓取位重检一次，偏差超限就重新规划。

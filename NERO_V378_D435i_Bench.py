@@ -104,7 +104,7 @@ def apply_profile(device, prof, rs, log=print):
     rows = []
     sens = _sensors(device, rs)
     order = {"color": ["enable_auto_exposure", "enable_auto_white_balance", "exposure", "gain", "white_balance",
-                       "power_line_frequency"],
+                       "power_line_frequency", "gamma"],                 # V3.82 GAMMA (only when the profile has it)
              "depth": ["visual_preset", "enable_auto_exposure", "laser_power"]}
     for sk, keys in order.items():
         s = sens.get(sk)
@@ -143,7 +143,7 @@ def read_back(device, rs):
     for sk, s in _sensors(device, rs).items():
         out[sk] = {}
         for k in ("enable_auto_exposure", "exposure", "gain", "enable_auto_white_balance", "white_balance",
-                  "power_line_frequency", "laser_power", "visual_preset"):
+                  "power_line_frequency", "laser_power", "visual_preset", "gamma"):
             opt = getattr(rs.option, k, None)
             try:
                 if opt is not None and s.supports(opt):

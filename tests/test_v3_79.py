@@ -66,8 +66,8 @@ cv2 = YP._cv2()
 
 # ------------------------------------------------------------------ N1
 for m in (CON, RR, YP, W49, L):
-    assert m.VERSION in ("V3.79", "V3.80", "V3.81"), (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.79", "V3.80", "V3.81")
+    assert m.VERSION in ("V3.79", "V3.80", "V3.81", "V3.82"), (m.__name__, m.VERSION)
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.79", "V3.80", "V3.81", "V3.82")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 for fn, h in (("NERO_V2_7_1_Unified_Backend.py", "5be2136f84ec4ccdfe6f8bc8d8998410ff9b3b827af4d571ea44373dc427527e"),
               ("NERO_V325_Camera.py", "013fc8c308092f863c7ccb1a37598c80536deed2cfbcef2b0daccc417da2806d"),
@@ -386,6 +386,7 @@ tab = types.SimpleNamespace(tk=mtk, ttk=mttk, cv=mock.MagicMock(), log=labs_log.
                             v_yconf=FakeVar(value="0.25"), _ui=uiq.append,
                             _grab_frames=lambda n: (rgb_lab, [np.full((720, 1280), 0.7, np.float32)] * n))
 lab = L.open_lab(tab)
+lab._ldet = tab.det_yolo      # V3.82: the lab labels with its own detector (intended)
 assert L.open_lab(tab) is lab
 texts = [c_.kwargs.get("text") for c_ in mttk.Notebook.return_value.add.call_args_list]
 assert texts[:4] == ["① 相机参数", "② 深度噪声", "③ 定位精度", "④ 采集标注"], texts   # V3.81 adds ⑤
