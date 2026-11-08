@@ -125,11 +125,12 @@ v376_stop(){                      # v376_stop <label> <pid> [group]  (group=1: s
 cleanup(){
   set +e
   status INFO "Shutdown: stopping NERO processes (V3.76 timed stop: INT -> TERM -> KILL)"
-  v376_stop "TRAC MoveIt" "$TRAC_MOVEIT_PID" 1 &
-  v376_stop "BioIK MoveIt + RViz" "$BIO_MOVEIT_PID" 1 &
-  v376_stop "backend (MuJoCo + GUI)" "$BACKEND_PID" 0 &
-  v376_stop "cuRobo GPU server" "$GPU_PID" 0 &
-  wait
+  local w1 w2 w3 w4
+  v376_stop "TRAC MoveIt" "$TRAC_MOVEIT_PID" 1 & w1=$!
+  v376_stop "BioIK MoveIt + RViz" "$BIO_MOVEIT_PID" 1 & w2=$!
+  v376_stop "backend (MuJoCo + GUI)" "$BACKEND_PID" 0 & w3=$!
+  v376_stop "cuRobo GPU server" "$GPU_PID" 0 & w4=$!
+  wait "$w1" "$w2" "$w3" "$w4" 2>/dev/null     # only these four (a bare wait also waits for the log tee -> hang)
   restore_kinematics
   status INFO "V3.76 stop complete"
 }
@@ -147,7 +148,7 @@ echo "============================================================"
 # ============================================================
 # 1. PREFLIGHT — files, integrity, compile
 # ============================================================
-for f in "$BACKEND" "$AGENT" "$CORE" "$CLIENT" "$GPU_SERVER" "$CAMERA" "$WRIST" "$FIXED331" "$SCENES343" "$HERE/SHA256SUMS.txt"; do
+for f in "$BACKEND" "$AGENT" "$CORE" "$CLIENT" "$GPU_SERVER" "$CAMERA" "$WRIST" "$FIXED331" "$SCENES343" "$HERE/NERO_V377_Stale_Procs.py" "$HERE/SHA256SUMS.txt"; do
   [[ -f "$f" ]] || fatal "NERO file missing from this folder: $f"
 done
 for f in "$ROS_SETUP" "$AGX_SETUP" "$VENV_ACTIVATE" "$MODEL_FILE"; do
@@ -202,32 +203,10 @@ status INFO "V3.44 MuJoCo scene: $SCENE344 (chosen in the NERO console before st
 # ============================================================
 # Match by argv[0] (and the script argv for python/ros2 launch) only, so an
 # editor or `tail -f` that merely mentions a NERO file name is never killed.
-list_stale(){ python3 - "$$" <<'PYSTALE'
-import os, sys
-me = {int(sys.argv[1]), os.getpid(), os.getppid()}
-bins = {"ros2_control_node", "move_group", "spawner", "rviz2", "robot_state_publisher"}
-scripts = {"NERO_V2_7_1_Unified_Backend.py", "NERO_GPU_Planner_Server.py", "spawner"}
-for d in os.listdir("/proc"):
-    if not d.isdigit() or int(d) in me:
-        continue
-    try:
-        argv = [a.decode(errors="replace") for a in open(f"/proc/{d}/cmdline", "rb").read().split(b"\0") if a]
-    except Exception:
-        continue
-    if not argv:
-        continue
-    b0 = os.path.basename(argv[0])
-    hit = b0 in bins
-    if not hit and b0.startswith("python"):
-        rest = [os.path.basename(a) for a in argv[1:3] if not a.startswith("-")]
-        hit = any(r in scripts for r in rest) or (
-            len(argv) >= 4 and os.path.basename(argv[1]) == "ros2" and argv[2] == "launch" and argv[3] == "agx_arm_moveit")
-    if not hit and b0 == "ros2" and argv[1:3] == ["launch", "agx_arm_moveit"]:
-        hit = True
-    if hit:
-        print(d, " ".join(argv)[:200])
-PYSTALE
-}
+# V3.77 STALE PROCESS CHECK: the same detector as the console (NERO_V377_Stale_Procs.py) - also `ros2 launch
+# agx_arm_ctrl` (real driver), any other NERO_*.py script (e.g. a backend from another release folder) and python-
+# launched ros2 launches; the console (NERO_V312_Console.py) and this launcher are never matched
+list_stale(){ python3 "$HERE/NERO_V377_Stale_Procs.py" --list "$$" "$PPID"; }
 STALE="$(list_stale)"
 if [[ -n "$STALE" ]]; then
   status WARN "V3.07 stale processes from a previous run:"
@@ -235,15 +214,9 @@ if [[ -n "$STALE" ]]; then
   if [[ "${NERO_V307_PRELAUNCH_CLEANUP:-1}" == "0" ]]; then
     fatal "Stale ROS/NERO processes present and NERO_V307_PRELAUNCH_CLEANUP=0; stop them manually"
   fi
-  PIDS="$(echo "$STALE" | awk '{print $1}')"
-  kill $PIDS 2>/dev/null || true
-  for _ in $(seq 1 20); do [[ -z "$(list_stale)" ]] && break; sleep 0.25; done
-  LEFT="$(list_stale)"
-  if [[ -n "$LEFT" ]]; then
-    status WARN "V3.07 SIGKILL for processes that ignored SIGTERM"
-    kill -9 $(echo "$LEFT" | awk '{print $1}') 2>/dev/null || true
-    sleep 0.5
-  fi
+  # V3.77: INT -> TERM -> KILL (process groups of ros2 launch / rviz included), each step <= 2.5 s
+  python3 "$HERE/NERO_V377_Stale_Procs.py" --stop "$$" "$PPID" | tee -a "$STATUS_LOG"
+  sleep 0.3
   [[ -z "$(list_stale)" ]] || fatal "V3.07 could not stop stale processes: $(list_stale | tr '\n' ';')"
   V307_RESTART_DAEMON=1
   status OK "V3.07 stale processes stopped"

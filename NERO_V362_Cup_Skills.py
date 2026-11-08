@@ -523,8 +523,18 @@ def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, lo
     else:
         over = lambda: bool(t_end and time.time() > t_end and best is not None
                             and best["key"][2] >= MIN_MARGIN_RELAXED_DEG)
-    for phi in _angle_order(math.degrees(base_dir(s_rim)) + float(knobs["cup_grasp_rim_angle_deg"]),
-                            step=step, span=180 if _wide else 45):
+    g_angles = _angle_order(math.degrees(base_dir(s_rim)) + float(knobs["cup_grasp_rim_angle_deg"]),
+                            step=step, span=180 if _wide else 45)
+    p_angles = _angle_order(math.degrees(base_dir(d_rim)) + float(knobs["cup_place_rim_angle_deg"]),
+                            step=step, span=180 if _wide else 90)
+    if not _wide and getattr(profile, "name", "") == "so101":
+        for a_ in _angle_order(math.degrees(base_dir(s_rim)) - 30.0, step=15, span=30):
+            if all(abs(a_ - b_) > 1e-4 for b_ in g_angles):
+                g_angles.append(a_)
+        for a_ in _angle_order(math.degrees(base_dir(d_rim)) - 35.0, step=15, span=45):
+            if all(abs(a_ - b_) > 1e-4 for b_ in p_angles):
+                p_angles.append(a_)
+    for phi in g_angles:
         if over():
             break
         for flip in (profile or OFFICIAL_PROFILE).flips:
@@ -540,8 +550,7 @@ def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, lo
                 grasp_found = True
                 bg = {"phi": phi, "flip": flip, "r": r, "tcp": p, "R": R}
                 lift_tcp = p + [0, 0, dz_lift]
-                for phi_p in _angle_order(math.degrees(base_dir(d_rim)) + float(knobs["cup_place_rim_angle_deg"]),
-                                          step=step, span=180 if _wide else 90):
+                for phi_p in p_angles:
                     if over():
                         break
                     p1, R1 = pinch_tcp(rim_lift, phi_p, depth, flip, tilt, profile)
@@ -598,6 +607,7 @@ def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, lo
            ("release", best_p["tcp_release"], best_p["R"]), ("retreat", best_p["tcp_release"] + [0, 0, 0.08], best_p["R"])]
     margin = min(best_g["r"]["min_margin_deg"], best_p["r"]["min_margin_deg"])
     out = {"ok": True, "flip": bool(flip),
+           "grasp_phi_rad": float(best_g["phi"]), "place_phi_rad": float(best_p["phi"]),
            "grasp_rim_angle_rel_deg": round((math.degrees(best_g["phi"] - base_dir(s_rim)) + 180) % 360 - 180, 1),
            "place_rim_angle_rel_deg": round((math.degrees(best_p["phi"] - base_dir(d_rim)) + 180) % 360 - 180, 1),
            "grasp_margin_deg": best_g["r"]["min_margin_deg"], "grasp_binding": best_g["r"]["binding"],
@@ -1144,6 +1154,7 @@ class BackendIO:
         return [[float(pt.positions[i]) for i in idx] for pt in jt.points]
 
     def _exec(self, label, traj, slow, s0):
+        t0 = time.time()
         try:
             if slow and self.c.get("slow") is not None:
                 self.c["slow"](traj, factor=float(slow))
@@ -1151,10 +1162,46 @@ class BackendIO:
             return None
         except Exception as exc:
             m = str(exc)
-            return {"ok": False, "label": label, "error": m[:300], "tcp_error_mm": None,
-                    "safety": int(self.sh["safety_trip_count"].value) != s0 or any(
-                        k in m for k in ("PHYSICAL", "SAFETY", "RUNAWAY", "TRACKING")),
-                    "safety_trips": int(self.sh["safety_trip_count"].value) - s0}
+            out = {"ok": False, "label": label, "error": m[:300], "tcp_error_mm": None,
+                   "safety": int(self.sh["safety_trip_count"].value) != s0 or any(
+                       k in m for k in ("PHYSICAL", "SAFETY", "RUNAWAY", "TRACKING")),
+                   "safety_trips": int(self.sh["safety_trip_count"].value) - s0}
+            if out["safety"]:
+                out.update(self.v377_trip_info(t0))
+            return out
+
+    def v377_trip_info(self, t0):
+        """V3.77 TRIP REASON IN THE RESULT: the backend writes diag_trip_<n>_<reason>.csv (NERO_DIAG_DIR) at every
+        safety trip (runaway_j<k> = joint k faster than 6 rad/s or beyond its limit, penetration = a robot body in a
+        protected surface); the newest reason since t0 + the joint closest to its limit now go into the tool result
+        (user run V3.76: the log only said "STATE 2", the reason was in backend.log)"""
+        out = {}
+        d = os.environ.get("NERO_DIAG_DIR", "").strip()
+        try:
+            files = [(os.path.getmtime(os.path.join(d, f)), f) for f in os.listdir(d) if f.startswith("diag_trip_")]
+            files = sorted(x for x in files if x[0] >= t0 - 1.0)
+            if files:
+                reasons = [f[:-4].split("_", 3)[-1] for _t, f in files]
+                text = {"penetration": "a robot body pressed into a protected surface (table / bin / safe)"}
+                last = reasons[-1]
+                out["trip_reason"] = last
+                out["trip_reasons"] = reasons[-4:]
+                out["trip_meaning"] = text.get(last) or (
+                    f"joint {last.split('_j')[-1]} faster than 6 rad/s or beyond its limit (RUNAWAY)"
+                    if last.startswith("runaway") else last)
+        except Exception:
+            pass
+        try:
+            ms = joint_margins_deg(self.current_q())
+            k = min(range(7), key=lambda i: ms[i])
+            out["closest_joint_limit"] = {"joint": f"J{k + 1}", "margin_deg": round(ms[k], 1)}
+        except Exception:
+            pass
+        if out:
+            self.emit(f"[WARN] [V3.77 SAFETY] safety stop reason: {out.get('trip_reason', 'unknown')} "
+                      f"({out.get('trip_meaning', 'no diag file')}); closest joint limit now "
+                      f"{out.get('closest_joint_limit')}")
+        return out
 
     def move_line(self, label, xyz, quat, speed=0.05, slow=None):
         """Cartesian path from MoveIt; every point is checked (all joints >= PATH_MARGIN_DEG inside the MuJoCo limits,
@@ -1364,14 +1411,30 @@ class CupSkills:
         g = geom()
         ndz = float(self.k["cup_nested_height_mm"]) / 1000.0
         found = [c for c in res.get("cups", []) if c.get("kind") in ("cup", "stack")]
+        if str(tag).startswith(("observe_scene", "locate")) and self.placed is None and self.held is None and len(found) < 2:
+            occs = [c for c in res.get("cups", []) if c.get("kind") == "occluded" and c.get("base_xyz_m")]
+            if 0 < len(found) + len(occs) <= 2:
+                for oc in occs:
+                    fh = oc.get("height_mm") if oc.get("height_mm") is not None else oc.get("height_depth_mm")
+                    found.append(dict(oc, kind="cup", height_mm=fh, tilt_deg=float(oc.get("tilt_deg") or 0.0)))
         singles = [c for c in found if c["kind"] == "cup"]
-        if singles and self.cam_single_h is None:
-            self.cam_single_h = float(np.median([c["height_mm"] for c in singles]))
+        h_vals = [float(c["height_mm"]) for c in singles if c.get("height_mm") is not None]
+        if not h_vals:
+            h_vals = [float(c["height_depth_mm"]) for c in singles if c.get("height_depth_mm") is not None]
+        if h_vals and self.cam_single_h is None:
+            self.cam_single_h = float(np.median(h_vals))
         new, stack = {}, None
         prev = {n: e for n, e in self.cam.items() if n != self.held}
         free_names = [n for n in CUPS if n != self.held]
-        for c in sorted(found, key=lambda c_: c_["base_xyz_m"][1]):
+        def _sort_key(c_):
+            b_ = np.asarray(c_["base_xyz_m"][:2], float)
+            if prev and len(found) > len(free_names):
+                return (min((float(np.linalg.norm(prev[n_]["base"][:2] - b_)) for n_ in free_names if n_ in prev), default=9.0), float(b_[1]))
+            return (0.0, float(b_[1]))
+        for c in sorted(found, key=_sort_key):
             b = np.asarray(c["base_xyz_m"], float)
+            t_deg = float(c.get("tilt_deg") or 0.0)
+            c_h = c.get("height_mm") if c.get("height_mm") is not None else c.get("height_depth_mm")
             if c["kind"] == "stack":
                 if self.placed:
                     upper, lower = self.placed
@@ -1381,11 +1444,12 @@ class CupSkills:
                 else:
                     upper, lower = "cup_1", "cup_2"
                 h_ref = self.cam_single_h or (g["h"] * 1000.0 + 3.3)
-                dz = float(c["height_mm"]) - h_ref
-                stack = {"upper": upper, "lower": lower, "height_mm": c["height_mm"], "base_dz_mm": round(dz, 1),
-                         "nested_full": bool(dz <= ndz * 1000.0 + 5.0), "xy": [float(b[0]), float(b[1])]}
-                new[lower] = self._entry(b, c["tilt_deg"], {"in_stack": "lower"})
-                new[upper] = self._entry(b + [0, 0, ndz], c["tilt_deg"], {"in_stack": "upper"})
+                h_st = float(c_h) if c_h is not None else (h_ref + ndz * 1000.0)
+                dz = h_st - h_ref
+                stack = {"upper": upper, "lower": lower, "height_mm": c.get("height_mm") if c.get("height_mm") is not None else round(h_st, 1),
+                         "base_dz_mm": round(dz, 1), "nested_full": bool(dz <= ndz * 1000.0 + 5.0), "xy": [float(b[0]), float(b[1])]}
+                new[lower] = self._entry(b, t_deg, {"in_stack": "lower"})
+                new[upper] = self._entry(b + [0, 0, ndz], t_deg, {"in_stack": "upper"})
                 continue
             cand = [n for n in free_names if n not in new]
             if not cand:
@@ -1394,11 +1458,11 @@ class CupSkills:
                 name = min(cand, key=lambda n: np.linalg.norm(prev[n]["base"][:2] - b[:2]) if n in prev else 9.0)
             else:
                 name = cand[0]
-            new[name] = self._entry(b, c["tilt_deg"], {"height_mm": c["height_mm"], "fit_rms_mm": c.get("fit_rms_mm")})
+            new[name] = self._entry(b, t_deg, {"height_mm": c_h, "fit_rms_mm": c.get("fit_rms_mm")})
             # V3.74: only while nothing is held - a cup carried above the target hides the target's rim and its
             # silhouette reads short (twin: 109.5 instead of 125 mm), which spoiled the "taller after the release" check
-            if self.placed is None and self.held is None and c.get("height_mm"):
-                self.single_h[name] = float(c["height_mm"])
+            if self.placed is None and self.held is None and c_h is not None and float(c_h) > 0:
+                self.single_h[name] = float(c_h)
         for n, e in prev.items():                   # not seen now (occluded by the arm): keep the last estimate
             if n not in new:
                 new[n] = dict(e, stale=True)
@@ -1597,8 +1661,10 @@ class CupSkills:
 
     def _check(self, label, r):
         if r.get("safety") or r.get("safety_trips"):
-            raise self._Abort("SAFETY_STOP", {"during": label, "error": r.get("error"),
-                                              "safety_trips": r.get("safety_trips")})
+            raise self._Abort("SAFETY_STOP", dict({"during": label, "error": r.get("error"),
+                                                   "safety_trips": r.get("safety_trips")},
+                                                  **{k_: r[k_] for k_ in ("trip_reason", "trip_meaning",
+                                                                          "closest_joint_limit") if k_ in r}))
         if not r.get("ok"):
             raise self._Abort("MOTION_FAILED", {"during": label, "error": r.get("error"),
                                                 "tcp_error_mm": r.get("tcp_error_mm"),
@@ -1738,15 +1804,21 @@ class CupSkills:
             if self.camera:
                 self._perceive(f"pick {source_cup}")
             s0 = self._cup(source_cup)
+            s0_fixed = {"rim": np.asarray(s0["rim"], float).copy(), "base": np.asarray(s0["base"], float).copy(),
+                        "tilt_deg": s0["tilt_deg"], "height_mm": s0.get("height_mm")}
             v["opening_before_mm"] = self.io.gripper_open(self.prof.open_mm)["opening_mm"]
             if self.prof.align_rotate_m > 0:
                 v["align_rotate"] = self._align_rotate(source_cup, W["pregrasp"], Q["pregrasp"])
             else:
                 # joint goal to the planned (margin-checked) IK branch - not a free pose goal
                 self._go_joints(f"pregrasp {source_cup}", Q["pregrasp"])
+            if self.camera and hasattr(self.io, "wrist_snapshot"):
+                w_chk = self._wrist_recheck_grasp(source_cup, s0, W, Q)
+                if w_chk is not None:
+                    v["wrist_grasp_check"] = w_chk
             p, R = W["grasp"]
             if self.prof.descent_stop_above_rim_m is not None:
-                stop = self._descent_stop(source_cup, s0, W)
+                stop = self._descent_stop(source_cup, s0_fixed, W)
                 if stop is not None:
                     v["pre_contact_check"] = stop
                     if stop.get("abort"):
@@ -1760,7 +1832,7 @@ class CupSkills:
                 self.cam_grip_offset = quat_xyzw_to_R(qg).T @ (np.asarray(s0["rim"], float) - np.asarray(tcp_g, float))
                 self._perceive(f"check {source_cup} after the descent")
             s1 = self._cup(source_cup)
-            moved = 0.0 if s1.get("stale") else float(np.linalg.norm(s1["base"][:2] - s0["base"][:2])) * 1000
+            moved = 0.0 if s1.get("stale") else float(np.linalg.norm(s1["base"][:2] - s0_fixed["base"][:2])) * 1000
             v["cup_moved_by_descent_mm"] = round(moved, 1)
             if s1.get("stale"):
                 v["descent_check"] = "cup hidden by the gripper in the fixed camera view - not checked"
@@ -1805,8 +1877,24 @@ class CupSkills:
             except self._Abort as e:
                 return self._abort_result(tool, e, v)
             still = self.cam.get(source_cup)
-            on_table = bool(still and not still.get("stale")
-                            and np.linalg.norm(still["base"][:2] - s0["base"][:2]) < 0.02)
+            h_before_mm = float(s0_fixed.get("height_mm") or s1.get("height_mm") or (geom()["h"] * 1000.0))
+            min_dz_lift_mm = 0.5 * max(rise_tcp * 1000.0, 40.0)
+            still_h_mm = float((still or {}).get("height_mm") or 0.0) if still else 0.0
+            rose_by_depth = (still_h_mm - h_before_mm) >= min_dz_lift_mm
+            on_table = bool(still and not still.get("stale") and not rose_by_depth
+                            and np.linalg.norm(still["base"][:2] - s0_fixed["base"][:2]) < 0.02)
+            if not on_table and not clamp_held and not rose_by_depth:
+                raw_cups = [c_ for c_ in (getattr(self, "cam_raw", None) or {}).get("cups") or []
+                            if c_.get("kind") == "cup" and c_.get("base_xyz_m")]
+                has_lifted = any(c_.get("kind") == "lifted" for c_ in (getattr(self, "cam_raw", None) or {}).get("dets") or [])
+                if len(raw_cups) >= 2 and not has_lifted:
+                    c_pushed = min(raw_cups, key=lambda c_: float(np.linalg.norm(np.asarray(c_["base_xyz_m"][:2], float) - s0_fixed["base"][:2])))
+                    c_h_after = float(c_pushed.get("height_mm") or c_pushed.get("height_depth_mm") or 0.0)
+                    if (c_h_after - h_before_mm) < min_dz_lift_mm and float(np.linalg.norm(np.asarray(c_pushed["base_xyz_m"][:2], float) - s0_fixed["base"][:2])) < 0.12:
+                        on_table = True
+                        b_p = np.asarray(c_pushed["base_xyz_m"], float)
+                        self.cam[source_cup] = self._entry(b_p, float(c_pushed.get("tilt_deg") or 0.0),
+                                                           {"height_mm": c_pushed.get("height_mm") or c_pushed.get("height_depth_mm")})
             rise_cup = 0.0 if on_table else rise_tcp
             s2 = {"rim": np.asarray(tcp1, float) + quat_xyzw_to_R(q1) @ self.cam_grip_offset, "tilt_deg": 0.0}
             v["lift_check"] = "fixed camera: cup no longer at its table position" if not on_table else \
@@ -1972,17 +2060,34 @@ class CupSkills:
             q_rot = ik_from(q_now, tcp, R_p)
             if q_rot is None or min(joint_margins_deg(q_rot)) < MIN_MARGIN_RELAXED_DEG:
                 q_rot = self.plan["_q"]["rotate"]
-            self._go_joints(f"rotate {src} to the place orientation", q_rot, slow=CARRY_SLOW_FACTOR)
+            rot_done = False
+            try:
+                self._go_joints(f"rotate {src} to the place orientation", q_rot, slow=CARRY_SLOW_FACTOR)
+                rot_done = True
+            except self._Abort as exc_rot:
+                if "FENCE" not in str(exc_rot.info.get("error") or "") and exc_rot.reason != "MOTION_FAILED":
+                    raise
+                self.io.emit(f"[WARN] [V3.71 CUP] 在 {src} 上方原地转腕擦到围栏 → 改为先平移向 {target_cup} 再转腕")
             # 2. level translation; the measured held-cup offset is folded into the target (no separate centring)
             d, s, t = self._centre_error(src, target_cup)
             tcp, _q = self.io.tcp_pose()
             above = np.array([tcp[0] + d[0], tcp[1] + d[1], tcp[2]])
-            self._go_line(f"carry {src} over {target_cup}", above, R_p, CARRY_SPEED, slow=CARRY_SLOW_FACTOR,
-                          free_fallback=True, q_hint=self.plan["_q"].get("above_target"))
+            if not rot_done:
+                q_ab = ik_from(self.io.current_q(), above, R_p)
+                if q_ab is None or min(joint_margins_deg(q_ab)) < MIN_MARGIN_RELAXED_DEG:
+                    q_ab = self.plan["_q"].get("above_target")
+                self._go_joints(f"carry & rotate {src} over {target_cup}", q_ab, slow=CARRY_SLOW_FACTOR)
+            else:
+                self._go_line(f"carry {src} over {target_cup}", above, R_p, CARRY_SPEED, slow=CARRY_SLOW_FACTOR,
+                              free_fallback=True, q_hint=self.plan["_q"].get("above_target"))
             if self.prof.lift_settle_s > 0:                # V3.64 LIFT SETTLE: the carry swings the cup on the hold too
                 self.io.sleep(self.prof.lift_settle_s)
             if self.camera and self.prof.recheck_held_before_place:
                 v["held_recheck"] = self._recheck_held(src, target_cup, R_p)
+            if self.camera and hasattr(self.io, "wrist_snapshot"):
+                w_pl = self._wrist_recheck_place(src, target_cup, R_p)
+                if w_pl is not None:
+                    v["wrist_place_check"] = w_pl
             # 3. lower to the release height; the remaining error (if >= 3 mm) is folded into the same move
             d, s, t = self._centre_error(src, target_cup)
             v["centre_error_high_mm"] = round(float(np.linalg.norm(d)) * 1000, 1)
@@ -2080,6 +2185,157 @@ class CupSkills:
                           PLACE_SPEED)
         return out
 
+    def _wrist_recheck_grasp(self, cup, s0, W, Q):
+        """V3.87 PHASE 3 PRE-GRASP WRIST VISUAL SERVOING: at pregrasp, use the wrist camera to verify the cup rim
+        centre and the perpendicularity of the gripper closing line relative to the rim tangent, adjusting horizontal
+        position and wrist angle before descending."""
+        try:
+            wsnap = self.io.wrist_snapshot()
+        except Exception:
+            wsnap = None
+        if not wsnap or wsnap.get("rgb") is None or not wsnap.get("K") or not wsnap.get("calib_eih"):
+            return None
+        import NERO_V386_Real_Wrist_Camera as W86
+        q_now = self.io.current_q()
+        tcp_p, tcp_q = self.io.tcp_pose()
+        T_bt = np.eye(4)
+        T_bt[:3, :3], T_bt[:3, 3] = quat_xyzw_to_R(tcp_q), np.asarray(tcp_p, float)
+        T_bf = T_bt @ np.linalg.inv(self._arm().tool)
+        phi_plan = float(self.plan.get("grasp_phi_rad") or math.radians(
+            math.degrees(base_dir(s0["rim"])) + float(self.plan.get("grasp_rim_angle_rel_deg") or 0.0)
+        ))
+        flip = bool(self.plan.get("flip", True))
+        g = geom()
+        h_m = (float(s0["height_mm"]) / 1000.0) if (s0.get("height_mm") and 50.0 <= float(s0["height_mm"]) <= 150.0) else float(s0["rim"][2] - s0["base"][2])
+        exp_rim_opt = [float(s0["rim"][0]), float(s0["rim"][1]), float(s0["base"][2]) + h_m]
+        res = W86.wrist_check_cup_grasp(
+            wsnap["rgb"], wsnap["K"], T_bf.tolist(), wsnap["calib_eih"], self.prof.T_tcp_grasp, T_bt,
+            exp_rim_opt, phi_plan, flip=flip, r_top_m=g["r_top"], undistort_intr=wsnap.get("intr")
+        )
+        if res.get("measured_rim_xyz"):
+            res["measured_rim_xyz"][2] = round(float(s0["rim"][2]), 5)
+        if not res.get("ok"):
+            self.io.emit(f"[WARN] [V3.87 WRIST] 抓杯前腕部复查未生效：{res.get('reason')}")
+            return res
+        if not res.get("trusted"):
+            self.io.emit(f"[WARN] [V3.87 WRIST] 抓杯前腕部复查偏差 {res['shift_norm_mm']:.1f} mm 超出可信阈值 → 沿用主相机规划")
+            return res
+        shift_mm = res["shift_norm_mm"]
+        ang_err = res["angle_err_deg"]
+        need_shift = shift_mm >= W86.WRIST_GRASP_MIN_SHIFT_M * 1000.0
+        need_rot = abs(ang_err) >= W86.WRIST_GRASP_MIN_ROT_DEG and abs(ang_err) <= W86.WRIST_GRASP_MAX_ROT_DEG
+        if not need_shift and not need_rot:
+            self.io.emit(f"[OK] [V3.87 WRIST] 抓杯前腕部复查：{cup} 中心偏差 {shift_mm:.1f} mm · 夹爪垂直度误差 {ang_err:+.1f}°（已对齐 ✓）")
+            res["applied"] = False
+            return res
+
+        new_rim = np.asarray(res["measured_rim_xyz"], float) if need_shift else np.asarray(s0["rim"], float)
+        new_phi = float(res["recommended_phi_rad"]) if need_rot else phi_plan
+        depth = float(self.k["cup_rim_pinch_depth_mm"]) / 1000.0
+        pre = float(self.k["cup_pregrasp_height_mm"]) / 1000.0
+        tilt = bool(self.k.get("cup_wall_tilt_follow", True))
+        p_new, R_new = pinch_tcp(new_rim, new_phi, depth, flip, tilt, self.prof)
+        pp_new = p_new + self.prof.pre_offset(R_new, pre)
+        dz_lift = float(W["lift"][0][2] - W["grasp"][0][2])
+        ch = ([("pregrasp", pp_new, R_new)] + segment_points("d", pp_new, p_new, R_new) + [("grasp", p_new, R_new)]
+              + segment_points("l", p_new, p_new + [0, 0, dz_lift], R_new) + [("lift", p_new + [0, 0, dz_lift], R_new)])
+        rk = ik_chain(ch, q_now, start_first=True)
+        if not rk["ok"] or rk["min_margin_deg"] < MIN_MARGIN_RELAXED_DEG:
+            self.io.emit(f"[WARN] [V3.87 WRIST] 抓杯前腕部微调姿态 IK 余量不足（{rk.get('min_margin_deg')}°）→ 保持原轨迹")
+            res["applied"] = False
+            return res
+        W["pregrasp"] = (np.asarray(pp_new, float), np.asarray(R_new, float))
+        W["grasp"] = (np.asarray(p_new, float), np.asarray(R_new, float))
+        W["lift"] = (np.asarray(p_new + [0, 0, dz_lift], float), np.asarray(R_new, float))
+        Q["pregrasp"] = list(rk["q"][0])
+        Q["grasp"] = list(rk["q"][5])
+        Q["lift"] = list(rk["q"][10])
+        self.plan["_qpath"]["grasp"] = [list(q) for q in rk["q"][0:6]]
+        self.plan["_qpath"]["lift"] = [list(q) for q in rk["q"][5:11]]
+        s0["rim"] = new_rim.copy()
+        s0["base"] = np.array([new_rim[0], new_rim[1], s0["base"][2]], dtype=float)
+        try:
+            self._go_joints(f"wrist align grasp angle & rim on {cup}", Q["pregrasp"], slow=1.8)
+        except self._Abort as exc_w:
+            self.io.emit(f"[WARN] [V3.87 WRIST] 抓杯前腕部微调运动未执行（{exc_w.reason}）→ 继续下探")
+            res["applied"] = False
+            return res
+        res["applied"] = True
+        self.io.emit(f"[OK] [V3.87 WRIST] 抓杯前腕部闭环微调：修正杯沿偏移 ({res['delta_rim_mm'][0]:+.1f}, {res['delta_rim_mm'][1]:+.1f}) mm · "
+                     f"夹爪旋转 {ang_err:+.1f}°（开合线垂直于杯壁 ✓）")
+        return res
+
+    def _wrist_recheck_place(self, src, dst, R_p, n_max=2):
+        """V3.87 PHASE 3 PRE-PLACE WRIST CONCENTRICITY SERVOING: above the target cup, use the downward-looking wrist
+        camera to measure the concentricity offset between the target cup rim and the held cup bottom, centring before
+        lowering into the target cup."""
+        if not hasattr(self.io, "wrist_snapshot"):
+            return None
+        import NERO_V386_Real_Wrist_Camera as W86
+        g = geom()
+        out = {"checks": []}
+        for k_ in range(n_max):
+            try:
+                wsnap = self.io.wrist_snapshot()
+            except Exception:
+                wsnap = None
+            if not wsnap or wsnap.get("rgb") is None or not wsnap.get("K") or not wsnap.get("calib_eih"):
+                break
+            tcp_p, tcp_q = self.io.tcp_pose()
+            T_bt = np.eye(4)
+            T_bt[:3, :3], T_bt[:3, 3] = quat_xyzw_to_R(tcp_q), np.asarray(tcp_p, float)
+            T_bf = T_bt @ np.linalg.inv(self._arm().tool)
+            s_cup = self._cup(src)
+            t_cup = self._cup(dst)
+            ht_m = (float(t_cup["height_mm"]) / 1000.0) if (t_cup.get("height_mm") and 50.0 <= float(t_cup["height_mm"]) <= 150.0) else float(t_cup["rim"][2] - t_cup["base"][2])
+            tgt_rim_opt = [float(t_cup["rim"][0]), float(t_cup["rim"][1]), float(t_cup["base"][2]) + ht_m]
+            res = W86.wrist_check_cup_concentricity(
+                wsnap["rgb"], wsnap["K"], T_bf.tolist(), wsnap["calib_eih"],
+                tgt_rim_opt, s_cup["base"], r_top_m=g["r_top"], r_bot_m=g["r_bot"],
+                undistort_intr=wsnap.get("intr")
+            )
+            if not res.get("ok"):
+                out["note"] = res.get("reason")
+                break
+            if not res.get("trusted"):
+                res["applied"] = False
+                out["checks"].append(res)
+                self.io.emit(f"[WARN] [V3.87 WRIST] 叠杯前腕部同心度复查：偏差 {res['concentric_err_mm']:.1f} mm 超出阈值 → 不修正")
+                break
+            # Update target cup's perceived XY position from the close-up wrist measurement
+            tx, ty = res["target_xy_m"]
+            if dst in self.cam:
+                self.cam[dst]["base"][0], self.cam[dst]["base"][1] = tx, ty
+                self.cam[dst]["rim"][0], self.cam[dst]["rim"][1] = tx, ty
+            # If inner contour measured the held cup directly, fold difference into grip_offset
+            if res.get("held_source") == "wrist_inner_contour" and self.grip_offset is not None:
+                hx, hy = res["held_xy_m"]
+                est_b = s_cup["base"]
+                dh = np.array([hx - est_b[0], hy - est_b[1], 0.0], dtype=float)
+                _tcp, qt = self.io.tcp_pose()
+                Rt = quat_xyzw_to_R(qt)
+                self.grip_offset = self.grip_offset + Rt.T @ dh
+            dx_m, dy_m = res["delta_xy_m"]
+            err_mm = res["concentric_err_mm"]
+            if err_mm < W86.WRIST_PLACE_TOL_M * 1000.0:
+                res["applied"] = False
+                out["checks"].append(res)
+                self.io.emit(f"[OK] [V3.87 WRIST] 叠杯前腕部同心度复查 {k_ + 1}：上下双杯同心偏差 {err_mm:.1f} mm（已精确对准 ✓）")
+                break
+            tcp, _q = self.io.tcp_pose()
+            try:
+                self._go_line(f"wrist concentricity align {src} over {dst} ({k_ + 1})",
+                              [tcp[0] + dx_m, tcp[1] + dy_m, tcp[2]], R_p, PLACE_SPEED)
+            except self._Abort as exc_w:
+                self.io.emit(f"[WARN] [V3.87 WRIST] 叠杯前腕部同心微调运动未执行（{exc_w.reason}）→ 保持当前位置下放")
+                res["applied"] = False
+                out["checks"].append(res)
+                break
+            res["applied"] = True
+            out["checks"].append(res)
+            self.io.emit(f"[OK] [V3.87 WRIST] 叠杯前腕部同心度微调 {k_ + 1}：补偿 (Δx={dx_m*1000:+.1f}, Δy={dy_m*1000:+.1f}) mm（总偏差 {err_mm:.1f} mm）")
+        return out if out["checks"] or out.get("note") else None
+
     def _release_sidestep(self, dist_m=0.008):
         """V3.64 RELEASE SIDESTEP (fixed-jaw grippers): the released cup slides down along the FIXED pad and its
         widening conical wall wedges against it (V3.64 twin: hung tilted 13-18 deg on the SO-101 fixed jaw).  Move the
@@ -2128,10 +2384,11 @@ class CupSkills:
         h0 = self.single_h.get(lower)
         info = {"source": "fixed camera (V3.71 one cluster on the target's place)", "near_clusters": len(near),
                 "target_alone_height_mm": h0}
-        if len(near) != 1 or h0 is None or near[0].get("height_mm") is None:
+        nh = near[0].get("height_mm") if near and near[0].get("height_mm") is not None else (near[0].get("height_depth_mm") if near else None)
+        if len(near) != 1 or h0 is None or nh is None:
             return None
         nd = self.prof.nested_dz_real_mm
-        dz = float(near[0]["height_mm"]) - float(h0)
+        dz = float(nh) - float(h0)
         hi = (nd + 8.0) if nd is not None else max_dz_mm
         others = [c for c in cups if c is not near[0] and c.get("kind") == "cup"]
         info.update(height_mm=near[0]["height_mm"], base_dz_mm=round(dz, 1),

@@ -72,13 +72,13 @@ except Exception:
 
 # ------------------------------------------------------------------ P1
 for m in (CON, RR, YP, W49, ST, CK):
-    assert m.VERSION in ("V3.62", "V3.63", "V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72", "V3.73", "V3.74", "V3.75", "V3.76"), (m.__name__, m.VERSION)
+    assert m.VERSION in ("V3.62", "V3.63", "V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72", "V3.73", "V3.74", "V3.75", "V3.76", "V3.77", "V3.78", "V3.79", "V3.80", "V3.81", "V3.82", "V3.83", "V3.84", "V3.85", "V3.86", "V3.87", "V3.88", "V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2"), (m.__name__, m.VERSION)
 V363 = CK.VERSION >= "V3.63"           # V3.63 intentionally changed the place motions / plan waypoints (CHANGELOG)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.62", "V3.63", "V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72", "V3.73", "V3.74", "V3.75", "V3.76") and SC.SCENES_REV in ("V3.62", "V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72", "V3.73", "V3.74", "V3.75", "V3.76")
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.62", "V3.63", "V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72", "V3.73", "V3.74", "V3.75", "V3.76", "V3.77", "V3.78", "V3.79", "V3.80", "V3.81", "V3.82", "V3.83", "V3.84", "V3.85", "V3.86", "V3.87", "V3.88", "V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2") and SC.SCENES_REV in ("V3.62", "V3.64", "V3.65", "V3.66", "V3.67", "V3.68", "V3.69", "V3.70", "V3.71", "V3.72", "V3.73", "V3.74", "V3.75", "V3.76", "V3.77", "V3.78", "V3.79", "V3.80", "V3.81", "V3.82", "V3.83", "V3.84", "V3.85", "V3.86", "V3.87", "V3.88", "V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2")
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 assert H((ROOT / "NERO_V326_Wrist_Camera.py").read_bytes()) == "6b5c5d683073e4252b82c1c703ad664173960a179947f9e72775bb9683697d0a"
 assert H((ROOT / "NERO_V2_7_1_Agent.py").read_bytes()) == "3e52d05ea84d94c8359d5875fa0fee8c2cc42d612b52e59109e1166912439696"
-assert H((ROOT / "NERO_V325_Camera.py").read_bytes()) == "a58e69b363a5a861b3ad0806ba276c49601fc214ffdfc07ffba9bdc0c2c65797"
+assert H((ROOT / "NERO_V325_Camera.py").read_bytes()) == "82f2416d73671e7018d09d0cd72c17186154934a315b47c0d19fdb0427afd931"
 w49 = re.sub(r'VERSION = "V3\.\d+"', 'VERSION = "V3.58"', (ROOT / "NERO_V349_Real_Wrist_Camera.py").read_text(encoding="utf-8"), count=1)
 assert H(w49.encode()) == "d5955ce5c9c8acf8d654faa163da49e1b54ad21775a5ec060ac353a13c76a622"
 BK = (ROOT / "NERO_V2_7_1_Unified_Backend.py").read_text(encoding="utf-8")

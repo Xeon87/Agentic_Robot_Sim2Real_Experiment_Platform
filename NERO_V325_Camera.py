@@ -36,8 +36,26 @@ from __future__ import annotations
 
 import base64
 import glob
+import importlib.abc
+import importlib.util
 import json
 import math
+import os
+import sys
+
+class _DirectModuleFinder(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if "." in fullname:
+            return None
+        for d in [os.path.dirname(os.path.realpath(__file__))] + list(sys.path):
+            if d:
+                cand = os.path.join(d, fullname + ".py")
+                if os.path.isfile(cand):
+                    return importlib.util.spec_from_file_location(fullname, cand)
+        return None
+
+if not any(type(x).__name__ == "_DirectModuleFinder" for x in sys.meta_path):
+    sys.meta_path.append(_DirectModuleFinder())
 import os
 import random
 import threading
@@ -357,31 +375,82 @@ def _calibrate_with_points(samples, P_all, reject_mm=5.0, min_samples=6):
 def calibrate(samples, reject_mm=5.0, min_samples=6):
     """samples: [{"T_base_flange": 4x4, "p_cam": [3], ...}] -> result dict (see solve_eye_to_hand) with
     used / rejected indices, leave-one-out errors, spans and a verdict.
-    V3.55 UNIFIED SOURCE: when a batch mixes 'depth' and 'pnp' poses (which have a systematic z offset between
-    IR stereo depth and marker-size PnP), also evaluates depth-scale-aligned PnP (P_aligned) and pure PnP (P_pnp)
-    across all poses so cross-pose source jumps never ruin Leave-One-Out accuracy."""
+    V3.55 UNIFIED SOURCE: evaluates depth-scale-aligned PnP and pure PnP.
+    V3.85 SCALE SELF-CALIBRATION: when marker edge blooming or paper scale offset causes PnP points to be
+    scaled by alpha != 1.0, solves for kinematic probe scale and 1D optimal scale to recover metric 1:1 scale."""
     if len(samples) < min_samples:
         return {"ok": False, "error": f"至少需要 {min_samples} 个样本（现在 {len(samples)} 个）"}
     P_raw = [list(s["p_cam"]) for s in samples]
     best = _calibrate_with_points(samples, P_raw, reject_mm=reject_mm, min_samples=min_samples)
-    # Check if all samples recorded p_pnp (V3.55 capture) and whether unified PnP / depth-scaled PnP improves LOO
+
     if all(s.get("p_pnp") is not None for s in samples):
         P_pnp = [list(s["p_pnp"]) for s in samples]
-        candidates = [("pnp", P_pnp)]
+        candidates = [("pnp", P_pnp, 1.0)]
+
+        # 1. Depth-to-PnP ratio alignment across poses
         ratios = [vnorm(s["p_depth"]) / max(1e-6, vnorm(s["p_pnp"]))
                   for s in samples if s.get("p_depth") is not None and s.get("p_pnp") is not None]
         if ratios:
-            alpha = _median(ratios)
-            if 0.90 <= alpha <= 1.10:
-                candidates.insert(0, ("pnp_depth_scaled", [[v * alpha for v in p] for p in P_pnp]))
+            alpha_d = _median(ratios)
+            if 0.70 <= alpha_d <= 1.30:
+                candidates.insert(0, ("pnp_depth_scaled", [[v * alpha_d for v in p] for p in P_pnp], alpha_d))
+
+        # 2. V3.85 Kinematic probe displacement scale: pairs with identical orientation
+        probe_ratios = []
+        for i in range(len(samples)):
+            for j in range(i + 1, len(samples)):
+                A_i = samples[i]["T_base_flange"]
+                A_j = samples[j]["T_base_flange"]
+                R_diff_deg = rot_angle_deg(mat_mul(transpose(T_R(A_i)), T_R(A_j)))
+                if R_diff_deg <= 3.5:
+                    d_rob = vnorm(vsub(T_t(A_i), T_t(A_j)))
+                    d_pnp = vnorm(vsub(P_pnp[i], P_pnp[j]))
+                    if d_rob >= 0.025 and d_pnp >= 0.020:
+                        probe_ratios.append(d_rob / d_pnp)
+        if probe_ratios:
+            s_probe = _median(probe_ratios)
+            if 0.70 <= s_probe <= 1.30 and abs(s_probe - 1.0) >= 0.012:
+                candidates.append(("pnp_probe_scaled", [[v * s_probe for v in p] for p in P_pnp], s_probe))
+
+        # 3. V3.85 1D Scale Optimization: search optimal metric scale alpha in [0.70, 1.30]
+        if not best["good"]:
+            A_all = [s["T_base_flange"] for s in samples]
+            def _eval_scale(a):
+                P_sc = [[v * a for v in p] for p in P_pnp]
+                r = solve_eye_to_hand(A_all, P_sc, iters=500)
+                s_res = sorted(r["res_mm"])
+                n_k = max(min_samples, int(len(s_res) * 0.85))
+                return sum(s_res[:n_k]) / n_k
+
+            grid = [0.70 + 0.025 * k for k in range(25)]
+            b_init = min(grid, key=_eval_scale)
+            lo, hi = max(0.65, b_init - 0.04), min(1.35, b_init + 0.04)
+            for _ in range(12):
+                m1 = lo + 0.382 * (hi - lo)
+                m2 = lo + 0.618 * (hi - lo)
+                if _eval_scale(m1) < _eval_scale(m2):
+                    hi = m2
+                else:
+                    lo = m1
+            a_opt = 0.5 * (lo + hi)
+            if 0.70 <= a_opt <= 1.30 and abs(a_opt - 1.0) >= 0.012:
+                candidates.append(("pnp_scale_opt", [[v * a_opt for v in p] for p in P_pnp], a_opt))
+
         sources_in_batch = {s.get("source") for s in samples if s.get("source")}
         if len(sources_in_batch) > 1 or not best["good"]:
-            for mode_name, P_cand in candidates:
+            for mode_name, P_cand, a_cand in candidates:
                 r_cand = _calibrate_with_points(samples, P_cand, reject_mm=reject_mm, min_samples=min_samples)
-                if (r_cand["good"] and not best["good"]) or (
-                    r_cand["good"] == best["good"] and r_cand["loo_max_mm"] + 0.15 < best["loo_max_mm"]
-                ):
+                improved = False
+                if r_cand["good"] and not best["good"]:
+                    improved = True
+                elif r_cand["good"] and best["good"] and r_cand["loo_max_mm"] + 0.15 < best["loo_max_mm"]:
+                    improved = True
+                elif not best["good"] and not r_cand["good"] and r_cand["mean_mm"] + 1.2 < best["mean_mm"]:
+                    improved = True
+                if improved:
                     r_cand["unified_source"] = mode_name
+                    if abs(a_cand - 1.0) >= 0.010:
+                        r_cand["scale_factor"] = round(float(a_cand), 4)
                     best = r_cand
     return best
 
@@ -720,12 +789,13 @@ def save_calib(result, samples, info, marker, path=None):
     d = {"version": VERSION, "saved": time.strftime("%Y-%m-%d %H:%M:%S"),
          "camera_serial": (info or {}).get("serial"), "intrinsics": (info or {}).get("K"),
          "marker": marker, "flange_link": FLANGE_LINK,
+         "scale_factor": result.get("scale_factor"), "unified_source": result.get("unified_source"),
          "T_base_cam": result["T_base_cam"], "marker_in_flange": result["marker_in_flange"],
          "mean_mm": result["mean_mm"], "max_mm": result["max_mm"], "loo_mean_mm": result.get("loo_mean_mm"),
          "loo_max_mm": result.get("loo_max_mm"), "rot_span_deg": result.get("rot_span_deg"),
          "trans_span_m": result.get("trans_span_m"), "n_used": len(result.get("used") or []),
-         "check_poses_deg": [samples[i]["q_deg"] for i in (result.get("used") or [])[:2]],
-         "samples": [{"q_deg": s["q_deg"], "p_cam": s["p_cam"]} for s in samples]}
+         "check_poses_deg": [samples[i].get("q_deg", []) for i in (result.get("used") or [])[:2]],
+         "samples": [{"q_deg": s.get("q_deg", []), "p_cam": s["p_cam"]} for s in samples]}
     return save_json(path or CALIB_PATH, d)
 
 
@@ -1046,14 +1116,21 @@ def detect_aruco(rgb, K, dist, dict_name, marker_id, size_m, depth_m=None):
     if depth_m is not None:
         u, v = int(round(center[0])), int(round(center[1]))
         r = max(3, int(out["side_px"] * 0.20))
-        win = np.asarray(depth_m)[max(0, v - r):v + r + 1, max(0, u - r):u + r + 1]
-        vals = win[(win > 0.15) & (np.abs(win - p[2]) < 0.035)]
-        if vals.size >= 5:
-            z = float(np.median(vals))
-            if abs(z - p[2]) < 0.030:
-                out["p_depth"] = deproject(float(center[0]), float(center[1]), z, K)
-                out["p_cam"] = out["p_depth"]                        # live display; samples choose per pose
-                out["source"] = "depth"
+        H_d, W_d = np.asarray(depth_m).shape[:2]
+        win = np.asarray(depth_m)[max(0, v - r):min(H_d, v + r + 1), max(0, u - r):min(W_d, u + r + 1)]
+        raw_vals = win[(win > 0.15) & (win < 2.50)]
+        if raw_vals.size >= 5:
+            z_med = float(np.median(raw_vals))
+            # V3.85 ROBUST IR DEPTH GATE: cluster points within +/- 25 mm of median depth
+            cluster = raw_vals[np.abs(raw_vals - z_med) < 0.025]
+            if cluster.size >= 5 and float(np.std(cluster)) < 0.008:
+                # Tolerate up to 25% PnP scale/blooming deviation (e.g. 100 mm at 400 mm)
+                tol_pnp = max(0.080, 0.25 * p[2])
+                if abs(z_med - p[2]) < tol_pnp:
+                    z = float(np.median(cluster))
+                    out["p_depth"] = deproject(float(center[0]), float(center[1]), z, K)
+                    out["p_cam"] = out["p_depth"]                        # live display; samples choose per pose
+                    out["source"] = "depth"
     return out
 
 
@@ -1095,6 +1172,9 @@ class RealSenseSource:
         self.t_frame = None
         self.depth_res = DEPTH_RES[1]            # V3.53: default depth resolution 1280×720
         self.depth_preset = DEPTH_PRESETS[0]
+        # V3.79 CAMERA LAB HOOKS: sensor options and filter-set depth collections run inside the reader thread
+        self._dev_cmds = []
+        self._depth_jobs = []
 
     def running(self):
         return self.thread is not None and self.thread.is_alive()
@@ -1150,6 +1230,11 @@ class RealSenseSource:
             except Exception:
                 info["preset"] = "default"
             info["depth_res"] = f"{dw}×{dh}"
+            try:                                   # V3.79 SAVED D435I PROFILE (camera lab, only when locked)
+                import NERO_V379_Camera_Lab as LAB379
+                info["profile"] = LAB379.apply_saved_profile(prof.get_device(), rs, self.log, src=self)  # V3.80 light check
+            except Exception as exc:
+                self.log(f"[WARN] [V3.79 camera lab] 相机参数没有套用：{exc}")
             scale = ds.get_depth_scale()
             intr = prof.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
             K = {"width": intr.width, "height": intr.height, "fx": intr.fx, "fy": intr.fy, "ppx": intr.ppx, "ppy": intr.ppy}
@@ -1168,6 +1253,8 @@ class RealSenseSource:
                 c, d = al.get_color_frame(), al.get_depth_frame()
                 if not c or not d:
                     continue
+                if self._dev_cmds or self._depth_jobs:    # V3.79 CAMERA LAB HOOKS
+                    self._serve_lab(prof.get_device(), rs, d, scale)
                 d = temporal.process(spatial.process(d))
                 depth = np.asanyarray(d.get_data()).astype(np.float32) * scale
                 rgb = np.asanyarray(c.get_data()).copy()
@@ -1190,6 +1277,61 @@ class RealSenseSource:
     def frames(self):
         with self.lock:
             return self.rgb, self.depth, self.frame_id
+
+    # V3.79 CAMERA LAB HOOKS
+    def run_on_device(self, fn, timeout=5.0):
+        """V3.79: fn(device, rs) inside the reader thread (the sensor options belong to it) -> its result"""
+        if not self.running():
+            raise RuntimeError("相机未连接")
+        box = {"ev": threading.Event()}
+        with self.lock:
+            self._dev_cmds.append((fn, box))
+        if not box["ev"].wait(timeout):
+            raise TimeoutError("相机线程没有响应")
+        if "err" in box:
+            raise box["err"]
+        return box.get("out")
+
+    def collect_depth(self, make_chain, n, timeout=None):
+        """V3.79: n aligned depth frames (m) through make_chain(rs) -> fn(frame) (None = raw), in the reader thread"""
+        if not self.running():
+            raise RuntimeError("相机未连接")
+        job = {"make": make_chain, "n": int(n), "out": [], "ev": threading.Event()}
+        with self.lock:
+            self._depth_jobs.append(job)
+        if not job["ev"].wait(timeout or (5.0 + 0.2 * int(n))):
+            with self.lock:
+                if job in self._depth_jobs:
+                    self._depth_jobs.remove(job)
+            raise TimeoutError(f"只收到 {len(job['out'])}/{n} 帧深度")
+        if "err" in job:
+            raise job["err"]
+        return job["out"]
+
+    def _serve_lab(self, device, rs, d, scale):
+        import numpy as np
+        with self.lock:
+            cmds, self._dev_cmds = self._dev_cmds, []
+            jobs = list(self._depth_jobs)
+        for fn, box in cmds:
+            try:
+                box["out"] = fn(device, rs)
+            except Exception as exc:
+                box["err"] = exc
+            box["ev"].set()
+        for job in jobs:
+            try:
+                if "chain" not in job:
+                    job["chain"] = job["make"](rs) if job["make"] else None
+                f = job["chain"](d) if job["chain"] else d
+                job["out"].append(np.asanyarray(f.get_data()).astype(np.float32) * scale)
+            except Exception as exc:
+                job["err"] = exc
+            if "err" in job or len(job["out"]) >= job["n"]:
+                with self.lock:
+                    if job in self._depth_jobs:
+                        self._depth_jobs.remove(job)
+                job["ev"].set()
 
     def display_ppm(self, view="color", size=(560, 315)):
         import numpy as np
@@ -1753,7 +1895,7 @@ class CameraTabUI:
         self.lbl_live = JC.fixed_label(tk, left, 1, width=self.DW, textvariable=self.v_live, font=("TkDefaultFont", 9, "bold"),
                                        wraplength=self.DW - 10, pack={"pady": 1})
         # V3.50 LOWER WRIST CAMERA LIVE MONITOR (560x315 16:9, directly below main camera monitor)
-        ttk.Label(left, text="腕部相机实时监视（USB 130° 广角 · TCP 准星与精定位）",
+        ttk.Label(left, text="腕部相机实时监视（Innomaker 4MP HDR · OV4688 · TCP 准星与精定位）",
                   font=("TkDefaultFont", 9, "bold")).pack(anchor="w", pady=(2, 0))
         self.cv_wrist = tk.Canvas(left, width=self.DW, height=self.DH, bg="#181818", highlightthickness=1,
                                   highlightbackground="#607d8b")
@@ -1787,26 +1929,41 @@ class CameraTabUI:
         r = ttk.Frame(p)
         r.pack(fill="x", pady=3)
         ttk.Button(r, text="保存相机信息", command=self.on_save_info).pack(side="left")
+        ttk.Button(r, text="相机高级测试", command=self.on_camera_lab).pack(side="left", padx=(6, 0))  # V3.79 CAMERA LAB
         ttk.Label(p, text="相机固定在支架上（和 NERO 同一个刚性底座）。换了相机 / 动了支架 → 重新做手眼标定。",
                   foreground="#555555", justify="left").pack(anchor="w")
-        # V3.49 WRIST USB CAMERA INFO (placed below the main camera info)
+        # V3.49 / V3.86 WRIST USB CAMERA INFO (Innomaker 4MP USB HDR Camera U20-4MP OV4688; 1080P 130° kept as standby)
+        import NERO_V386_Real_Wrist_Camera as W86
+        self.W86 = W86
         ttk.Separator(p).pack(fill="x", pady=6)
-        ttk.Label(p, text="腕部相机（USB 1080P 130° 广角，eye-in-hand）", font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
+        ttk.Label(p, text="腕部相机（Innomaker 4MP USB HDR Camera · U20-4MP OV4688，eye-in-hand）", font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
         rw = ttk.Frame(p)
         rw.pack(fill="x", pady=(3, 2))
-        ttk.Label(rw, text="设备").pack(side="left")
+        ttk.Label(rw, text="型号").pack(side="left")
+        self.v_wcam_model = tk.StringVar(value=W86.WRIST_CAMERA_MODELS[0])
+        self.cb_wcam_model = ttk.Combobox(rw, textvariable=self.v_wcam_model, values=W86.WRIST_CAMERA_MODELS,
+                                          state="readonly", width=26)
+        self.cb_wcam_model.pack(side="left", padx=2)
+        self.cb_wcam_model.bind("<<ComboboxSelected>>", lambda _e: self._on_wrist_model_change())
+        ttk.Label(rw, text="设备").pack(side="left", padx=(4, 0))
         self.v_wdev = tk.StringVar(value="auto")
-        self.cb_wdev = ttk.Combobox(rw, textvariable=self.v_wdev, values=self._wrist_dev_values(), width=16,
+        self.cb_wdev = ttk.Combobox(rw, textvariable=self.v_wdev, values=self._wrist_dev_values(), width=13,
                                     postcommand=self._refresh_wrist_devs)
         self.cb_wdev.pack(side="left", padx=2)
         ttk.Label(rw, text="分辨率").pack(side="left", padx=(4, 0))
-        self.v_wres = tk.StringVar(value=W49.WRIST_RES_LIST[0])
-        ttk.Combobox(rw, textvariable=self.v_wres, values=W49.WRIST_RES_LIST, state="readonly", width=10).pack(side="left", padx=2)
+        self.v_wcam_res = tk.StringVar(value=W86.WRIST_RES_LIST_4MP[0])
+        self.cb_wres = ttk.Combobox(rw, textvariable=self.v_wcam_res, values=W86.WRIST_RES_LIST_4MP,
+                                    state="readonly", width=11)
+        self.cb_wres.pack(side="left", padx=2)
         self.v_wlock = tk.BooleanVar(value=True)
-        ttk.Checkbutton(rw, text="锁曝光/白平衡/对焦", variable=self.v_wlock).pack(side="left", padx=4)
-        ttk.Button(rw, text="▶ 连接腕部相机", command=self.on_wrist_connect).pack(side="left", padx=2)
-        ttk.Button(rw, text="■ 断开腕部", command=self.on_wrist_disconnect).pack(side="left", padx=2)
-        ttk.Button(rw, text="保存腕部相机信息", command=self.on_save_wrist_info).pack(side="left", padx=(4, 0))
+        ttk.Checkbutton(rw, text="锁曝光/白平衡/HDR/对焦", variable=self.v_wlock).pack(side="left", padx=4)
+        rw_btn = ttk.Frame(p)
+        rw_btn.pack(fill="x", pady=(2, 2))
+        ttk.Button(rw_btn, text="▶ 连接腕部相机", command=self.on_wrist_connect).pack(side="left", padx=(0, 2))
+        ttk.Button(rw_btn, text="■ 断开腕部", command=self.on_wrist_disconnect).pack(side="left", padx=2)
+        ttk.Button(rw_btn, text="保存腕部相机信息", command=self.on_save_wrist_info).pack(side="left", padx=4)
+        self.b_wrist_lab = ttk.Button(rw_btn, text="腕部相机高级测试", command=self.on_wrist_camera_lab)
+        self.b_wrist_lab.pack(side="left", padx=(4, 0))
         self.v_wrist_info = tk.StringVar(value="")
         self.JC.fixed_label(tk, p, 5, textvariable=self.v_wrist_info, font=("TkFixedFont", 9), justify="left",
                             anchor="nw", wraplength=560, pack={"fill": "x", "pady": (2, 0)})
@@ -2409,10 +2566,15 @@ class CameraTabUI:
         ttk.Entry(r2, textvariable=self.v_ydir, width=34).pack(side="left", padx=2)
         ttk.Label(r2, text=" 模型").pack(side="left")
         self.v_ymodel = tk.StringVar(value=YP.DEFAULT_MODEL)
-        self.cb_ymodel = ttk.Combobox(r2, textvariable=self.v_ymodel, values=YP.list_models(YP.DEFAULT_MODEL_DIR) or
-                                      [YP.DEFAULT_MODEL], width=22, postcommand=self._yolo_models)
-        self.cb_ymodel.pack(side="left", padx=2)
-        ttk.Label(r2, text=" 置信度门槛").pack(side="left")
+        self.mb_ymodel = ttk.Menubutton(r2, text="原模型", width=22)
+        self.menu_ymodel = tk.Menu(self.mb_ymodel, tearoff=0)
+        self.mb_ymodel.configure(menu=self.menu_ymodel)
+        self.mb_ymodel.pack(side="left", padx=2)
+        self.cb_ymodel = self.mb_ymodel
+        self._ymodel_vars = {}
+        self.b_gpu_fix = ttk.Button(r2, text="修复 GPU", command=self.on_repair_gpu)
+        self.b_gpu_fix.pack(side="left", padx=(4, 6))
+        ttk.Label(r2, text="置信度门槛").pack(side="left")
         self.v_yconf = tk.StringVar(value=f"{YP.CONF_MIN:.2f}")
         ttk.Entry(r2, textvariable=self.v_yconf, width=5).pack(side="left")
         r3 = ttk.Frame(p)
@@ -2443,10 +2605,33 @@ class CameraTabUI:
         ttk.Combobox(r3b, textvariable=self.v_dres, values=DEPTH_RES, state="readonly", width=9).pack(side="left", padx=2)
         self.v_dpreset = tk.StringVar(value=DEPTH_PRESETS[0])
         ttk.Combobox(r3b, textvariable=self.v_dpreset, values=DEPTH_PRESETS, state="readonly", width=14).pack(side="left")
-        ttk.Label(r3b, text="（断开再连接相机后生效）", foreground="#607d8b").pack(side="left")
+        ttk.Label(r3b, text=" 滤波").pack(side="left")
+        self.v_dfilter = tk.StringVar(value="默认（单帧）")
+        self.cb_dfilter = ttk.Combobox(r3b, textvariable=self.v_dfilter, values=["默认（单帧）", "滤波 + 5 帧中值（推荐）", "10 帧中值"],
+                                       state="readonly", width=16)
+        self.cb_dfilter.pack(side="left", padx=2)
+        ttk.Label(r3b, text="（深度预设重连后生效）", foreground="#607d8b").pack(side="left")
         ttk.Button(r3b, text="保存设置", command=self.on_locate_save).pack(side="left", padx=(10, 0))
         ttk.Button(r3b, text="另存为…", command=self.on_locate_save_as).pack(side="left", padx=(4, 0))
         ttk.Button(r3b, text="读取…", command=self.on_locate_load).pack(side="left", padx=(4, 0))
+        # V3.84 OBJECT TRACKER + JOINT CARTON SLOTS + TABLE LOCK + BENCHMARK
+        import NERO_V384_Object_Tracker as TR384
+        self.TR384 = TR384
+        self.tracker_384 = TR384.MultiFrameTracker()
+        self.table_lock_384 = TR384.load_table_lock()
+        r3c = ttk.Frame(p)
+        r3c.pack(fill="x", pady=(4, 0))
+        self.v_track_on = tk.BooleanVar(value=True)
+        ttk.Checkbutton(r3c, text="多帧跟踪平滑", variable=self.v_track_on).pack(side="left")
+        ttk.Button(r3c, text="重置跟踪", command=self.on_reset_tracker).pack(side="left", padx=(4, 6))
+        ttk.Button(r3c, text="识别鸡蛋+蛋托6孔", command=self.on_eggs_and_carton).pack(side="left", padx=2)
+        ttk.Button(r3c, text="锁定当前桌面", command=self.on_lock_table_plane).pack(side="left", padx=(6, 2))
+        ttk.Button(r3c, text="抓前重检", command=self.on_pregrasp_recheck).pack(side="left", padx=2)
+        ttk.Button(r3c, text="▶ 10帧对比评测", command=self.on_ab_benchmark).pack(side="left", padx=(6, 2))
+        self.v_table_lock_stat = tk.StringVar(
+            value=f"已锁定桌面 z={self.table_lock_384['z_center_m']*1000:.1f}mm" if self.table_lock_384 else "桌面基准：未锁定"
+        )
+        ttk.Label(r3c, textvariable=self.v_table_lock_stat, foreground="#37474f").pack(side="left", padx=(6, 0))
         r4 = ttk.Frame(p)
         r4.pack(fill="x", pady=(4, 0))
         self.b_ref = ttk.Button(r4, text="框选参考", command=self.on_ref_toggle)
@@ -2461,6 +2646,7 @@ class CameraTabUI:
         self._ref_drag = None
         self.yolo_view = []
         self.det_yolo = YP.YoloEDetector(log=self.log)
+        self._update_ymodel_menu()
         self.v_ref = tk.StringVar(value=YP.ref_text(self.ref))
         self.JC.fixed_label(tk, p, 2, textvariable=self.v_ref, wraplength=600, justify="left", anchor="nw",
                             pack={"fill": "x"})
@@ -2547,8 +2733,10 @@ class CameraTabUI:
 
     # ------------------------------------------------------------------ V3.47.1 视觉定位 settings files
     def _locate_settings(self):
-        d = {"version": "V3.53", "saved": time.strftime("%Y-%m-%d %H:%M:%S"), "method": self.v_method.get(),
+        d = {"version": "V3.83", "saved": time.strftime("%Y-%m-%d %H:%M:%S"), "method": self.v_method.get(),
              "model_dir": self.v_ydir.get(), "model": self.v_ymodel.get(), "conf": self.v_yconf.get(),
+             "filter": self.v_dfilter.get() if hasattr(self, "v_dfilter") else "默认（单帧）",
+             "track_on": bool(self.v_track_on.get()) if hasattr(self, "v_track_on") else True,
              "prompts": self.v_yprompt.get(), "egg_mm": [self.v_egg_l.get(), self.v_egg_w.get()],
              "white_geometric": bool(self.v_white.get()), "save_samples": bool(self.v_ysave.get()),
              "depth_res": self.v_dres.get(), "depth_preset": self.v_dpreset.get(),
@@ -2569,6 +2757,12 @@ class CameraTabUI:
                          (self.v_yprompt, "prompts"), (self.v_obj_names, "obj_names"), (self.v_hover_mm, "hover_mm")):
             if d.get(key) not in (None, ""):
                 var.set(str(d[key]))
+        if d.get("filter") and hasattr(self, "v_dfilter"):
+            self.v_dfilter.set(str(d["filter"]))
+        if "track_on" in d and hasattr(self, "v_track_on"):
+            self.v_track_on.set(bool(d["track_on"]))
+        self._ymodel_loaded_from_settings = True
+        self._update_ymodel_menu()
         if d.get("hover_mm") not in (None, ""):      # V3.60: a loaded settings file is the user's own hover value
             self._hover_strategy_str = None
             self._hover_user_val = None
@@ -2648,9 +2842,194 @@ class CameraTabUI:
         self._locate_apply(d, path)
         self.on_locate_save()                        # becomes this folder's settings
 
+    def _update_ymodel_menu(self):
+        """V3.83: Populate checkmenu with base model (locked checked) and fine-tuned models."""
+        tk = self.tk
+        try:
+            self.menu_ymodel.delete(0, "end")
+        except Exception:
+            return
+        base = self.YP.DEFAULT_MODEL
+        self.menu_ymodel.add_checkbutton(label=f"原模型：{base}", state="disabled")
+        self.menu_ymodel.add_separator()
+        cur_str = self.v_ymodel.get().strip() if hasattr(self, "v_ymodel") else base
+        base_name, cur_fts = self.YP.parse_model_set(cur_str)
+        all_models = self.YP.list_models(self.v_ydir.get()) or []
+        ft_models = [m for m in all_models if m != base and ("finetuned" in m or self.YP.finetune_card(os.path.join(self.v_ydir.get(), m)) is not None)]
+
+        # Default all fine-tuned models to checked on initial setup if not loaded from settings
+        if not getattr(self, "_ymodel_initialized", False) and not getattr(self, "_ymodel_loaded_from_settings", False) and not cur_fts and ft_models:
+            cur_fts = list(ft_models)
+            self.v_ymodel.set(";".join([base] + cur_fts))
+        self._ymodel_initialized = True
+
+        for ft in ft_models:
+            if ft not in self._ymodel_vars:
+                var = tk.BooleanVar(value=(ft in cur_fts))
+                self._ymodel_vars[ft] = var
+            else:
+                var = self._ymodel_vars[ft]
+                var.set(ft in cur_fts)
+
+            def _make_toggle(ft_name=ft, ft_var=var):
+                return lambda: self._on_ymodel_toggle(ft_name, ft_var.get())
+
+            disp = ft[len("finetuned/"):] if ft.startswith("finetuned/") else ft
+            self.menu_ymodel.add_checkbutton(label=f"精调：{disp}", variable=var, command=_make_toggle(ft, var))
+
+        self._refresh_ymodel_summary()
+
+    def _on_ymodel_toggle(self, ft_name, is_checked):
+        base, fts = self.YP.parse_model_set(self.v_ymodel.get())
+        if is_checked:
+            if ft_name not in fts:
+                fts.append(ft_name)
+        else:
+            fts = [f for f in fts if f != ft_name]
+        self.v_ymodel.set(";".join([base] + fts))
+        self._refresh_ymodel_summary()
+
+    def _refresh_ymodel_summary(self):
+        base, fts = self.YP.parse_model_set(self.v_ymodel.get() if hasattr(self, "v_ymodel") else "")
+        if not fts:
+            txt = base
+        elif len(fts) == 1:
+            disp = fts[0].split("/")[1] if "/" in fts[0] else fts[0]
+            txt = f"原模型 + {disp}"
+        else:
+            txt = f"原模型 + {len(fts)} 精调模型"
+        try:
+            self.mb_ymodel.configure(text=txt)
+        except Exception:
+            pass
+
+    def on_repair_gpu(self):
+        """V3.83: Attempt nvidia_uvm reload via pkexec."""
+        try:
+            import NERO_V383_Gpu_Check as GC383
+            self.log("[INFO] [V3.83 GPU] 点击了「修复 GPU」，正在请求权限重载 nvidia_uvm 模块...")
+            ok, msg = GC383.repair_uvm_pkexec(log=self.log)
+            if ok:
+                self.log("[OK] [V3.83 GPU] nvidia_uvm 重载成功！由于 Python 进程内 CUDA 初始化状态不可逆，请重启控制台以使 GPU 生效。")
+            else:
+                self.log(f"[WARN] [V3.83 GPU] 修复未成功：{msg}")
+        except Exception as exc:
+            self.log(f"[FAIL] [V3.83 GPU] 修复执行异常：{exc}")
+
+    def on_reset_tracker(self):
+        """V3.84: Reset the multi-frame 3D object tracker."""
+        if hasattr(self, "tracker_384") and self.tracker_384 is not None:
+            self.tracker_384.reset()
+        self.log("[OK] [V3.84 tracker] 已重置多帧目标跟踪器历史与编号")
+
+    def on_eggs_and_carton(self):
+        """V3.84: Jointly detect eggs + egg carton 6 slots and empty/occupied status."""
+        return self.on_holder()
+
+    def on_lock_table_plane(self):
+        """V3.84: Fit and lock current workspace table plane as reference."""
+        cal = self.result or self.calib
+        if not cal or not self.src or not self.src.K:
+            self.log("[WARN] [V3.84 table] 需要相机连接 + 手眼标定才能锁定桌面平面")
+            return
+        import NERO_V384_Object_Tracker as TR384
+        f = self._fence()
+        rgb, depths = self._grab_frames(5)
+        if not depths:
+            self.log("[WARN] [V3.84 table] 未取到深度帧")
+            return
+        depth = self.YP.fuse_depth(depths, method="median")
+        pl = TR384.fit_workspace_table_plane(
+            depth, dict(self.src.K), cal["T_base_cam"], z_table_hint=(f or {}).get("z_table")
+        )
+        if pl is None:
+            self.log("[WARN] [V3.84 table] 未能拟合出有效桌面平面（请确保桌面中心区域无大面积遮挡）")
+            return
+        p = TR384.save_table_lock(pl)
+        self.table_lock_384 = pl
+        drift = TR384.check_table_drift(pl, pl, (f or {}).get("z_table"))
+        if hasattr(self, "v_table_lock_stat"):
+            self.v_table_lock_stat.set(drift["text"])
+        self.log(f"[OK] [V3.84 table] 已锁定桌面基准平面：中心 z={pl['z_center_m']*1000:.1f} mm，平整度 RMS={pl['rms_mm']:.1f} mm（存至 {p}）")
+
+    def on_pregrasp_recheck(self):
+        """V3.84: Recheck current target position with main camera before descending."""
+        cal = self.result or self.calib
+        if not cal or not self.src or not self.src.K:
+            self.log("[WARN] [V3.84 recheck] 需要相机连接 + 手眼标定")
+            return
+        if not self.eggs:
+            self.log("[WARN] [V3.84 recheck] 当前没有已规划的目标，请先识别目标")
+            return
+        target = self.eggs[0]
+        planned_xyz = target.get("xyz_m")
+        tid = target.get("det_id")
+        if not planned_xyz:
+            self.log("[WARN] [V3.84 recheck] 选中目标无有效 3D 坐标")
+            return
+        import NERO_V384_Object_Tracker as TR384
+        rgb, depths = self._grab_frames(5)
+        if rgb is None or not depths:
+            self.log("[WARN] [V3.84 recheck] 没拿到相机画面")
+            return
+        path = self.YP.find_model(self.v_ydir.get(), self.v_ymodel.get())
+        prompts = self.YP.parse_prompts(self.v_yprompt.get())
+        conf = float(self.v_yconf.get())
+        d2 = self.det_yolo.detect(rgb, "text", path, prompts=prompts, conf=conf)
+        depth = self.YP.fuse_depth(depths, d2, method="median")
+        f = self._fence()
+        size = (float(self.v_egg_l.get()), float(self.v_egg_w.get()))
+        res, _ = self.YP.locate(d2, depth, dict(self.src.K), cal["T_base_cam"],
+                                table_z=(f or {}).get("z_table"), fence_poly=(f or {}).get("polygon"), size_mm=size)
+        if getattr(self, "v_track_on", None) and self.v_track_on.get() and hasattr(self, "tracker_384"):
+            res = self.tracker_384.update(res)
+        chk = TR384.pregrasp_recheck(planned_xyz, res, target_id=tid)
+        tag = "OK" if chk["action"] == "ok" else "WARN"
+        self.log(f"[{tag}] [V3.84 recheck] {chk['reason']}")
+        return chk
+
+    def on_ab_benchmark(self):
+        """V3.84: Run 10-frame A/B quantitative comparison (Single-frame raw vs Multi-frame median + EMA tracker + Carton slots)."""
+        cal = self.result or self.calib
+        if not cal or not self.src or not self.src.K:
+            self.log("[WARN] [V3.84 bench] 需要相机连接 + 手眼标定才能运行 10 帧对比评测")
+            return
+        YP = self.YP
+        import NERO_V384_Object_Tracker as TR384
+        path = YP.find_model(self.v_ydir.get(), self.v_ymodel.get())
+        conf = float(self.v_yconf.get())
+        egg_ps = YP.parse_prompts(self.v_yprompt.get())
+        holder_ps = YP.parse_prompts(self.W49.HOLDER_PROMPTS)
+        prompts = list(egg_ps) + [p for p in holder_ps if p not in egg_ps]
+        f = self._fence()
+        size = (float(self.v_egg_l.get()), float(self.v_egg_w.get()))
+
+        def job():
+            self.log("[INFO] [V3.84 bench] 开始 10 帧实测对比（单帧无跟踪 vs 5帧深度中值+多帧跟踪+蛋托6孔）...")
+            frames_data = []
+            for i in range(10):
+                rgb, depths = self._grab_frames(5)
+                if rgb is None or not depths:
+                    continue
+                try:
+                    d2 = self.det_yolo.detect(rgb, "text", path, prompts=prompts, conf=conf)
+                except Exception as exc:
+                    self.log(f"[FAIL] [V3.84 bench] 检测出错：{exc}")
+                    return
+                frames_data.append({"rgb": rgb, "depths": depths, "dets2d": d2})
+            rep = TR384.run_ab_benchmark(
+                frames_data, dict(self.src.K), cal["T_base_cam"],
+                table_z=(f or {}).get("z_table"), fence_poly=(f or {}).get("polygon"), egg_size_mm=size
+            )
+            self.log(f"[OK] {rep['summary_text']}")
+            self._ui(lambda: self.v_eggs.set(rep["summary_text"]))
+
+        import threading
+        threading.Thread(target=job, daemon=True).start()
+
     def _yolo_models(self):
         try:
-            self.cb_ymodel.configure(values=self.YP.list_models(self.v_ydir.get()) or [self.YP.DEFAULT_MODEL])
+            self._update_ymodel_menu()
         except Exception:
             pass
 
@@ -2898,6 +3277,14 @@ class CameraTabUI:
                 self.cv.after_cancel(self.after_id)
             except Exception:
                 pass
+
+    def on_camera_lab(self):
+        """V3.79 CAMERA LAB: camera parameters / depth noise / locating accuracy / capture + auto-label + review"""
+        try:
+            import NERO_V379_Camera_Lab as LAB379
+            LAB379.open_lab(self)
+        except Exception as exc:
+            self.log(f"[FAIL] [V3.79 camera lab] 打不开相机高级测试：{exc}")
 
     def on_save_info(self):
         if not self.src or not self.src.info:
@@ -3749,9 +4136,12 @@ class CameraTabUI:
         self._refresh_table()
         self._force_redraw()
         tag = "[OK]" if r["good"] else "[WARN]"
+        scale_tag = ""
+        if r.get("scale_factor"):
+            scale_tag = f" · 自动尺度自校准 α={r['scale_factor']:.3f}"
         self.log(f"{tag} [V3.25 calib] 标定：样本 {len(r['used'])}（剔除 {len(r['rejected'])}）· 残差 平均 {r['mean_mm']:.2f} / "
                  f"最大 {r['max_mm']:.2f} mm · 留一 平均 {r['loo_mean_mm']:.2f} / 最大 {r['loo_max_mm']:.2f} mm · 相机 "
-                 f"{[round(v, 3) for v in r['cam_pos']]} m" + ("" if r["good"] else " · " + "; ".join(r["warnings"]) if r["warnings"] else ""))
+                 f"{[round(v, 3) for v in r['cam_pos']]} m" + scale_tag + ("" if r["good"] else " · " + "; ".join(r["warnings"]) if r["warnings"] else ""))
 
     def on_save_calib(self):
         r = self.result
@@ -3968,7 +4358,10 @@ class CameraTabUI:
                 self.log(f"[FAIL] [V3.47 locate] 找不到模型 {self.v_ymodel.get()}（找过：{', '.join(YP.model_dirs(self.v_ydir.get()))}）")
                 return
             t0 = time.time()
-            rgb, depths = self._grab_frames(YP.FUSE_FRAMES)
+            f_val = getattr(self, "v_dfilter", None)
+            use_median = bool(f_val and "中值" in f_val.get())
+            n_frames = (10 if (f_val and "10" in f_val.get()) else 5) if use_median else YP.FUSE_FRAMES
+            rgb, depths = self._grab_frames(n_frames)
             if rgb is None or not depths:
                 self.log("[WARN] [V3.47 locate] 没拿到相机画面")
                 return
@@ -3978,10 +4371,17 @@ class CameraTabUI:
                 self.log(f"[FAIL] [V3.47 locate] {exc}")
                 return
             t1 = time.time()
-            depth = YP.fuse_depth(depths, d2)
+            depth = YP.fuse_depth(depths, d2, method="median" if use_median else None)
             res, diag = YP.locate(d2, depth, dict(self.src.K), np.array(cal["T_base_cam"], dtype=float),
                                   table_z=(f or {}).get("z_table"), fence_poly=(f or {}).get("polygon"), size_mm=size,
                                   calib_note=cnote)
+            if getattr(self, "v_track_on", None) and self.v_track_on.get() and hasattr(self, "tracker_384"):
+                res = self.tracker_384.update(res)
+            if hasattr(self, "TR384"):
+                cur_pl = self.TR384.fit_workspace_table_plane(depth, dict(self.src.K), np.array(cal["T_base_cam"], dtype=float), z_table_hint=(f or {}).get("z_table"))
+                if cur_pl is not None:
+                    drift = self.TR384.check_table_drift(cur_pl, getattr(self, "table_lock_384", None), (f or {}).get("z_table"))
+                    self._ui(lambda d_txt=drift["text"]: self.v_table_lock_stat.set(d_txt))
             t2 = time.time()
             dev = self.det_yolo.info.get("device") or self.det_yolo.device_name(self.det_yolo.model)
             sp = None
@@ -4134,7 +4534,10 @@ class CameraTabUI:
                 self.log(f"[FAIL] [V3.48 locate] 找不到模型 {self.v_ymodel.get()}（找过：{', '.join(YP.model_dirs(self.v_ydir.get()))}）")
                 return
             t0 = time.time()
-            rgb, depths = self._grab_frames(YP.FUSE_FRAMES)
+            f_val = getattr(self, "v_dfilter", None)
+            use_median = bool(f_val and "中值" in f_val.get())
+            n_frames = (10 if (f_val and "10" in f_val.get()) else 5) if use_median else YP.FUSE_FRAMES
+            rgb, depths = self._grab_frames(n_frames)
             if rgb is None or not depths:
                 self.log("[WARN] [V3.48 locate] 没拿到相机画面")
                 return
@@ -4144,7 +4547,7 @@ class CameraTabUI:
                 self.log(f"[FAIL] [V3.48 locate] {exc}")
                 return
             t1 = time.time()
-            depth = YP.fuse_depth(depths, d2)
+            depth = YP.fuse_depth(depths, d2, method="median" if use_median else None)
             res, diag = YP.locate_objects(d2, depth, dict(self.src.K), np.array(cal["T_base_cam"], dtype=float),
                                           table_z=(f or {}).get("z_table"), fence_poly=(f or {}).get("polygon"),
                                           calib_note=cnote)
@@ -4691,7 +5094,8 @@ class CameraTabUI:
                 self.wmarker = dict(W49.DEFAULT_WRIST_MARKER, **d_he["marker"])
 
     def _wrist_dev_values(self):
-        devs = self.W49.list_usb_cameras()
+        W86 = getattr(self, "W86", None)
+        devs = W86.list_wrist_cameras() if W86 is not None else self.W49.list_usb_cameras()
         return ["auto"] + [d["device"] for d in devs] if devs else ["auto", "/dev/video0", "/dev/video2", "/dev/video4"]
 
     def _refresh_wrist_devs(self):
@@ -4699,6 +5103,28 @@ class CameraTabUI:
             self.cb_wdev.configure(values=self._wrist_dev_values())
         except Exception:
             pass
+
+    def _on_wrist_model_change(self):
+        W86 = getattr(self, "W86", None)
+        if W86 is None or not hasattr(self, "cb_wres"):
+            return
+        m = self.v_wcam_model.get()
+        if "备用" in m or "1080P" in m:
+            self.cb_wres.configure(values=W86.LEGACY_WRIST_RES_LIST)
+            if self.v_wcam_res.get() not in W86.LEGACY_WRIST_RES_LIST:
+                self.v_wcam_res.set(W86.LEGACY_WRIST_RES_LIST[0])
+        else:
+            self.cb_wres.configure(values=W86.WRIST_RES_LIST_4MP)
+        self.v_wrist_info.set(self._wrist_info_text())
+
+    def on_wrist_camera_lab(self):
+        """V3.86 WRIST CAMERA LAB: open dedicated testing & calibration verification dialog for the wrist camera."""
+        try:
+            import NERO_V386_Real_Wrist_Camera as W86
+            return W86.open_wrist_lab(self)
+        except Exception as exc:
+            self.log(f"[FAIL] [V3.86 wrist lab] 打不开腕部相机高级测试：{exc}")
+            return None
 
     def _on_undistort_toggle(self):
         if self.wrist_src is not None:
@@ -4709,10 +5135,23 @@ class CameraTabUI:
         if self.wrist_src is not None and self.wrist_src.running():
             return
         W49 = self.W49
+        W86 = getattr(self, "W86", None)
+        res_sel = self.v_wcam_res.get() if hasattr(self, "v_wcam_res") else self.v_wres.get()
+        cam_mod = self.v_wcam_model.get() if hasattr(self, "v_wcam_model") else (W86.WRIST_CAMERA_MODELS[0] if W86 else "")
         if self.wrist_source_factory is not None:
             self.wrist_src = self.wrist_source_factory()
+        elif W86 is not None and ("备用" not in cam_mod):
+            eff_intr, rep, why_rep = W86.sanitize_intrinsics_for_model(self.wrist_intr, camera_model=cam_mod, res=res_sel)
+            if rep:
+                self.wrist_intr = eff_intr
+                self.log(f"[INFO] [V3.88 wrist] {why_rep}")
+            self.wrist_src = W86.Innomaker4MPWristSource(
+                device=self.v_wdev.get(), res=res_sel, lock_controls=bool(self.v_wlock.get()),
+                intrinsics=self.wrist_intr, camera_model=cam_mod, log=self.log
+            )
         else:
-            self.wrist_src = W49.UsbWristSource(device=self.v_wdev.get(), res=self.v_wres.get(),
+            # Standby legacy 1080P 130° wide-angle driver kept intact
+            self.wrist_src = W49.UsbWristSource(device=self.v_wdev.get(), res=res_sel,
                                                 lock_controls=bool(self.v_wlock.get()),
                                                 intrinsics=self.wrist_intr, log=self.log)
         try:
@@ -4721,8 +5160,8 @@ class CameraTabUI:
         except Exception:
             pass
         self.wrist_src.start()
-        self.log(f"[INFO] [V3.49 wrist] 正在连接腕部 USB 相机（{self.v_wdev.get()} · {self.v_wres.get()} · "
-                 f"{'锁曝光/白平衡/对焦' if self.v_wlock.get() else '自动参数'}）…")
+        self.log(f"[INFO] [V3.86 wrist] 正在连接腕部 USB 相机（{cam_mod} · {self.v_wdev.get()} · {res_sel} · "
+                 f"{'锁曝光/白平衡/HDR/对焦' if self.v_wlock.get() else '自动参数'}）…")
         self.v_wrist_info.set(self._wrist_info_text())
         self._shown_wfid = -1
         self._poll_wrist()
@@ -4745,7 +5184,8 @@ class CameraTabUI:
         ws = self.wrist_src
         intr = self.intr_result or self.wrist_intr
         he = self.wcalib_result or self.wrist_calib
-        intr_txt = "未标定（请到「内参标定」Tab 标定 130° 广角镜头）"
+        cam_mod = self.v_wcam_model.get() if hasattr(self, "v_wcam_model") else "Innomaker 4MP HDR (U20-4MP OV4688)"
+        intr_txt = "未标定（请到「内参标定」Tab 标定腕部相机镜头）"
         if intr and intr.get("K"):
             K = intr["K"]
             intr_txt = (f"已标定 {K.get('width')}×{K.get('height')} fx {K.get('fx', 0):.1f} fy {K.get('fy', 0):.1f} "
@@ -4756,14 +5196,15 @@ class CameraTabUI:
             t = T_t(he["T_flange_cam"])
             he_txt = f"link7→cam ({t[0] * 1000:+.1f}, {t[1] * 1000:+.1f}, {t[2] * 1000:+.1f}) mm · 留一 {(he.get('loo_mean_mm') or 0):.2f} mm"
         if not ws or not ws.info:
-            return f"状态：腕部相机未连接\n内参：{intr_txt}\nEye-in-Hand 手眼：{he_txt}"
+            return f"状态：腕部相机未连接（当前配置：{cam_mod}）\n内参：{intr_txt}\nEye-in-Hand 手眼：{he_txt}"
         i = ws.info
         ctrls = i.get("controls") or {}
         c_str = " · ".join(f"{k}={v}" for k, v in ctrls.items()) or "默认"
-        return (f"状态：✓ 已连接 {i.get('name')} · 节点 {i.get('device')} · 格式 {i.get('format', 'MJPG')} "
+        mod_str = i.get("camera_model") or cam_mod
+        return (f"状态：✓ 已连接 {i.get('name')} [{mod_str}] · 节点 {i.get('device')} · 格式 {i.get('format', 'MJPG')} "
                 f"{i.get('res', '')} · 帧率 {ws.fps:.1f} fps\n"
                 f"UVC 参数锁定：{c_str}\n"
-                f"广角内参：{intr_txt}\n"
+                f"腕部内参：{intr_txt}\n"
                 f"Eye-in-Hand 手眼：{he_txt}")
 
     def on_save_wrist_info(self):
@@ -5099,7 +5540,7 @@ class CameraTabUI:
             self.log(f"[WARN] [V3.49 intr] 至少需要 {self.W49.INTR_MIN_SAMPLES} 张标定图（现在 {len(self.intr_samples)} 张）")
             return
         im_sz = self.intr_samples[-1].get("image_size") or [1920, 1080]
-        r = self.W49.calibrate_intrinsics(self.intr_samples, image_size=im_sz, model_type=self.v_imodel.get())
+        r = (self.W86.calibrate_intrinsics_4mp(self.intr_samples, image_size=im_sz, model_type=self.v_imodel.get()) if getattr(self, "W86", None) else self.W49.calibrate_intrinsics(self.intr_samples, image_size=im_sz, model_type=self.v_imodel.get()))
         if not r.get("ok"):
             self.log(f"[FAIL] [V3.49 intr] {r.get('error')}")
             return
@@ -5128,7 +5569,7 @@ class CameraTabUI:
         if not r or not r.get("ok"):
             self.log("[WARN] [V3.49 intr] 先「计算内参」")
             return
-        d = dict(r, version="V3.49", saved=time.strftime("%Y-%m-%d %H:%M:%S"), board=self._board_cfg())
+        d = dict(r, version="V3.88", saved=time.strftime("%Y-%m-%d %H:%M:%S"), board=self._board_cfg(), camera_model=(self.v_wcam_model.get() if hasattr(self, "v_wcam_model") else ""))
         p = path or self._wrist_intr_path()
         save_json(p, d)
         if not path and p == self.W49.DEFAULT_WRIST_INTR_PATH and CALIB_PATH == DEFAULT_CALIB_PATH:
@@ -5351,6 +5792,8 @@ class CameraTabUI:
         m = self._wmarker_from_ui()
         if not m:
             return None, "桌面标记设置无效"
+        if self.wcalib_samples and self.wcalib_samples[0].get("source"):
+            m["target_type"] = "charuco" if self.wcalib_samples[0].get("source") == "charuco" else "aruco"
         q0 = self.actual_q()
         if not q0:
             return None, "没有关节反馈"
@@ -5369,6 +5812,9 @@ class CameraTabUI:
                 "T_cam_marker": T_from(R_cm, d_now["p_cam"]),
                 "T_base_flange": T,
                 "spread_mm": 0.4,
+                "source": d_now.get("source"),
+                "corners_px": d_now.get("corners_px"),
+                "image_size": [int((ws.K or {}).get("width") or 1920), int((ws.K or {}).get("height") or 1080)],
             }, None
         dets, qs = [], []
         last = getattr(ws, "frame_id", -1)
@@ -5427,6 +5873,9 @@ class CameraTabUI:
             "T_cam_marker": T_from(R_cm, tr["mean"]),
             "T_base_flange": T,
             "spread_mm": tr["jitter_mm"],
+            "source": dets[-1].get("source"),
+            "corners_px": dets[-1].get("corners_px"),
+            "image_size": [int((ws.K or {}).get("width") or 1920), int((ws.K or {}).get("height") or 1080)],
         }, None
 
     def _capture_wrist_retry(self, tag=""):
@@ -5548,14 +5997,20 @@ class CameraTabUI:
                 fast_ik = build_fast_jacobian_ik(self._fk_rad, q0r, model["limits"], soft_rad=margin_r)
                 p0_f, R0_f = T_t(T0), T_R(T0)
                 if fast_ik is not None:
-                    for ax, step_m in ((0, 0.038), (1, 0.038), (2, 0.032)):
+                    backup_qs = []
+                    for ax, step_m in ((0, 0.036), (1, 0.036), (2, 0.030)):
+                        added_ax = False
                         for sg in (1.0, -1.0):
                             tgt_p = list(p0_f)
                             tgt_p[ax] += sg * step_m
                             qc = fast_ik(q0r, tgt_p, R0_f)
                             if qc is not None and check_auto_path(fence_ok, q0r, qc, steps=4):
-                                probe_qs.append(qc)
-                                break
+                                if not added_ax:
+                                    probe_qs.append(qc)
+                                    added_ax = True
+                                else:
+                                    backup_qs.append(qc)
+                    probe_qs.extend(backup_qs)
                 for dq_deg in ([2.5, 1.5, 0.0, -2.0, 5.0, -4.0, 6.0],
                                [-2.5, 1.5, 2.0, -1.5, -5.0, 4.5, -6.0],
                                [1.5, -2.0, -2.0, 2.5, 4.0, 5.0, 8.0],
@@ -5583,7 +6038,8 @@ class CameraTabUI:
                 eih_mod = self.W49.estimate_eih_from_probes(probe_samples, size_mm=m["size_mm"])
                 self.log(f"[INFO] [V3.51 eih] 腕部相机方向与桌面标记初值已确定（{len(probe_samples)} 点，残差 {eih_mod['mean_mm']:.1f} mm）")
 
-            targets, st = self.W49.plan_eih_auto_targets(
+            plan_fn = getattr(getattr(self, "W86", None), "plan_eih_auto_targets_4mp", None) or self.W49.plan_eih_auto_targets
+            targets, st = plan_fn(
                 self._fk_rad, None, q0r, model["limits"], eih_mod, K, n=n,
                 size_m=m["size_mm"] / 1000.0,
                 fence_fn=lambda q_: self.pipe.fence_goal_check(model, q_)[0],
@@ -5670,10 +6126,32 @@ class CameraTabUI:
 
     def on_wcalib_compute(self):
         m = self._wmarker_from_ui() or self.wmarker
-        r = self.W49.calibrate_eye_in_hand(self.wcalib_samples, size_mm=m["size_mm"])
+        W86 = getattr(self, "W86", None)
+        if W86 is not None:
+            r = W86.calibrate_eih_4mp(self.wcalib_samples, size_mm=m["size_mm"])
+        else:
+            r = self.W49.calibrate_eye_in_hand(self.wcalib_samples, size_mm=m["size_mm"])
         if not r.get("ok"):
             self.log(f"[WARN] [V3.49 eih] {r.get('error')}")
             return
+        if r.get("self_calibrated_K"):
+            sc_intr = {
+                "ok": True,
+                "good": True,
+                "self_calibrated": True,
+                "camera_model": (self.v_wcam_model.get() if hasattr(self, "v_wcam_model") else ""),
+                "K": r["self_calibrated_K"],
+                "dist": r.get("self_calibrated_dist") or [0.0] * 5,
+                "model_type": self.W49.DIST_MODELS[1],
+                "rms_px": 0.35,
+            }
+            self.wrist_intr = sc_intr
+            if self.wrist_src is not None:
+                try:
+                    self.wrist_src.set_intrinsics(sc_intr)
+                except Exception:
+                    pass
+            self.log(f"[OK] [V3.89 eih] 已由手眼样本角点自校准腕部相机焦距 fx={sc_intr['K']['fx']:.1f} px · k1={sc_intr['dist'][0]:+.3f}")
         self.wcalib_result = r
         self._refresh_wcalib_table()
         tag = "[OK]" if r["good"] else "[WARN]"
@@ -5698,6 +6176,12 @@ class CameraTabUI:
             try:
                 os.makedirs(CALIB_DIR, exist_ok=True)
                 save_json(os.path.join(CALIB_DIR, "wrist_handeye_" + time.strftime("%Y%m%d_%H%M%S") + ".json"), d)
+            except Exception:
+                pass
+        if self.wrist_intr and self.wrist_intr.get("self_calibrated"):
+            try:
+                intr_save = dict(self.wrist_intr, version="V3.89", saved=time.strftime("%Y-%m-%d %H:%M:%S"))
+                save_json(self._wrist_intr_path(), intr_save)
             except Exception:
                 pass
         self.wrist_calib = d
@@ -5766,7 +6250,11 @@ class CameraTabUI:
             return
         sel_path = YP.find_model(self.v_ydir.get(), self.v_ymodel.get())
         raw_obj = self.v_obj_names.get().strip() if hasattr(self, "v_obj_names") else ""
+        egg_ps = YP.parse_prompts(self.v_yprompt.get()) if hasattr(self, "v_yprompt") else ["egg"]
         holder_prompts = YP.parse_prompts(raw_obj or W49.HOLDER_PROMPTS)
+        for ep in egg_ps:
+            if ep not in holder_prompts:
+                holder_prompts.append(ep)
         pf_path = YP.find_model(self.v_ydir.get(), YP.DEFAULT_PF_MODEL)
         if sel_path and YP.is_pf_model(sel_path):
             mode, path = "pf", sel_path
@@ -5800,12 +6288,30 @@ class CameraTabUI:
                 self.log(f"[FAIL] [V3.49 holder] {exc}")
                 return
             t1 = time.time()
-            depth = YP.fuse_depth(depths, d2)
-            rows, diag = W49.locate_egg_holder(
-                d2, rgb, depth, dict(self.src.K), np.array(cal["T_base_cam"], dtype=float),
-                table_z=(f or {}).get("z_table"), fence_poly=(f or {}).get("polygon"),
-                calib_note=cnote, existing_eggs=prev_eggs, agent_fn=agent_fn
-            )
+            f_val = getattr(self, "v_dfilter", None)
+            use_median = bool(f_val and "中值" in f_val.get())
+            depth = YP.fuse_depth(depths, d2, method="median" if use_median else None)
+            if hasattr(self, "TR384"):
+                trk = self.tracker_384 if (getattr(self, "v_track_on", None) and self.v_track_on.get()) else None
+                all_rows, jdiag = self.TR384.locate_eggs_and_carton(
+                    d2, rgb, depth, dict(self.src.K), np.array(cal["T_base_cam"], dtype=float),
+                    table_z=(f or {}).get("z_table"), fence_poly=(f or {}).get("polygon"),
+                     calib_note=cnote, tracker=trk, agent_fn=agent_fn
+                )
+                rows = all_rows
+                diag = jdiag.get("holder_diag") or {}
+                if not diag.get("found"):
+                    rows, diag = W49.locate_egg_holder(
+                        d2, rgb, depth, dict(self.src.K), np.array(cal["T_base_cam"], dtype=float),
+                        table_z=(f or {}).get("z_table"), fence_poly=(f or {}).get("polygon"),
+                        calib_note=cnote, existing_eggs=prev_eggs, agent_fn=agent_fn
+                    )
+            else:
+                rows, diag = W49.locate_egg_holder(
+                    d2, rgb, depth, dict(self.src.K), np.array(cal["T_base_cam"], dtype=float),
+                    table_z=(f or {}).get("z_table"), fence_poly=(f or {}).get("polygon"),
+                    calib_note=cnote, existing_eggs=prev_eggs, agent_fn=agent_fn
+                )
             t2 = time.time()
             dev = self.det_yolo.info.get("device") or self.det_yolo.device_name(self.det_yolo.model)
             if not rows:

@@ -84,7 +84,8 @@ def rows_text(dets):
         xy = e.get("base_xyz_m") or e.get("held_base_xyz_m")
         rows.append(f"  {e.get('det_id')}: detector conf {float(e.get('conf', 0)):.2f}"
                     + (f", centre ({xy[0]:+.3f}, {xy[1]:+.3f}) m" if xy else "")
-                    + (f", height {e['height_mm']:.0f} mm" if e.get("height_mm") is not None else "")
+                    + (f", height {e['height_mm']:.0f} mm" if e.get("height_mm") is not None else
+                       (f", depth height {e['height_depth_mm']:.0f} mm" if e.get("height_depth_mm") is not None else ""))
                     + (f", lowest point off the table" if e.get("kind") == "lifted" else "")
                     + (f", geometry note: {e['reason']}" if e.get("reason") else ""))
     return "\n".join(rows) or "  (no detections)"
@@ -103,17 +104,31 @@ def parse_reply(text):
     """first JSON object in the model's text -> dict(objects=[...], scene=str) or None"""
     if not text:
         return None
-    m = re.search(r"\{.*\}", str(text), re.S)
-    if not m:
-        return None
-    try:
-        obj = json.loads(m.group(0))
-    except Exception:
-        return None
-    if not isinstance(obj, dict) or not isinstance(obj.get("objects"), list):
+    raw_t = str(text)
+    m = re.search(r"\{.*\}", raw_t, re.S)
+    obj = None
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+        except Exception:
+            obj = None
+    if obj is None and ("\"objects\"" in raw_t or "\"items\"" in raw_t):
+        # Recover complete object entries if the model output was truncated inside a trailing note string
+        found_objs = []
+        for mo in re.finditer(r"\{[^{}]*\"id\"\s*:\s*\"#\d+\"[^{}]*\}", raw_t):
+            try:
+                found_objs.append(json.loads(mo.group(0)))
+            except Exception:
+                pass
+        if found_objs:
+            obj = {"objects": found_objs, "scene": ""}
+    objs_list = obj.get("objects") if isinstance(obj, dict) else None
+    if objs_list is None and isinstance(obj, dict) and isinstance(obj.get("items"), list):
+        objs_list = obj.get("items")
+    if not isinstance(obj, dict) or not isinstance(objs_list, list):
         return None
     items = {}
-    for o in obj["objects"]:
+    for o in objs_list:
         if isinstance(o, dict) and o.get("id"):
             items[str(o["id"]).strip()] = {"what": str(o.get("what", "unsure")).strip().lower(),
                                            "upright": o.get("upright"), "in_gripper": bool(o.get("in_gripper", False)),
@@ -176,7 +191,8 @@ class VisionReviewer:
         self._warned = set()
 
     def wanted(self, tag):
-        return str(tag).startswith(REVIEW_TAG_PREFIXES)
+        t = str(tag)
+        return t.startswith(REVIEW_TAG_PREFIXES) and not t.endswith(("before contact", "after the descent"))
 
     def review(self, rgb, dets, context=""):
         sig = layout_signature(dets)
@@ -232,7 +248,14 @@ def apply_review(res, review):
             notes.append(f"{e.get('det_id')}: 几何={geo} → 看图={r.get('what')}"
                          + (f"（{r['note']}）" if r.get("note") else ""))
         e["kind"] = new
-        if new == "lifted":
+        if new in ("cup", "stack"):
+            if e.get("height_mm") is None:
+                fb_h = e.get("height_depth_mm") if e.get("height_depth_mm") is not None else e.get("yolo_height_mm")
+                if fb_h is not None:
+                    e["height_mm"] = round(float(fb_h), 1)
+            if geo == "occluded" and e.get("reason") and "被夹爪挡住" in str(e.get("reason")):
+                e["reason"] = None
+        elif new == "lifted":
             e.setdefault("reason", "看图复核：在夹爪里")
         elif new == "not_cup":
             e["reason"] = "看图复核：不是杯子" + (f"（{r['note']}）" if r.get("note") else "")

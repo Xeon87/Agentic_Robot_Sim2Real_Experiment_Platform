@@ -231,6 +231,88 @@ class SimServo:
             self.torque_limit = d[k] | (d[k + 1] << 8)
 
 
+def fix_port_permission(port, log=None):
+    """V3.65/V4.3 SERIAL PERMISSION AUTO-REPAIR: when opening /dev/ttyACM* or /dev/ttyUSB* is refused (Errno 13
+    Permission denied):
+    1. Try non-interactive `sudo -n chmod 666 <port>` and `chmod 666 <port>` first (fast, non-blocking);
+    2. If a password is required and a Tkinter GUI root is active, prompt via a Tkinter password dialog (`sudo -S`)
+       and also install a permanent `/etc/udev/rules.d/99-nero-serial.rules` rule so `/dev/ttyACM*` is permanently 0666;
+    3. Otherwise fall back to `pkexec chmod 666 <port>` if desktop PolicyKit is available."""
+    import shutil
+    import subprocess
+    p = str(port or "").strip()
+    if not p or p == SIM_PORT:
+        return False, "invalid port"
+    cmds = (["sudo", "-n", "chmod", "666", p], ["chmod", "666", p])
+    last_err = ""
+    for cmd in cmds:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=1.5, stdin=subprocess.DEVNULL)
+            if r.returncode == 0 or (os.path.exists(p) and os.access(p, os.R_OK | os.W_OK)):
+                if log:
+                    log(f"[OK] [V3.65 GRIPPER] 串口权限被拒绝，已自动执行 {' '.join(cmd)} 修复权限")
+                return True, " ".join(cmd)
+            last_err = (r.stderr or r.stdout or "").strip()
+        except Exception as exc:
+            last_err = str(exc)
+
+    # Interactive GUI password dialog (sudo -S) + permanent udev rule installation
+    udev_rule = 'KERNEL=="ttyACM[0-9]*", MODE="0666"\nKERNEL=="ttyUSB[0-9]*", MODE="0666"\n'
+    perm_shell = (
+        f"chmod 666 {p} /dev/ttyACM* /dev/ttyUSB* 2>/dev/null; "
+        f"printf '{udev_rule}' > /etc/udev/rules.d/99-nero-serial.rules 2>/dev/null; "
+        "udevadm control --reload-rules 2>/dev/null; udevadm trigger 2>/dev/null; "
+        f"usermod -aG dialout {os.environ.get('USER', 'qiuren')} 2>/dev/null; true"
+    )
+    try:
+        import tkinter as _tk
+        from tkinter import simpledialog as _sd
+        if getattr(_tk, "_default_root", None) is not None:
+            pw = _sd.askstring(
+                "串口权限自动修复",
+                f"打开夹爪串口 {p} 需要管理员权限。\n请输入 Ubuntu 登录密码（将同时写入永久 udev 规则，以后不再提示）：",
+                show="*",
+                parent=_tk._default_root,
+            )
+            if pw:
+                r_pw = subprocess.run(
+                    ["sudo", "-S", "-p", "", "sh", "-c", perm_shell],
+                    input=pw + "\n",
+                    capture_output=True,
+                    text=True,
+                    timeout=8.0,
+                )
+                if r_pw.returncode == 0 or (os.path.exists(p) and os.access(p, os.R_OK | os.W_OK)):
+                    if log:
+                        log(f"[OK] [V4.3 GRIPPER] 已通过密码授权修复 {p} 权限，并写入永久 udev 规则 (/etc/udev/rules.d/99-nero-serial.rules)")
+                    return True, f"sudo -S chmod 666 {p}"
+                last_err = (r_pw.stderr or r_pw.stdout or "").strip()
+    except Exception:
+        pass
+
+    # Fallback to pkexec graphical dialog if available on desktop
+    if os.environ.get("DISPLAY") and shutil.which("pkexec"):
+        try:
+            r_pk = subprocess.run(
+                ["pkexec", "sh", "-c", perm_shell],
+                capture_output=True,
+                text=True,
+                timeout=20.0,
+                stdin=subprocess.DEVNULL,
+            )
+            if r_pk.returncode == 0 or (os.path.exists(p) and os.access(p, os.R_OK | os.W_OK)):
+                if log:
+                    log(f"[OK] [V4.3 GRIPPER] 已通过 pkexec 图形授权修复 {p} 权限并写入永久 udev 规则")
+                return True, f"pkexec chmod 666 {p}"
+            last_err = (r_pk.stderr or r_pk.stdout or "").strip()
+        except Exception as exc:
+            last_err = str(exc)
+
+    if log:
+        log(f"[WARN] [V3.65 GRIPPER] 自动修复 {p} 权限未成功（{last_err[:120]}）：请在终端运行一次 sudo chmod 666 {p}")
+    return False, last_err
+
+
 class STSBus:
     """Feetech STS serial bus (same packet handling as the user's sts3215_gui_tool.py), or the simulator."""
 
@@ -261,6 +343,20 @@ class STSBus:
             return True, f"{port} @ {baud}"
         except Exception as exc:
             self.ser = None
+            msg_e = str(exc)
+            is_perm = (isinstance(exc, PermissionError) or "permission denied" in msg_e.lower()
+                       or "errno 13" in msg_e.lower()
+                       or (os.path.exists(str(port)) and not os.access(str(port), os.R_OK | os.W_OK)))
+            if is_perm and fix_port_permission(port, log=self.log)[0]:
+                try:
+                    self.ser = serial.Serial(port=port, baudrate=int(baud), bytesize=8, parity="N", stopbits=1,
+                                             timeout=timeout, write_timeout=timeout)
+                    self.ser.reset_input_buffer()
+                    self.ser.reset_output_buffer()
+                    return True, f"{port} @ {baud}（已自动修复串口权限）"
+                except Exception as exc2:
+                    self.ser = None
+                    return False, f"{port}: {exc2}"
             return False, f"{port}: {exc}"
 
     def disconnect(self):
@@ -501,8 +597,8 @@ class SO101RealGripper:
                "load_pct": st["load_pct"], "current_ma": st["current_ma"]}
         if how == "reached":
             res.update(ok=False, error=f"夹爪一直合到了 {-sq:.0f}°（没有停住）：指尖没碰到？检查指垫，或加大扭矩")
-        elif not (-4.0 <= new <= 6.0):
-            res.update(ok=False, error=f"停在 {new:+.2f}°，超出合理范围 −4…+6°：夹爪里有东西？先拿走再标定")
+        elif not (-6.5 <= new <= 6.0):
+            res.update(ok=False, error=f"停在 {new:+.2f}°，超出合理范围 −6.5…+6°：夹爪里有东西？先拿走再标定")
         else:
             self.cfg["touch_deg"], self.cfg["touch_calibrated"] = round(new, 2), True
             res["ok"] = True

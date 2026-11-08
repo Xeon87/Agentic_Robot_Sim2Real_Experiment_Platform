@@ -30,7 +30,7 @@ import sys
 import threading
 import time
 
-VERSION = "V3.76"
+VERSION = "V4.3"
 # V3.54 FIRMWARE V1.2.1 (NeroFW.V121) + FOLLOWER MODE TEACH EXIT + STEP 3 PUSH RECOVERY
 DEFAULT_FW_VERSION = "v121"
 SUPPORTED_FW_VERSIONS = ("v121", "v120", "v112", "v111", "default")
@@ -2538,10 +2538,10 @@ class RealPipeline:
             self.log(f"[WARN] [V3.15 safety] safety settings unavailable: {exc}")
             return None
 
-    def fence_goal_check(self, model, target_rad, ignore_xy_fence=False):
-        """V3.15/V3.53: target pose vs the software fence (FK with the driver URDF, else the sim URDF).
-        When ignore_xy_fence=True (e.g. folding back over the base to Park Pose D), only z violations (table/ceiling)
-        are enforced. -> (ok, text, violations)"""
+    def fence_goal_check(self, model, target_rad, ignore_xy_fence=False, tool_T=None, tool_z_min_above_table_m=None):
+        """V3.15/V3.53/V4.3: target pose vs the software fence (FK with the driver URDF, else the sim URDF).
+        When tool_T is provided (e.g. mounted SO-101 grasp frame instead of the 18.8 mm longer sim AgileX gripper),
+        uses that tool_T for the fence check."""
         sf = self.safety()
         if not sf or not sf.get("fence"):
             return True, "", []
@@ -2549,8 +2549,13 @@ class RealPipeline:
         urdf = self.real_urdf or sf.get("sim_urdf")
         if urdf is None:
             return False, "FENCE: no URDF for the fence check -> refused", []
+        fence_cfg = dict(sf["fence"])
+        if tool_z_min_above_table_m is not None:
+            zt = float(fence_cfg.get("z_table", 0.0))
+            fence_cfg["tool_z_min_override"] = min(float(fence_cfg.get("z_min_points", 0.03)), zt + float(tool_z_min_above_table_m))
+        active_tool_T = tool_T if tool_T is not None else sf.get("tool_T")
         ok, v, _pts = CS.fence_check(urdf, model["joints"], target_rad, model.get("base_link") or "base_link",
-                                     sf["fence"], sf.get("tool_T"))
+                                     fence_cfg, active_tool_T)
         if not ok and ignore_xy_fence:
             v = [v_ for v_ in v if v_.get("axis") == "z"]
             ok = len(v) == 0
@@ -2612,7 +2617,7 @@ class RealPipeline:
     def supports_joint_path(self):
         return "joint_path" in ((self.mon_status or {}).get("caps") or [])
 
-    def move_joint_path(self, model, path_rad, times_s, label="path", timeout_s=None):
+    def move_joint_path(self, model, path_rad, times_s, label="path", timeout_s=None, tool_T=None, tool_z_min_above_table_m=None):
         """execute a joint path (list of 7-joint points, the first = the current joints, times from 0) without
         re-planning: same gates as move_joints (sim / MoveIt / teach mode / every point inside the joint limits /
         goal fence) + the path fence check in the ROS monitor.  -> result dict like move_joints"""
@@ -2635,13 +2640,18 @@ class RealPipeline:
             for i, (q, (lo, hi)) in enumerate(zip(p, lims)):
                 if not (lo - 1e-6 <= q <= hi + 1e-6):
                     return {"ok": False, "error": f"joint path point {k}: J{i + 1} {math.degrees(q):.1f} deg outside limit"}
-        ok, txt, v = self.fence_goal_check(model, pts[-1])
+        ok, txt, v = self.fence_goal_check(model, pts[-1], tool_T=tool_T, tool_z_min_above_table_m=tool_z_min_above_table_m)
         if not ok:
             return {"ok": False, "error": txt, "fence_violation": {"waypoint": "goal", "violations": v}}
         extra = {"path": pts, "times": ts}
         sf = self.safety()
         if sf and sf.get("fence") and sf.get("path_check"):
-            extra.update(fence=sf["fence"], tool_T=sf.get("tool_T"), base=model.get("base_link") or "base_link",
+            fence_cfg = dict(sf["fence"])
+            if tool_z_min_above_table_m is not None:
+                zt = float(fence_cfg.get("z_table", 0.0))
+                fence_cfg["tool_z_min_override"] = min(float(fence_cfg.get("z_min_points", 0.03)), zt + float(tool_z_min_above_table_m))
+            active_tool_T = tool_T if tool_T is not None else sf.get("tool_T")
+            extra.update(fence=fence_cfg, tool_T=active_tool_T, base=model.get("base_link") or "base_link",
                          arm_joints=list(model["joints"]))
         return self._send_move(label, model["arm_group"], model["joints"], pts[-1], 1.0,
                                timeout_s or (ts[-1] + 30.0), extra)

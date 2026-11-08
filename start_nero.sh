@@ -29,8 +29,18 @@ GRIP365="$HERE/NERO_V365_STS3215_Gripper.py"   # V3.65 SO-101 jaw on the STS3215
 CUPYOLO366="$HERE/NERO_V366_Real_Cup_Yolo.py"   # V3.66 real cup perception = the Camera tab's YOLOE pipeline
 VISION374="$HERE/NERO_V374_Vision_Review.py"    # V3.74 LLM vision review of the real cup perception
 TASKREC368="$HERE/NERO_V368_Real_Task_Record.py"  # V3.68 task records (before / after images) + summary
+BENCH378="$HERE/NERO_V378_D435i_Bench.py"    # V3.78 D435I BENCH (standalone: profile / noise / accuracy / capture)
+LAB379="$HERE/NERO_V379_Camera_Lab.py"      # V3.79 CAMERA LAB (Camera tab 「相机高级测试」 window)
+TRAIN381="$HERE/NERO_V381_Yolo_Train.py"   # V3.81 YOLOE TRAIN (camera lab page 5 + training child)
+GPU383="$HERE/NERO_V383_Gpu_Check.py"      # V3.83 GPU PREFLIGHT CHECK & SELF-REPAIR
+TRACK384="$HERE/NERO_V384_Object_Tracker.py" # V3.84 MULTI-FRAME OBJECT TRACKER
+WRIST386="$HERE/NERO_V386_Real_Wrist_Camera.py" # V3.86 INNOMAKER 4MP OV4688 WRIST CAMERA + WRIST LAB
+STALE377="$HERE/NERO_V377_Stale_Procs.py"     # V3.77 STALE PROCESS CHECK (console: before a simulation starts)
 COLL375="$HERE/NERO_V375_Collision_Check.py"   # V3.75 COLLISION PRE-CHECK (sort / cup skills, MoveIt contact pairs)
 SORT372="$HERE/NERO_V372_Sort_Skills.py"      # V3.72 SORT ITEMS AGENT (sort_items scene skills, imported by the backend)
+STORE44="$HERE/NERO_V44_Storage.py"           # V4.4 EMBODIED_AI DRIVE STORAGE (LeRobot venv / models / datasets / training on the drive)
+WORKER44="$HERE/NERO_V44_SmolVLA_Worker.py"    # V4.4 SMOLVLA DRIVE WORKER (runs inside the drive venv)
+VLATAB4="$HERE/NERO_V4_Console_Tab.py"         # V4.x VLA / LeRobot console tab
 
 if [[ "${1:-}" == "--sim" ]]; then
   shift
@@ -49,7 +59,7 @@ echo "============================================================"
 echo " NERO ${RELEASE} — console"
 echo " Folder: $HERE"
 echo "============================================================"
-for f in "$SIM" "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" "$CAM" "$YOLO347" "$WRIST349" "$STRAT359" "$REALCUP365" "$GRIP365" "$CUPYOLO366" "$TASKREC368" "$SORT372" "$VISION374" "$COLL375" "$HERE/SHA256SUMS.txt"; do
+for f in "$SIM" "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" "$CAM" "$YOLO347" "$WRIST349" "$STRAT359" "$REALCUP365" "$GRIP365" "$CUPYOLO366" "$TASKREC368" "$SORT372" "$VISION374" "$COLL375" "$STALE377" "$BENCH378" "$LAB379" "$TRAIN381" "$STORE44" "$WORKER44" "$VLATAB4" "$HERE/SHA256SUMS.txt"; do
   [[ -f "$f" ]] || die "NERO file missing from this folder: $f"
 done
 if ( cd "$HERE" && sha256sum --quiet -c SHA256SUMS.txt ) >/dev/null 2>&1; then
@@ -63,7 +73,7 @@ fi
 # The console uses only the Python standard library + tkinter.
 PY="${NERO_CONSOLE_PYTHON:-/usr/bin/python3}"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
-"$PY" -m py_compile "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" "$STRAT359" "$REALCUP365" "$GRIP365" "$CUPYOLO366" "$TASKREC368" "$VISION374" "$COLL375" || die "py_compile failed: $CONSOLE / $REAL / $JOINT / $CONS / $SAFE"
+"$PY" -m py_compile "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" "$STRAT359" "$REALCUP365" "$GRIP365" "$CUPYOLO366" "$TASKREC368" "$VISION374" "$COLL375" "$STALE377" "$BENCH378" "$LAB379" "$TRAIN381" "$STORE44" "$WORKER44" "$VLATAB4" || die "py_compile failed: $CONSOLE / $REAL / $JOINT / $CONS / $SAFE"
 "$PY" -c "import tkinter" 2>/dev/null || die "tkinter missing for $PY (sudo apt install python3-tk), or run the simulation directly: ./start_nero.sh --sim"
 bash -n "$SIM" || die "syntax error in $SIM"
 
@@ -73,6 +83,12 @@ if [[ -n "${CUDA_VISIBLE_DEVICES+x}" ]]; then
   echo "[INFO] V3.71: clearing inherited CUDA_VISIBLE_DEVICES='${CUDA_VISIBLE_DEVICES}' (YOLOE GPU)"
   unset CUDA_VISIBLE_DEVICES
 fi
+
+# V3.83 GPU PREFLIGHT: test CUDA in child process, auto-repair nvidia_uvm if needed
+"$PY" "$GPU383" --preflight || true
+
+# V4.4 EMBODIED_AI DRIVE: LeRobot + SmolVLA, models, datasets and training runs live on the removable drive
+"$PY" "$STORE44" --brief || true
 
 ARGS=()
 [[ "${1:-}" == "--real" ]] && ARGS+=(--real)

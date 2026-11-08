@@ -33,7 +33,7 @@ import os
 import threading
 import time
 
-VERSION = "V3.76"
+VERSION = "V4.3"
 HERE = os.path.dirname(os.path.realpath(__file__))
 DEFAULT_MODEL_DIR = os.environ.get("NERO_YOLO_DIR") or os.path.expanduser("~/Downloads/objectmodels")
 DEFAULT_MODEL = "yoloe-26s-seg.pt"
@@ -82,12 +82,159 @@ def model_dirs(primary=None):
 
 def list_models(model_dir):
     d = os.path.abspath(os.path.expanduser(model_dir or DEFAULT_MODEL_DIR))
-    return sorted(os.path.basename(p) for p in glob.glob(os.path.join(d, "yoloe*.pt")))
+    out = sorted(os.path.basename(p) for p in glob.glob(os.path.join(d, "yoloe*.pt")))
+    # V3.82 FINE-TUNED MODELS: saved fine-tuned models (finetuned/<name>/<file> + model_card.json) after the originals
+    for card_p in sorted(glob.glob(os.path.join(d, FINETUNE_SUB, "*", "model_card.json"))):
+        try:
+            with open(card_p, encoding="utf-8") as f:
+                fn = json.load(f).get("file")
+        except Exception:
+            continue
+        if fn and os.path.isfile(os.path.join(os.path.dirname(card_p), fn)):
+            out.append("/".join((FINETUNE_SUB, os.path.basename(os.path.dirname(card_p)), fn)))
+    return out
+
+
+# V3.82 FINE-TUNED MODELS: a fine-tuned YOLOE keeps its trained classes in the weights -> it is used like a -pf model
+# (fixed vocabulary, never set_classes, results filtered by the object names); objects it was not trained on are
+# looked for with the original model it was trained from (routing in YoloEDetector.detect)
+FINETUNE_SUB = "finetuned"
+_CARD_CACHE = {}
+
+
+def finetune_card(model_path):
+    """model_card.json next to a fine-tuned model (V3.81 save_model) -> dict or None"""
+    if not model_path:
+        return None
+    p = os.path.join(os.path.dirname(os.path.abspath(model_path)), "model_card.json")
+    try:
+        st = os.stat(p)
+    except OSError:
+        return None
+    key = (p, st.st_mtime)
+    if key not in _CARD_CACHE:
+        try:
+            with open(p, encoding="utf-8") as f:
+                card = json.load(f)
+            _CARD_CACHE[key] = card if card.get("file") == os.path.basename(model_path) else None
+        except Exception:
+            _CARD_CACHE[key] = None
+    return _CARD_CACHE[key]
+
+
+BUILTIN_SYNONYMS = {"egg": ["white egg", "white round object"], "egg carton": ["egg holder", "egg tray", "carton", "tray"]}     # V3.83 builtin egg synonyms
+
+
+def _singular_plural_match(a, b):
+    """V3.83: Strict case-insensitive match where singular and plural are treated as equal."""
+    a = str(a or "").strip().lower()
+    b = str(b or "").strip().lower()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if a + "s" == b or b + "s" == a:
+        return True
+    if a + "es" == b or b + "es" == a:
+        return True
+    if a.endswith("ies") and a[:-3] + "y" == b:
+        return True
+    if b.endswith("ies") and b[:-3] + "y" == a:
+        return True
+    return False
+
+
+def finetune_covers(card, prompt):
+    """V3.83 STRICT MATCH: is an object name strictly one of the model's trained classes (or synonyms)?
+    Singular and plural are treated as equal (egg == eggs, egg carton == egg cartons).
+    Fixes V3.82 bug where substring match caused 'egg carton' to be assigned to egg model."""
+    if not card or not prompt:
+        return False
+    syn = card.get("synonyms") or {}
+    classes = card.get("classes", [])
+    for c in classes:
+        candidates = [c]
+        candidates.extend(syn.get(c) or [])
+        if c in BUILTIN_SYNONYMS:
+            candidates.extend(BUILTIN_SYNONYMS[c])
+        for cand in candidates:
+            if _singular_plural_match(cand, prompt):
+                return True
+    return False
+
+
+def finetune_base_path(model_path, card):
+    """the original model the fine-tuned one was trained from (the model folder above finetuned/<name>/)"""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(model_path))))
+    for d in (root,) + tuple(model_dirs(None)):
+        p = os.path.join(d, card.get("base_model") or DEFAULT_MODEL)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+class ModelSetPath(str):
+    """V3.83: String representing a combined model set path, compatible with os.path on the base model."""
+    def rfind(self, sub, *args):
+        if ";" in self:
+            first = self.split(";")[0]
+            return first.rfind(sub, *args)
+        return super().rfind(sub, *args)
+
+    def __getitem__(self, item):
+        if ";" in self and isinstance(item, slice) and item.stop is not None:
+            first = self.split(";")[0]
+            return first[:item.stop]
+        return super().__getitem__(item)
+
+
+def parse_model_set(name_or_str):
+    """V3.83: Parse a model string into (base_name, [finetuned_names])."""
+    if not name_or_str:
+        return DEFAULT_MODEL, []
+    parts = [p.strip() for p in str(name_or_str).split(";") if p.strip()]
+    if not parts:
+        return DEFAULT_MODEL, []
+    base_name = None
+    ft_names = []
+    for p in parts:
+        if "finetuned" in p or finetune_card(p) is not None:
+            ft_names.append(p)
+        else:
+            if base_name is None:
+                base_name = p
+    if base_name is None:
+        base_name = DEFAULT_MODEL
+    return base_name, ft_names
+
+
+def find_model_set(model_dir, name_or_str):
+    """V3.83: Resolve a model set string to (base_model_path, [finetuned_model_paths])."""
+    base_name, ft_names = parse_model_set(name_or_str)
+    base_path = find_model(model_dir, base_name) or base_name
+    ft_paths = []
+    for ft in ft_names:
+        p = find_model(model_dir, ft)
+        if p and p not in ft_paths:
+            ft_paths.append(p)
+    return base_path, ft_paths
 
 
 def find_model(model_dir, name=DEFAULT_MODEL):
-    """Absolute path of the model: the chosen folder first, then the fall-back folders."""
-    if name and os.path.isabs(name) and os.path.isfile(name):
+    """Absolute path of the model: the chosen folder first, then the fall-back folders.
+    V3.83: If name contains ';' (combined models), resolves each model and returns a ModelSetPath."""
+    if not name:
+        name = DEFAULT_MODEL
+    if ";" in str(name):
+        base_name, ft_names = parse_model_set(name)
+        base_p = find_model(model_dir, base_name)
+        resolved = [base_p] if base_p else []
+        for ft in ft_names:
+            p = find_model(model_dir, ft)
+            if p and p not in resolved:
+                resolved.append(p)
+        return ModelSetPath(";".join(resolved)) if resolved else None
+    if os.path.isabs(name) and os.path.isfile(name):
         return name
     for d in model_dirs(model_dir):
         p = os.path.join(d, name or DEFAULT_MODEL)
@@ -97,7 +244,8 @@ def find_model(model_dir, name=DEFAULT_MODEL):
 
 
 def text_encoder_name(model_path):
-    return TEXT_ENCODERS["26"] if "26" in os.path.basename(model_path or "") else TEXT_ENCODERS[""]
+    first = str(model_path or "").split(";")[0]
+    return TEXT_ENCODERS["26"] if "26" in os.path.basename(first) else TEXT_ENCODERS[""]
 
 
 def file_sha256(path):
@@ -118,8 +266,13 @@ def parse_prompts(text):
 
 def is_pf_model(model_path):
     """V3.48 GENERAL OBJECTS + PF VOCABULARY: prompt-free checkpoints (*-pf.pt) ship a built-in 4,585-name vocabulary
-    (LVIS + Objects365 via LRPC) and must be run without set_classes() or visual_prompts."""
-    return "-pf" in os.path.basename(model_path or "").lower()
+    (LVIS + Objects365 via LRPC) and must be run without set_classes() or visual_prompts.
+    V3.83: Combined models (with ';') are handled by YoloEDetector.detect."""
+    if not model_path:
+        return False
+    if ";" in str(model_path):
+        return False
+    return "-pf" in os.path.basename(model_path or "").lower() or finetune_card(model_path) is not None
 
 
 def is_wildcard_prompt(prompts):
@@ -217,13 +370,15 @@ def _np(x):
 
 
 class YoloEDetector:
-    """Lazy YOLOE wrapper. detect() returns [{'cls': 0 egg | 1 not-egg, 'name', 'conf', 'box', 'mask'(HxW bool)}]."""
+    """Lazy YOLOE wrapper. detect() returns [{'cls': 0 egg | 1 not-egg, 'name', 'conf', 'box', 'mask'(HxW bool)}].
+    V3.83: Multi-model distribution & caching."""
 
     def __init__(self, log=print):
         self.log = log
         self.lock = threading.Lock()
         self.model = None
         self.key = None
+        self._models = {}
         self.device = None                  # None = ultralytics default (CUDA when available)
         self.info = {}
 
@@ -253,7 +408,8 @@ class YoloEDetector:
     def _load(self, path, mode, prompts):
         eff_mode = "pf" if (mode == "pf" or (mode == "text" and is_pf_model(path))) else mode
         key = (path, eff_mode, tuple(prompts) if eff_mode == "text" else ())
-        if self.model is not None and self.key == key:
+        if key in self._models:
+            self.model, self.key = self._models[key], key
             return self.model
         try:
             _cv2()
@@ -276,6 +432,7 @@ class YoloEDetector:
                     m.set_classes(list(prompts))
                 finally:
                     os.chdir(old)
+        self._models[key] = m
         self.model, self.key = m, key
         dev = self.device_name(m)
         self.info = {"path": path, "sha256": file_sha256(path), "mode": eff_mode, "device": dev,
@@ -296,10 +453,127 @@ class YoloEDetector:
             self.log(f"[WARN] [V3.47 yolo] GPU 出错（{str(exc)[:120]}）→ 改用 CPU")
             return m.predict(bgr, conf=conf, imgsz=IMGSZ, verbose=False, device="cpu", **kw)
 
+    def _detect_model_set(self, rgb, base_path, ft_paths, raw_prompts, conf):
+        """V3.83: Distribute prompts among fine-tuned models and base model, drop IoU >= 0.5 overlaps."""
+        import numpy as np
+        bgr = np.ascontiguousarray(rgb[..., ::-1])
+        all_dets = []
+
+        ft_cards = []
+        for p in ft_paths:
+            c = finetune_card(p)
+            if c:
+                ft_cards.append((p, c))
+
+        wildcard = is_wildcard_prompt(raw_prompts)
+        unassigned = []
+
+        if wildcard:
+            # Wildcard: all fine-tuned classes + original -pf model
+            for p, card in ft_cards:
+                m = self._load(p, "pf", ())
+                r = self._predict(m, bgr, conf)[0]
+                model_names = getattr(m, "names", None)
+                dets = parse_result(r, rgb.shape[:2], "pf", card.get("classes", []), model_names=model_names)
+                for d in dets:
+                    d["model"] = card.get("name") or os.path.basename(p)
+                all_dets.extend(dets)
+
+            pf_model = base_path if (base_path and is_pf_model(base_path)) else find_model(os.path.dirname(base_path) if base_path else None, DEFAULT_PF_MODEL)
+            if pf_model and os.path.isfile(pf_model):
+                m_pf = self._load(pf_model, "pf", ())
+                r = self._predict(m_pf, bgr, conf)[0]
+                dets = parse_result(r, rgb.shape[:2], "pf", [], model_names=getattr(m_pf, "names", None))
+                for d in dets:
+                    d["model"] = "original"
+                all_dets.extend(dets)
+        else:
+            prompts = list(raw_prompts) or parse_prompts(DEFAULT_TEXT_PROMPTS)
+            model_to_prompts = {p: [] for p, _ in ft_cards}
+            unassigned = []
+
+            for prompt in prompts:
+                cands = []
+                for p, card in ft_cards:
+                    if finetune_covers(card, prompt):
+                        rec = float((card.get("overall_new") or {}).get("recall") or 0.0)
+                        created = str(card.get("created") or "")
+                        cands.append((rec, created, p, card))
+                if cands:
+                    cands.sort(key=lambda x: (x[0], x[1]), reverse=True)
+                    best_p = cands[0][2]
+                    model_to_prompts[best_p].append(prompt)
+                else:
+                    unassigned.append(prompt)
+
+            self.info["routed"] = unassigned
+
+            for p, card in ft_cards:
+                assigned = model_to_prompts[p]
+                if not assigned:
+                    continue
+                # Never call set_classes on fine-tuned models
+                m = self._load(p, "pf", ())
+                r = self._predict(m, bgr, conf)[0]
+                model_names = getattr(m, "names", None)
+                dets = parse_result(r, rgb.shape[:2], "pf", card.get("classes", []), model_names=model_names)
+                filtered = []
+                for d in dets:
+                    d_name = d["name"]
+                    # Check if d_name matches any assigned prompt directly or via synonyms
+                    matched = False
+                    for prompt in assigned:
+                        if _singular_plural_match(d_name, prompt):
+                            matched = True
+                            break
+                        syns = (card.get("synonyms", {}) or {}).get(d_name, [])
+                        builtins = BUILTIN_SYNONYMS.get(d_name, [])
+                        if any(_singular_plural_match(s, prompt) for s in (syns + builtins)):
+                            matched = True
+                            break
+                    if matched:
+                        d["model"] = "finetuned" if len(ft_cards) == 1 else (card.get("name") or os.path.basename(p))
+                        filtered.append(d)
+                all_dets.extend(filtered)
+
+            self.info["routed"] = unassigned
+            if unassigned:
+                if not (base_path and os.path.isfile(base_path)) and ft_cards:
+                    base_path = finetune_base_path(ft_cards[0][0], ft_cards[0][1]) or base_path
+                if base_path and os.path.isfile(base_path):
+                    m_base = self._load(base_path, "text", unassigned)
+                    r = self._predict(m_base, bgr, conf)[0]
+                    model_names = getattr(m_base, "names", None)
+                    dets = parse_result(r, rgb.shape[:2], "text", unassigned, model_names=model_names)
+                    for d in dets:
+                        d["model"] = "original"
+                    all_dets.extend(dets)
+
+        def _box_iou(a, b):
+            ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+            iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+            u = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - ix * iy
+            return ix * iy / u if u > 0 else 0.0
+
+        all_dets.sort(key=lambda d: -d["conf"])
+        merged = []
+        for d in all_dets:
+            if not any(_box_iou(d["box"], m["box"]) >= 0.5 for m in merged):
+                merged.append(d)
+        self.info["routed"] = unassigned
+        return merged
+
     def detect(self, rgb, mode, model_path, ref=None, prompts=None, conf=CONF_MIN):
         import numpy as np
         raw_prompts = list(prompts) if prompts is not None else []
-        eff_mode = "pf" if (mode == "pf" or (mode != "vp" and is_pf_model(model_path))) else mode
+        base_path, ft_paths = find_model_set(None, model_path)
+        target_path = base_path or model_path
+
+        if mode != "vp" and ft_paths:
+            with self.lock:
+                return self._detect_model_set(rgb, base_path, ft_paths, raw_prompts, conf)
+
+        eff_mode = "pf" if (mode == "pf" or (mode != "vp" and is_pf_model(target_path))) else mode
         if eff_mode == "text":
             prompts = [p for p in raw_prompts if str(p).strip() not in ("*", "all", "全部")] or parse_prompts(DEFAULT_TEXT_PROMPTS)
         else:
@@ -307,7 +581,7 @@ class YoloEDetector:
         if eff_mode == "vp" and not ref:
             raise YoloUnavailable("视觉提示还没有参考图：先「框选参考」并「保存参考」（或改用文字提示）")
         with self.lock:
-            m = self._load(model_path, eff_mode, prompts)
+            m = self._load(target_path, eff_mode, prompts)
             bgr = np.ascontiguousarray(rgb[..., ::-1])       # D435i stream is RGB, ultralytics wants BGR
             if eff_mode == "vp":
                 from ultralytics.models.yolo.yoloe import YOLOEVPSegPredictor
@@ -328,8 +602,47 @@ class YoloEDetector:
             self.info["pf_seen"] = seen
             if not is_wildcard_prompt(prompts):
                 dets = [d for d in dets if match_object_name(d["name"], prompts)]
+        card = finetune_card(target_path) if eff_mode == "pf" else None
+        if card is not None:                             # V3.82 FINE-TUNED MODELS: route untrained objects
+            for d in dets:
+                d["model"] = card.get("name") or "finetuned"
+            dets = self._route_untrained(rgb, target_path, card, raw_prompts, dets, conf)
+        else:
+            for d in dets:
+                d.setdefault("model", "original")
         return dets
 
+    def _route_untrained(self, rgb, model_path, card, prompts, dets, conf):
+        """objects the fine-tuned model was not trained on -> the original model (text prompts); boxes that overlap a
+        fine-tuned detection are dropped"""
+        if is_wildcard_prompt(prompts):
+            return dets
+        rest = [p for p in prompts if not finetune_covers(card, p)]
+        self.info["routed"] = rest
+        if not rest:
+            return dets
+        base = finetune_base_path(model_path, card)
+        if not base:
+            if not getattr(self, "_route_warned", False):
+                self._route_warned = True
+                self.log(f"[WARN] [V3.82 yolo] 精调模型不认识 {rest}，也找不到它的原模型 {card.get('base_model')}")
+            return dets
+        if getattr(self, "_fallback", None) is None:
+            self._fallback = YoloEDetector(log=self.log)
+            self._fallback.device = self.device
+        extra = self._fallback.detect(rgb, "text", base, prompts=rest, conf=conf)
+
+        def iou(a, b):
+            ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+            iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+            u = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - ix * iy
+            return ix * iy / u if u > 0 else 0.0
+        for e in extra:
+            if not any(iou(e["box"], d["box"]) >= 0.5 for d in dets):
+                e["model"] = "original"
+                dets.append(e)
+        dets.sort(key=lambda d: -d["conf"])
+        return dets
 
 def _lookup_name(names_map, c):
     if isinstance(names_map, dict):
@@ -931,12 +1244,16 @@ def roi_boxes(dets2d, shape, pad=FUSE_PAD_PX):
     return [tuple(b) for b in boxes]
 
 
-def fuse_depth(depths, dets2d=None, pad=FUSE_PAD_PX):
-    """V3.47.2 ROI SPEED: fuse N depth frames; when dets2d is given, fuse only inside the padded ROIs around objects."""
+def fuse_depth(depths, dets2d=None, pad=FUSE_PAD_PX, method=None):
+    """V3.47.2 ROI SPEED: fuse N depth frames; when dets2d is given, fuse only inside the padded ROIs around objects.
+    V3.83: Support median filtering over multi-frame stacks (method='median')."""
     import numpy as np
     import NERO_V308_Camera_Perception as P8
     if len(depths) <= 1:
         return depths[0]
+    if method == "median" or (isinstance(method, str) and "median" in method.lower()):
+        import NERO_V378_D435i_Bench as B378
+        return B378.median_stack(depths)
     if dets2d is None:
         return P8.temporal_fuse(depths)
     rois = roi_boxes(dets2d, depths[0].shape, pad=pad)

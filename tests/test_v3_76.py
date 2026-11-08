@@ -19,6 +19,9 @@ I9  Launcher timed stop: v376_stop ends processes that ignore INT / TERM (and th
 I10 Twin 4/4 and the backend path with the MoveIt emulation 4/4 with the -90 mount and soft pads; the held carry is
     stretched HELD_SLOW x.
 I11 Release folder unchanged.
+I12 -90 mount place planning: pick_object has a `box` argument (strict schema, red / blue / any); the pick reports the
+    box it planned for; in the default layout the banana is laid exactly lengthwise (item yaw 0 / 180 deg) and the
+    apple still fits next to it (4/4, I10); one place planner (_plan_place) is used by the pick-time check too.
 """
 import hashlib
 import math
@@ -73,12 +76,12 @@ except Exception:
 
 # ------------------------------------------------------------------ I1
 for m in (CON, RR, YP, W49, S, RT):
-    assert m.VERSION == "V3.76", (m.__name__, m.VERSION)
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() == "V3.76" and SC.SCENES_REV == "V3.76"
+    assert m.VERSION in ("V3.76", "V3.77", "V3.78", "V3.79", "V3.80", "V3.81", "V3.82", "V3.83", "V3.84", "V3.85", "V3.86", "V3.87", "V3.88", "V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2") or m.__name__ == "NERO_V365_Real_Cup_Task", (m.__name__, m.VERSION)
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.76", "V3.77", "V3.78", "V3.79", "V3.80", "V3.81", "V3.82", "V3.83", "V3.84", "V3.85", "V3.86", "V3.87", "V3.88", "V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2") and SC.SCENES_REV == "V3.76"
 assert H((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).startswith("020cc6680f181872")
 for fn, h in (("NERO_V2_7_1_Unified_Backend.py", "5be2136f84ec4ccdfe6f8bc8d8998410ff9b3b827af4d571ea44373dc427527e"),
               ("NERO_V2_7_1_Agent.py", "3e52d05ea84d94c8359d5875fa0fee8c2cc42d612b52e59109e1166912439696"),
-              ("NERO_V325_Camera.py", "a58e69b363a5a861b3ad0806ba276c49601fc214ffdfc07ffba9bdc0c2c65797"),
+              ("NERO_V325_Camera.py", "82f2416d73671e7018d09d0cd72c17186154934a315b47c0d19fdb0427afd931"),
               ("NERO_V326_Wrist_Camera.py", "6b5c5d683073e4252b82c1c703ad664173960a179947f9e72775bb9683697d0a")):
     assert H((ROOT / fn).read_bytes()) == h, f"{fn} changed"
 for fn, mk in (("NERO_V343_Scenes.py", "V3.76 BIN WALLS OUT OF THE OLD BASKET-RIM RULE"),
@@ -177,7 +180,7 @@ if HAVE_MJ:
     def dropping_run(target_xy):
         tw = S.SortTwinIO()
         sk = S.SortSkills(tw)
-        assert sk.run_tool("pick_object", {"item_id": "item_1"})["ok"]
+        assert sk.run_tool("pick_object", {"item_id": "item_1", "box": "red"})["ok"]     # V3.77: its own bin
         orig = sk._go_line
 
         def go_line(label, *a, **kw):
@@ -189,23 +192,23 @@ if HAVE_MJ:
                 raise sk._Abort("SAFETY_STOP", {"during": label, "error": "runaway (test)"})
             return orig(label, *a, **kw)
         sk._go_line = go_line
-        return tw, sk, sk.run_tool("place_in_box", {"box": "blue"})
+        return tw, sk, sk.run_tool("place_in_box", {"box": "red"})
 
-    tw, sk, r6 = dropping_run(SC.SORT_BINS["blue"]["centre"])
+    tw, sk, r6 = dropping_run(SC.SORT_BINS["red"]["centre"])
     assert r6["ok"] and r6["reason"] == "ITEM_DROPPED_IN_BOX" and r6["warnings"], r6
-    assert sk.held is None and sk.placed.get("item_1") == "blue" and r6["physical_verification"]["dropped_by_safety_stop"]
+    assert sk.held is None and sk.placed.get("item_1") == "red" and r6["physical_verification"]["dropped_by_safety_stop"]
     assert sk.run_tool("return_to_safe_pose", {})["ok"]
     tw, sk, r6b = dropping_run((-0.30, 0.02))
     assert not r6b["ok"] and r6b["reason"] == "ITEM_DROPPED" and sk.held is None, r6b
     tw = S.SortTwinIO()
     sk = S.SortSkills(tw)
-    assert sk.run_tool("pick_object", {"item_id": "item_4"})["ok"]
+    assert sk.run_tool("pick_object", {"item_id": "item_4", "box": "blue"})["ok"]
     tw._release_hold()
     tw.gripper_open(80.0)
     tw.step(800)
     r6c = sk.run_tool("place_in_box", {"box": "blue"})
     assert not r6c["ok"] and r6c["reason"] == "NO_ITEM_HELD" and sk.run_tool("return_to_safe_pose", {})["ok"]
-    print("[I6] safety stop let go in the blue bin -> ITEM_DROPPED_IN_BOX (ok + warning), elsewhere -> ITEM_DROPPED; "
+    print("[I6] safety stop let go in the red bin -> ITEM_DROPPED_IN_BOX (ok + warning), elsewhere -> ITEM_DROPPED; "
           "released item noticed; return_to_safe_pose works")
 
 # ------------------------------------------------------------------ I7
@@ -240,6 +243,7 @@ fn = re.search(r"^v376_alive\(\).*?$", src, re.M).group(0) + "\n" + re.search(r"
 cl = re.search(r"^cleanup\(\)\{.*?^\}", src, re.M | re.S).group(0)
 for lbl in ('"$TRAC_MOVEIT_PID" 1', '"$BIO_MOVEIT_PID" 1', '"$BACKEND_PID" 0', '"$GPU_PID" 0'):
     assert lbl in cl, lbl
+assert 'wait "$w1" "$w2" "$w3" "$w4"' in cl and not re.search(r"^\s*wait\s*$", cl, re.M)   # a bare wait hangs on the log tee
 (TMP / "stopfn.sh").write_text(fn + "\n", encoding="utf-8")
 script = f"""source {TMP / 'stopfn.sh'}
 bash -c 'trap "" INT TERM; sleep 311 & wait' & P1=$!
@@ -276,6 +280,19 @@ if HAVE_MJ:
           f"stretched {S.HELD_SLOW}x)")
 else:
     print("[I5-I10 MuJoCo parts] skipped: MuJoCo not installed")
+
+# ------------------------------------------------------------------ I12
+pk = [t_ for t_ in S.SORT_TOOLS if t_["name"] == "pick_object"][0]["parameters"]
+assert pk["required"] == ["item_id", "box"] and pk["properties"]["box"]["enum"] == ["red", "blue", "any"]
+assert "pick_object(item_id, box)" in S.SORT_SYSTEM_INSTRUCTIONS
+src72 = (ROOT / "NERO_V372_Sort_Skills.py").read_text(encoding="utf-8")
+assert src72.count("self._plan_place(") == 2 and "V3.76 ONE PLACE PLANNER" in src72 and "V3.76 EXACT LENGTHWISE" in src72
+if HAVE_MJ:
+    pv = [o for o in out if o.get("tool") == "pick_object"][0]["physical_verification"]
+    assert pv.get("planned_for_box") == "red", pv
+    pb = [o for o in out if o.get("tool") == "place_in_box"][0]["physical_verification"]
+    assert abs(math.sin(math.radians(pb["item_yaw_deg"]))) < 0.02, pb
+    print(f"[I12] pick_object(item_id, box); banana planned for the red bin, laid at {pb['item_yaw_deg']} deg (lengthwise)")
 
 SNAP1 = snapshot()
 assert SNAP1 == SNAP0, [k_ for k_ in SNAP0 if SNAP0[k_] != SNAP1.get(k_)]
