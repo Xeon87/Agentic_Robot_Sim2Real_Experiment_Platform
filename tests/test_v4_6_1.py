@@ -41,7 +41,7 @@ class TestV461(unittest.TestCase):
         self.assertEqual((cfg["held_gap_mm"], cfg["offcentre_margin_mm"]), (26.5, 6.0))
         self.assertFalse(cfg["offcentre_regrasp"])
         self.assertFalse(cfg["wrist_slot_look_before_pick"])
-        self.assertIsNone(W49.egg_carton_config()["slot_pitch_mm"])      # V4.5 key still read correctly
+        self.assertEqual(W49.egg_carton_config()["slot_pitch_mm"], [46.0, 47.0])   # V4.6.6: measured 2x3 carton
         bad = os.path.join(self.tmp_dir(), "bad.json")
         json.dump({"held_gap_mm": "x", "offcentre_regrasp": 1}, open(bad, "w"))
         c2 = W49.egg_task_config(bad)
@@ -181,7 +181,7 @@ class TestV461(unittest.TestCase):
 
     def test_n7_markers(self):
         with open(os.path.join(HERE, "VERSION")) as f:
-            self.assertIn(f.read().strip(), ("V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4", "V4.6.5"))
+            self.assertIn(f.read().strip(), ("V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4", "V4.6.5", "V4.6.6"))
         self.assertEqual(RT.MARKER_V461, "V4.6.1 MEASURED HELD GAP + WRIST LOG ONLY")
         self.assertEqual((RT.STRICT_POS_MM, RT.STRICT_ROT_DEG, RT.STRICT_JOINT_DEG), (2.0, 1.0, 0.5))
 

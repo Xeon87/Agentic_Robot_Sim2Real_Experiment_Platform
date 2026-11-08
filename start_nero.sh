@@ -107,4 +107,19 @@ if [[ -f "$HERE/logs/stderr.log" ]] && (( $(stat -c %s "$HERE/logs/stderr.log" 2
 fi
 echo "----- console start $(date '+%F %T') (stderr of the console process) -----" >> "$HERE/logs/stderr.log"
 export LIBC_FATAL_STDERR_=1
+# V4.6.6 NATIVE CRASH TRACE: a tiny signal handler (tools/nero_crashtrace.c, built once with gcc into ~/.cache/nero)
+# writes the C-level stack (function + library) of a crash to logs/native_crash.log.  No gcc -> skipped (noted in
+# crash.log).  NERO_NO_NATIVE_TRACE=1 switches it off.
+if [[ "${NERO_NO_NATIVE_TRACE:-0}" != "1" ]] && command -v gcc >/dev/null 2>&1; then
+  _ct_src="$HERE/tools/nero_crashtrace.c"
+  _ct_dir="${XDG_CACHE_HOME:-$HOME/.cache}/nero"
+  _ct_so="$_ct_dir/nero_crashtrace_$(sha256sum "$_ct_src" | cut -c1-12).so"
+  if [[ ! -f "$_ct_so" ]]; then
+    mkdir -p "$_ct_dir" && gcc -shared -fPIC -O1 -o "$_ct_so" "$_ct_src" 2>>"$HERE/logs/stderr.log" || _ct_so=""
+  fi
+  if [[ -n "$_ct_so" && -f "$_ct_so" ]]; then
+    export NERO_NATIVE_CRASH_LOG="$HERE/logs/native_crash.log"
+    export LD_PRELOAD="$_ct_so${LD_PRELOAD:+:$LD_PRELOAD}"
+  fi
+fi
 exec "$PY" "$CONSOLE" "${ARGS[@]}" 2> >(tee -a "$HERE/logs/stderr.log" >&2)

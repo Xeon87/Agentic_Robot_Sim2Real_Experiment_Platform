@@ -2143,6 +2143,191 @@ def egg_task_config(path=None):
     return cfg
 
 
+MARKER_V466_TEMPLATE = "V4.6.6 FIXED CARTON TEMPLATE"
+CARTON_DIAG_KEEP = 30
+
+
+def carton_template_config(path=None):
+    """V4.6.6: fixed carton layout from config/egg_carton.json: "carton_grid": [rows, cols] (rows = the 2-hole
+    direction, cols = the 3-hole direction of a 2x3 carton) + "slot_pitch_mm": [along the cols, along the rows].
+    Env NERO_EGG_CARTON_GRID="2,3" overrides the grid; "none" switches the template off.  -> dict or None (then the V3.49 zero-prior guess is used)."""
+    grid = None
+    env = os.environ.get("NERO_EGG_CARTON_GRID", "").strip()
+    if env.lower() in ("none", "off", "0"):
+        return None                                   # template switched off -> V3.49 zero-prior guess
+    if env:
+        try:
+            grid = [int(x) for x in env.replace(" ", "").split(",")[:2]]
+        except Exception:
+            grid = None
+    if grid is None:
+        try:
+            with open(path or EGG_CARTON_CFG, "r", encoding="utf-8") as f:
+                grid = json.load(f).get("carton_grid")
+        except Exception:
+            grid = None
+    try:
+        R, C = int(grid[0]), int(grid[1])
+    except Exception:
+        return None
+    if not (1 <= R <= 6 and 1 <= C <= 8):
+        return None
+    pm = egg_carton_config(path).get("slot_pitch_mm")
+    if not pm:
+        return None
+    return {"rows": R, "cols": C, "pitch_cols_mm": float(pm[0]), "pitch_rows_mm": float(pm[1]),
+            "source": os.path.basename(path or EGG_CARTON_CFG)}
+
+
+def _disk_kernels(pitch_mm, res_mm):
+    import numpy as np
+    r_core, r_in, r_out = 0.24 * pitch_mm, 0.36 * pitch_mm, 0.52 * pitch_mm
+    n = int(math.ceil(r_out / res_mm))
+    yy, xx = np.mgrid[-n:n + 1, -n:n + 1]
+    d = np.hypot(xx, yy) * res_mm
+    return (d <= r_core).astype(np.float32), ((d >= r_in) & (d <= r_out)).astype(np.float32), (r_core, r_in, r_out)
+
+
+def bowl_score_map(s_mm, t_mm, h_mm, pitch_mm, res_mm=1.0, margin_mm=35.0):
+    """V4.6.6: height raster of the carton top (plane frame, mm) and the BOWL score per raster cell:
+    mean height of a ring at the cup rim (0.36-0.52 x pitch) minus mean height of the cup middle (<= 0.24 x pitch).
+    A real egg cup: rim high, middle low -> large positive score.  A drop-off at the carton edge (one side low), the
+    bare table or a cone between cups -> small / negative.  Cells without enough points -> -2.
+    -> dict(S, hmap, valid, x0, y0, res)"""
+    import numpy as np
+    cv2 = _cv2()
+    s = np.asarray(s_mm, float)
+    t = np.asarray(t_mm, float)
+    h = np.asarray(h_mm, float)
+    x0, y0 = float(s.min()) - margin_mm, float(t.min()) - margin_mm
+    nx = int((float(s.max()) + margin_mm - x0) / res_mm) + 1
+    ny = int((float(t.max()) + margin_mm - y0) / res_mm) + 1
+    ix = np.clip(((s - x0) / res_mm).astype(int), 0, nx - 1)
+    iy = np.clip(((t - y0) / res_mm).astype(int), 0, ny - 1)
+    sm = np.zeros((ny, nx), np.float64)
+    cn = np.zeros((ny, nx), np.float64)
+    np.add.at(sm, (iy, ix), h)
+    np.add.at(cn, (iy, ix), 1.0)
+    valid = (cn > 0).astype(np.float32)
+    hmap = np.where(cn > 0, sm / np.maximum(cn, 1.0), 0.0).astype(np.float32)
+    kc, ka, radii = _disk_kernels(pitch_mm, res_mm)
+    b = cv2.BORDER_CONSTANT
+    s_c = cv2.filter2D(hmap * valid, -1, kc, borderType=b)
+    n_c = cv2.filter2D(valid, -1, kc, borderType=b)
+    s_a = cv2.filter2D(hmap * valid, -1, ka, borderType=b)
+    n_a = cv2.filter2D(valid, -1, ka, borderType=b)
+    ok = (n_c >= 0.10 * kc.sum()) & (n_a >= 0.30 * ka.sum())
+    S = np.where(ok, np.clip(s_a / np.maximum(n_a, 1e-6) - s_c / np.maximum(n_c, 1e-6), -5.0, 25.0), -2.0)
+    return {"S": S.astype(np.float32), "hmap": hmap, "valid": valid, "x0": x0, "y0": y0, "res": res_mm,
+            "radii": radii}
+
+
+def template_offsets(R, C, pc_mm, pr_mm):
+    """slot centres of the fixed template in its own frame (u = cols direction, v = rows direction), row-major"""
+    return [((c_i + 0.5 - 0.5 * C) * pc_mm, (r_i + 0.5 - 0.5 * R) * pr_mm) for r_i in range(R) for c_i in range(C)]
+
+
+def fit_carton_template(s_mm, t_mm, h_mm, R, C, pc_mm, pr_mm, phi0_rad, centre0_mm, res_mm=1.0, search_mm=40.0,
+                        cav_mm=4.0):
+    """V4.6.6 FIXED CARTON TEMPLATE: rigid R x C grid with the MEASURED pitches; only its centre (search +-search_mm
+    around centre0) and direction (phi0 or phi0 + 90 deg, +-10 deg) are searched; score = sum of the bowl scores at
+    the slot centres.  The grid size never changes (a 2x3 carton is never read as 3x3 / 3x4).
+    -> dict(centre_mm, phi_rad, score, per_slot, n_cavities, bowl)"""
+    import numpy as np
+    bw = bowl_score_map(s_mm, t_mm, h_mm, min(pc_mm, pr_mm), res_mm)
+    S, x0, y0 = bw["S"], bw["x0"], bw["y0"]
+    ny, nx = S.shape
+    off = np.asarray(template_offsets(R, C, pc_mm, pr_mm), float)
+    g = np.arange(-search_mm, search_mm + 1e-9, res_mm)
+    TX, TY = np.meshgrid(centre0_mm[0] + g, centre0_mm[1] + g)
+    tx, ty = TX.ravel(), TY.ravel()
+    best = (-1e9, None, None, None)
+    for base in (phi0_rad, phi0_rad + math.pi / 2):
+        for dphi in np.radians(np.arange(-10.0, 10.0 + 1e-9, 2.0)):
+            phi = base + float(dphi)
+            c, s_ = math.cos(phi), math.sin(phi)
+            dx = off[:, 0] * c - off[:, 1] * s_
+            dy = off[:, 0] * s_ + off[:, 1] * c
+            X = tx[:, None] + dx[None, :]
+            Y = ty[:, None] + dy[None, :]
+            ix = np.round((X - x0) / res_mm).astype(int)
+            iy = np.round((Y - y0) / res_mm).astype(int)
+            inside = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny)
+            vals = np.full(ix.shape, -5.0)
+            vals[inside] = S[iy[inside], ix[inside]]
+            sc = vals.sum(axis=1)
+            k = int(np.argmax(sc))
+            if sc[k] > best[0]:
+                best = (float(sc[k]), (float(tx[k]), float(ty[k])), phi, vals[k].tolist())
+    score, centre, phi, per = best
+    phi = math.atan2(math.sin(phi), math.cos(phi))
+    return {"centre_mm": centre, "phi_rad": phi, "score": round(score, 2),
+            "per_slot": [round(v, 1) for v in per], "n_cavities": int(sum(v >= cav_mm for v in per)), "bowl": bw}
+
+
+def save_carton_diag(rgb_crop, mask_crop, mask_inner, slot_px, slot_scores, bowl, slot_st_mm, rect_st_mm, title,
+                     folder=None, keep=CARTON_DIAG_KEEP):
+    """V4.6.6: one PNG per carton fit (left: colour crop + YOLO mask outline (green) + eroded mask used (cyan) +
+    slots (red, number, bowl score); right: height map + bowl score circles + outer box).  -> path or None"""
+    try:
+        import numpy as np
+        import glob
+        cv2 = _cv2()
+        root = folder or os.path.join(os.environ.get("NERO_CALIB_DIR") or os.path.expanduser("~/Downloads/cameracalib"),
+                                      "carton_diag")
+        os.makedirs(root, exist_ok=True)
+        left = np.ascontiguousarray(rgb_crop[..., ::-1]).copy() if rgb_crop is not None else None
+        if left is not None:
+            for mk, col in ((mask_crop, (0, 200, 0)), (mask_inner, (255, 255, 0))):
+                if mk is not None:
+                    cs, _hh = cv2.findContours(mk.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    cv2.drawContours(left, cs, -1, col, 1)
+            for k, (px, py) in enumerate(slot_px):
+                if px is None:
+                    continue
+                cv2.circle(left, (int(px), int(py)), 5, (0, 0, 255), 2)
+                cv2.putText(left, f"{k + 1}", (int(px) + 6, int(py) - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1)
+        hm, val, res = bowl["hmap"], bowl["valid"], bowl["res"]
+        top = float(np.percentile(hm[val > 0], 95)) if (val > 0).any() else 1.0
+        hm8 = np.clip(hm / max(top, 1.0) * 255.0, 0, 255).astype(np.uint8)
+        right = cv2.applyColorMap(hm8, cv2.COLORMAP_JET)
+        right[val == 0] = (40, 40, 40)
+        r_in = bowl["radii"][1] / res
+
+        def px(st):
+            return int(round((st[0] - bowl["x0"]) / res)), int(round((st[1] - bowl["y0"]) / res))
+        if rect_st_mm is not None:
+            pts = np.array([px(q) for q in rect_st_mm], np.int32)
+            cv2.polylines(right, [pts], True, (255, 255, 255), 1)
+        for k, st in enumerate(slot_st_mm):
+            cv2.circle(right, px(st), int(r_in), (255, 255, 255), 1)
+            cv2.putText(right, f"{k + 1}:{slot_scores[k]:+.0f}", (px(st)[0] - 12, px(st)[1] + 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+        right = cv2.flip(right, 0)                             # plane frame y up
+        H = 360
+        panels = []
+        for im in (left, right):
+            if im is None:
+                continue
+            f = H / float(im.shape[0])
+            panels.append(cv2.resize(im, (max(1, int(im.shape[1] * f)), H), interpolation=cv2.INTER_NEAREST))
+        out = np.hstack(panels) if len(panels) > 1 else panels[0]
+        bar = np.full((22, out.shape[1], 3), 255, np.uint8)
+        cv2.putText(bar, title[:140], (4, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 1)
+        out = np.vstack([bar, out])
+        path = os.path.join(root, time.strftime("carton_%Y%m%d_%H%M%S") + f"_{int(time.time() * 1000) % 1000:03d}.png")
+        cv2.imwrite(path, out)
+        old = sorted(glob.glob(os.path.join(root, "carton_*.png")))
+        for f_ in old[:-keep]:
+            try:
+                os.remove(f_)
+            except OSError:
+                pass
+        return path
+    except Exception:
+        return None
+
+
 def refine_slot_grid(u_mm, v_mm, h_mm, R, C, pl_mm, pw_mm, h_top_mm=None, min_pts=8):
     """V4.5 SLOT CAVITY REFINEMENT: the nominal grid (outer box / columns) puts the slot centres wherever the outer box
     says; real cartons have flanges and sometimes a lid inside that box. Each EMPTY slot is a depression in the
@@ -2331,24 +2516,72 @@ def locate_egg_holder(dets2d, rgb, depth_m, K, T_base_cam, table_z=None, fence_p
     else:
         val_prof = hs * 1000.0
 
-    grid_info = infer_holder_grid(L_mm, W_mm, u_all_mm, v_all_mm, val_prof)
     crop_rgb = rgb[cy0:cy1, cx0:cx1] if rgb is not None else None
-    grid_info = agent_judge_holder(crop_rgb, dict(grid_info, L_mm=round(L_mm, 1), W_mm=round(W_mm, 1),
-                                                  H_mm=round(h_top_m * 1000.0, 1)), agent_fn=agent_fn)
-    R, C = int(grid_info["rows"]), int(grid_info["cols"])
-    pl_m = (L_mm / 1000.0) / C
-    pw_m = (W_mm / 1000.0) / R
+    # V4.6.6 FIXED CARTON TEMPLATE (config/egg_carton.json carton_grid + slot_pitch_mm): the grid is never guessed
+    tcfg = carton_template_config()
+    tmpl, tmpl_info = None, None
+    if tcfg is not None:
+        R, C = tcfg["rows"], tcfg["cols"]
+        pc_mm, pr_mm = tcfg["pitch_cols_mm"], tcfg["pitch_rows_mm"]
+        grid_info = {"rows": R, "cols": C, "score": 0.9, "judgment_source": "template"}
+        mc_er = cv2.erode(mc.astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
+        if cov >= 0.35 and (dz_m > 0).sum() >= 60:
+            inner = mc_er[vv_m[dz_m > 0] - cy0, uu_m[dz_m > 0] - cx0]
+            rel_t = P_all - o_pl
+            s_pl, t_pl = (rel_t @ e1) * 1000.0, (rel_t @ e2) * 1000.0
+            if int(inner.sum()) >= 200:
+                tmpl = fit_carton_template(s_pl[inner], t_pl[inner], hs[inner] * 1000.0, R, C, pc_mm, pr_mm,
+                                           yaw_rad, (float(sc_mm), float(tc_mm)))
+        if tmpl is not None and tmpl["n_cavities"] >= 2:
+            phi = tmpl["phi_rad"]
+            s0, t0 = tmpl["centre_mm"]
+            how = f"槽穴拟合（{tmpl['n_cavities']}/{R * C} 个碗形槽穴，分数 {tmpl['score']:.0f}）"
+        else:
+            phi, s0, t0 = yaw_rad, float(sc_mm), float(tc_mm)
+            how = ("槽穴不清楚 → 模板按外框中心 / 长边放置" if tmpl is not None else
+                   "深度点不够 → 模板按外框中心 / 长边放置")
+        u_long = math.cos(phi) * e1 + math.sin(phi) * e2
+        v_short = -math.sin(phi) * e1 + math.cos(phi) * e2
+        centre_pl = o_pl + (s0 / 1000.0) * e1 + (t0 / 1000.0) * e2
+        # stable numbering: columns (3-hole direction) increase away from the robot base
+        if float(np.dot(u_long[:2], centre_pl[:2])) < 0.0:
+            u_long, v_short = -u_long, -v_short
+        yaw_rad = math.atan2(float(u_long @ e2), float(u_long @ e1))
+        holder_xyz = centre_pl + (0.65 * h_top_m) * n_vec
+        rel_all = P_all - centre_pl
+        u_all_mm = (rel_all @ u_long) * 1000.0
+        v_all_mm = (rel_all @ v_short) * 1000.0
+        pl_m, pw_m = pc_mm / 1000.0, pr_mm / 1000.0
+        tmpl_info = {"rows": R, "cols": C, "pitch_mm": [pc_mm, pr_mm], "how": how,
+                     "n_cavities": None if tmpl is None else tmpl["n_cavities"],
+                     "score": None if tmpl is None else tmpl["score"],
+                     "bowl_per_slot_mm": None if tmpl is None else tmpl["per_slot"],
+                     "outer_box_mm": [round(L_mm, 1), round(W_mm, 1)],
+                     "centre_vs_box_mm": [round(s0 - float(sc_mm), 1), round(t0 - float(tc_mm), 1)]}
+    else:
+        grid_info = infer_holder_grid(L_mm, W_mm, u_all_mm, v_all_mm, val_prof)
+        grid_info = agent_judge_holder(crop_rgb, dict(grid_info, L_mm=round(L_mm, 1), W_mm=round(W_mm, 1),
+                                                      H_mm=round(h_top_m * 1000.0, 1)), agent_fn=agent_fn)
+        R, C = int(grid_info["rows"]), int(grid_info["cols"])
+        pl_m = (L_mm / 1000.0) / C
+        pw_m = (W_mm / 1000.0) / R
     # V4.5: measured slot pitch (config/egg_carton.json) replaces "outer box / columns" (flanges, lid)
     ccfg = egg_carton_config()
     pitch_src = "外框等分"
     lid_warn = None
-    if ccfg.get("slot_pitch_mm"):
+    if tmpl_info is not None:
+        slot_uv_mm = template_offsets(R, C, pl_m * 1000.0, pw_m * 1000.0)
+        refine_info = {"n_cavities": tmpl_info["n_cavities"] or 0, "note": tmpl_info["how"], "template": tmpl_info}
+        pitch_src = f"固定模板 {R}×{C}（{tcfg['source']}）"
+    elif ccfg.get("slot_pitch_mm"):
         pl_m, pw_m = ccfg["slot_pitch_mm"][0] / 1000.0, ccfg["slot_pitch_mm"][1] / 1000.0
         pitch_src = f"实测槽距({ccfg['source']})"
         extra = L_mm - C * pl_m * 1000.0
         if extra > 40.0:
             lid_warn = f"外框比 槽距×列数 大 {extra:.0f} mm（盖子或边沿被算进外框？槽位改由槽穴凹陷定位）"
-    if cov >= 0.35 and (dz_m > 0).sum() >= 60:
+    if tmpl_info is not None:
+        pass
+    elif cov >= 0.35 and (dz_m > 0).sum() >= 60:
         slot_uv_mm, refine_info = refine_slot_grid(u_all_mm, v_all_mm, hs * 1000.0, R, C, pl_m * 1000.0, pw_m * 1000.0,
                                                    h_top_mm=h_top_m * 1000.0)
     else:
@@ -2370,7 +2603,8 @@ def locate_egg_holder(dets2d, rgb, depth_m, K, T_base_cam, table_z=None, fence_p
         warn.append(calib_note)
     trusted = not warn
 
-    jsrc_label = "Agent+视觉" if grid_info.get("judgment_source") == "agent_vlm" else "Agent几何自主推断"
+    jsrc_label = {"agent_vlm": "Agent+视觉", "template": "固定蛋托模板"}.get(grid_info.get("judgment_source"),
+                                                                       "Agent几何自主推断")
     holder_row = {
         "det_id": "holder",
         "status": "object" if trusted else "untrusted",
@@ -2427,6 +2661,26 @@ def locate_egg_holder(dets2d, rgb, depth_m, K, T_base_cam, table_z=None, fence_p
                 "notes": [f"第 {r_i + 1} 行第 {c_i + 1} 列 · {'有蛋' if occ else '空槽'}"],
             })
 
+    if tmpl_info is not None:                          # V4.6.6: diagnostic picture of every carton fit
+        try:
+            slot_px = []
+            for s_ in slots:
+                uv_ = CAM.project(CAM.T_apply(CAM.T_inv(T.tolist()), s_["xyz_m"]), K)
+                slot_px.append((uv_[0] - cx0, uv_[1] - cy0) if uv_ else (None, None))
+            st_mm = []
+            for (uo, vo) in slot_uv_mm:
+                p3 = centre_pl + (uo / 1000.0) * u_long + (vo / 1000.0) * v_short - o_pl
+                st_mm.append((float(p3 @ e1) * 1000.0, float(p3 @ e2) * 1000.0))
+            box = cv2.boxPoints(rect)
+            bowl = tmpl["bowl"] if tmpl is not None else None
+            if bowl is not None:
+                tmpl_info["diag_png"] = save_carton_diag(
+                    crop_rgb, mc, mc_er, slot_px, tmpl["per_slot"], bowl, st_mm, [tuple(q) for q in box],
+                    f"V4.6.6 carton {R}x{C} pitch {pl_m * 1000:.0f}x{pw_m * 1000:.0f} mm | {tmpl_info['how']}")
+        except Exception as exc:
+            tmpl_info["diag_error"] = str(exc)[:120]
+        holder_row["template"] = tmpl_info
+        holder_row["yaw_deg"] = round(math.degrees(yaw_rad), 1)
     fit_ms = round((time.time() - t_start) * 1000.0)
     diag = {
         "n_2d": len(dets2d),
@@ -2442,6 +2696,7 @@ def locate_egg_holder(dets2d, rgb, depth_m, K, T_base_cam, table_z=None, fence_p
         "yaw_deg": holder_row["yaw_deg"],
         "judgment_source": grid_info.get("judgment_source", "agent_geom"),
         "fit_ms": fit_ms,
+        "template": tmpl_info,
     }
     return [holder_row] + slots, diag
 

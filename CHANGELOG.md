@@ -1,3 +1,23 @@
+## V4.6.6 (2026-11-08) — 蛋托固定模板（2×3，46×47 mm）+ 原生崩溃调用栈 + Tk 输入法默认关
+- **蛋托**：
+  - `NERO_V349`（`V4.6.6 FIXED CARTON TEMPLATE`）新增 `carton_template_config`（`config/egg_carton.json` 的 `carton_grid` + `slot_pitch_mm`；环境变量 `NERO_EGG_CARTON_GRID` 可覆盖，设为 `none` 时退回旧方法）。
+  - `bowl_score_map`：1 mm 高度栅格；槽口环（0.36–0.52 × 槽距）平均高度减槽心（≤ 0.24 × 槽距）平均高度。
+  - `fit_carton_template`：刚性网格，中心在外框中心 ±40 mm、朝向为长边方向或其 +90°（各 ±10°）范围内搜索；轮廓先内缩 9 px。
+  - `save_carton_diag`：诊断图存到 `NERO_CALIB_DIR/carton_diag`，保留最近 30 张。
+  - `locate_egg_holder` 有模板配置时不再猜行列、不再做 V4.5 槽穴修正；槽号固定（列沿 3 孔方向，离底座越远编号越大）；少于 2 个碗形槽穴时模板按外框中心 / 长边放置，并写明原因。
+  - `NERO_V365` 任务日志新增 `[V4.6.6 CARTON]` 一行。
+- **配置**：`config/egg_carton.json` 新增 `carton_grid: [2, 3]`，`slot_pitch_mm` 设为 `[46, 47]`（用户 2026-11-08 实测）。
+- **原生崩溃调用栈**：新文件 `tools/nero_crashtrace.c`。`start_nero.sh` 用 gcc 编译到 `~/.cache/nero/nero_crashtrace_<sha>.so`，通过 `LD_PRELOAD` 加载，崩溃时把 `backtrace_symbols_fd` 的结果写入 `logs/native_crash.log`；Python 的 faulthandler 先写 crash.log 再把信号转交给它。控制台 `v466_native_trace_status()` 把状态写进 crash.log，并从环境中删掉 `LD_PRELOAD`，子进程（ROS、helper）不会加载它。
+- **Tk 输入法**：`v466_tk_input_methods`，默认执行 `tk useinputmethods 0`；设置 `NERO_TK_IM=1` 时保留输入法。
+- **方向提示**：`NERO_V464.axis_hint` 改为 8 个方向。
+- **测试**：
+  - 新 `tests/test_v4_6_6.py`（9 项），以及合成场景生成器 `tests/v466_synth_carton.py`（斜视 2×3 蛋托，z-buffer 渲染，轮廓外溢）。
+  - `test_v3_49`、`test_v3_84` 的合成蛋托是用来测旧的零先验推断的，测试里设 `NERO_EGG_CARTON_GRID=none`。
+  - `test_v4_5`、`test_v4_6_1` 原来断言槽距为 null，改为断言实测值 [46, 47]（有意的改动）。
+  - 版本白名单补 V4.6.6。
+- **回归**（和 V4.6.4 用同一套测试对比）：非 GUI 105 个文件、GUI 41 个，只有原有失败（`v3_56_gui` 时好时坏），**0 个回归**；`test_v3_49_gui`（蛋托 6 槽 + 悬停）改用模板后仍然通过。
+- **没有在真实硬件上运行过。**
+
 ## V4.6.5 (2026-11-08) — 视觉精度验证面板修复：夹爪状态、Camera 页日志被压扁
 - `NERO_V464_Vision_Check.py`：
   - 「合爪并悬停」点击时（确认框之前）从 Agentic 页重新取夹爪（`io.grip = rct.grip if connected`）。V4.6.4 在「识别目标」时就把夹爪定死了，之后再连接的夹爪一直被当作没连。

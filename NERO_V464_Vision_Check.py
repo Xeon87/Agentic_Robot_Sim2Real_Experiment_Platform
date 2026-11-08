@@ -134,12 +134,11 @@ def axis_hint(cam, p_xyz):
         p = np.asarray(p_xyz, float)
         o = uv(p)
         out = []
+        names = ("右", "右下", "下", "左下", "左", "左上", "上", "右上")     # image: x right, y down
         for name, d in (("+X", [0.05, 0, 0]), ("+Y", [0, 0.05, 0])):
             v = uv(p + np.asarray(d)) - o
-            if abs(v[0]) >= abs(v[1]):
-                out.append(f"{name} = 画面{'右' if v[0] > 0 else '左'}")
-            else:
-                out.append(f"{name} = 画面{'下' if v[1] > 0 else '上'}")
+            k = int(round(math.degrees(math.atan2(v[1], v[0])) / 45.0)) % 8
+            out.append(f"{name} = 画面{names[k]}")      # V4.6.6: 8 directions (V4.6.4 said "+X 左, +Y 左")
         return "主相机画面里：" + "，".join(out)
     except Exception:
         return ""

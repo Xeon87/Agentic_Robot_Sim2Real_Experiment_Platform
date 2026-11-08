@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.6.5"
+VERSION = "V4.6.6"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -336,6 +336,7 @@ def install_crash_log(log_dir, root=None):
 # (2) start_nero.sh copies stderr into logs/stderr.log (with LIBC_FATAL_STDERR_=1): the one-line C reason that is
 #     printed right before such an abort (Tcl / Xlib / glibc) was so far only on the terminal.
 MARKER_V463 = "V4.6.3 NATIVE CRASH GUARD"
+MARKER_V466 = "V4.6.6 NATIVE CRASH TRACE + TK INPUT METHOD OFF"
 
 
 def v463_xinitthreads():
@@ -404,6 +405,39 @@ def v463_x_error_handlers():
         return f"unavailable: {exc}"
 
 
+def v466_native_trace_status():
+    """V4.6.6: is tools/nero_crashtrace.c loaded (LD_PRELOAD from start_nero.sh)?  Child processes (ROS, helpers)
+    do not get it: LD_PRELOAD is removed from this process's environment once the library is in place."""
+    loaded = False
+    try:
+        with open("/proc/self/maps", encoding="utf-8", errors="replace") as f:
+            loaded = "nero_crashtrace_" in f.read()
+    except Exception:
+        pass
+    pre = os.environ.get("LD_PRELOAD", "")
+    if "nero_crashtrace_" in pre:
+        rest = ":".join(p for p in pre.split(":") if p and "nero_crashtrace_" not in p)
+        if rest:
+            os.environ["LD_PRELOAD"] = rest
+        else:
+            os.environ.pop("LD_PRELOAD", None)
+    if loaded:
+        return f"ON -> {os.environ.get('NERO_NATIVE_CRASH_LOG')}"
+    return "OFF (start with start_nero.sh; needs gcc)"
+
+
+def v466_tk_input_methods(root):
+    """V4.6.6: Tk's X input method (XIM, e.g. ibus / fcitx) is OFF by default - every field of this console takes
+    numbers / English, and the V4.6.5 console segfaulted inside the Tk main loop (no Python frame) right when the
+    person was about to type into a field.  NERO_TK_IM=1 keeps the input method (Chinese typing in Tk fields)."""
+    want = os.environ.get("NERO_TK_IM", "0") == "1"
+    try:
+        root.tk.call("tk", "useinputmethods", "-displayof", root._w, 1 if want else 0)
+        return "ON (NERO_TK_IM=1)" if want else "OFF"
+    except Exception as exc:
+        return f"unchanged ({exc})"
+
+
 LOG_KEEP = 10
 
 
@@ -463,6 +497,8 @@ def run_console(initial_tab="sim"):
     install_crash_log(log_dir, root)                  # V3.70 CRASH LOG
     v370_crash_note(f"V4.6.3: XInitThreads {xinit}; X error handler {xerr}; C-level messages (Tcl / Xlib / glibc) "
                     f"-> logs/stderr.log when started with start_nero.sh")
+    v370_crash_note(f"V4.6.6: native crash trace {v466_native_trace_status()}; Tk input methods "
+                    f"{v466_tk_input_methods(root)}")
     _v312_pick_cjk_font(root)
     root.title(f"NERO {VERSION} 控制台")
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()

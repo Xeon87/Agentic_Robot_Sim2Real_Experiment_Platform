@@ -915,6 +915,13 @@ class RealIO:
         else:
             cart_txt = "未识别到蛋托"
         self.emit(f"[V3.93 REAL EGG YOLOE] {tag} | table z {zt * 1000:+.0f} mm | YOLOE {len(d2)} 个 | {egg_txt} | {cart_txt} | {dt:.2f} s")
+        tpl = (holder_row or {}).get("template")
+        if tpl:                                       # V4.6.6 FIXED CARTON TEMPLATE: how the slots were found
+            per = tpl.get("bowl_per_slot_mm")
+            self.emit(f"[V4.6.6 CARTON] 固定模板 {tpl['rows']}×{tpl['cols']}，槽距 {tpl['pitch_mm'][0]:.0f}×{tpl['pitch_mm'][1]:.0f} mm · "
+                      f"{tpl['how']} · 每槽碗深 {per if per is not None else '-'} mm · 外框 {tpl['outer_box_mm'][0]:.0f}×"
+                      f"{tpl['outer_box_mm'][1]:.0f} mm · 模板中心相对外框中心 {tpl['centre_vs_box_mm']} mm · "
+                      f"诊断图 {tpl.get('diag_png') or '-'}")
         if self.on_perception is not None:
             try:
                 self.on_perception(out)
@@ -1048,6 +1055,7 @@ EGG_WRIST_LOOK_ABOVE_M = 0.120    # pre-orient wrist look: grasp origin this hig
 EGG_WRIST_MAX_SHIFT_M = 0.015
 # ---- V4.6 EGG PLACE ACCURACY II (camera agreement, off-centre grasp, strict arrival, pre-pick slot look)
 MARKER_V46 = "V4.6 EGG CAMERA AGREEMENT + STRICT ARRIVAL"
+MARKER_V466 = "V4.6.6 FIXED CARTON TEMPLATE LOG"
 MARKER_V462 = "V4.6.2 TEACH BAR + GRAVITY COMP + FULL-WIDTH LOG"
 MARKER_V461 = "V4.6.1 MEASURED HELD GAP + WRIST LOG ONLY"
 STRICT_POS_MM, STRICT_ROT_DEG, STRICT_JOINT_DEG = 2.0, 1.0, 0.5

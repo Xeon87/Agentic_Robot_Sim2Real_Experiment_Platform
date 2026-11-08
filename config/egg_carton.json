@@ -1,7 +1,15 @@
 {
   "_comment": "V4.5/V4.6.1 egg task settings (read-only at runtime; edit with a text editor, then restart the task).",
-  "_slot_pitch_mm": "measured egg-carton slot pitch [along, across] in mm, e.g. [47.0, 47.0]; null = derive from the outer box + cavities",
-  "slot_pitch_mm": null,
+  "_carton_grid": "V4.6.6 fixed carton layout [rows, cols]: rows = along the 2-hole direction, cols = along the 3-hole direction (measured 2026-11-08: 2x3). null = guess from the outer box (V3.49, unreliable)",
+  "carton_grid": [
+    2,
+    3
+  ],
+  "_slot_pitch_mm": "measured centre-to-centre slot pitch [along the cols (3-hole direction), along the rows (2-hole direction)] in mm (measured 2026-11-08: 46 / 47); null = derive from the outer box + cavities",
+  "slot_pitch_mm": [
+    46.0,
+    47.0
+  ],
   "_held_gap_mm": "SO-101 tip-gap reading (gripper gap_mm) when an egg is clamped properly; measured 26.5 mm on 2026-11-07 (3 grasps: 26.7 / 26.5 / 26.5)",
   "held_gap_mm": 26.5,
   "_offcentre_margin_mm": "a clamped reading this much below held_gap_mm counts as an off-centre grasp",
@@ -11,7 +19,24 @@
   "_wrist_slot_look_before_pick": "true = before the pick, look at the target slot with the wrist camera (empty gripper); off until verified",
   "wrist_slot_look_before_pick": false,
   "_wrist_gripper_mask": "wrist-image region hidden by the gripper jaws (normalised x, y polygon); excluded from wrist detection",
-  "wrist_gripper_mask": [[0.0, 0.60], [1.0, 0.60], [1.0, 1.0], [0.0, 1.0]],
+  "wrist_gripper_mask": [
+    [
+      0.0,
+      0.6
+    ],
+    [
+      1.0,
+      0.6
+    ],
+    [
+      1.0,
+      1.0
+    ],
+    [
+      0.0,
+      1.0
+    ]
+  ],
   "_wrist_overexposed_frac": "wrist detection is 'unusable' when more than this fraction of the search area is nearly white (>= wrist_overexposed_level)",
   "wrist_overexposed_frac": 0.35,
   "wrist_overexposed_level": 245

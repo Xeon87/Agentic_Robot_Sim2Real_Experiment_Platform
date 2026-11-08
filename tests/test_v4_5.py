@@ -278,7 +278,7 @@ class TestV45Egg(unittest.TestCase):
             self.assertEqual(W.egg_carton_config()["slot_pitch_mm"], [47.0, 46.5])
         finally:
             os.environ.pop("NERO_EGG_SLOT_PITCH_MM", None)
-        self.assertIsNone(W.egg_carton_config()["slot_pitch_mm"])   # shipped file: null
+        self.assertEqual(W.egg_carton_config()["slot_pitch_mm"], [46.0, 47.0])   # V4.6.6: measured by the user
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
             json.dump({"slot_pitch_mm": [48, 47]}, f)
         try:

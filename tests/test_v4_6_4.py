@@ -205,7 +205,7 @@ class TestV464(unittest.TestCase):
         import NERO_V312_Console as C
         import NERO_V313_Real_Robot as RR
         v = open(os.path.join(HERE, "VERSION")).read().strip()
-        self.assertIn(v, ("V4.6.4", "V4.6.5"))
+        self.assertIn(v, ("V4.6.4", "V4.6.5", "V4.6.6"))
         self.assertEqual((C.VERSION, RR.VERSION), (v, v))
         self.assertEqual(VC.MARKER_V464, "V4.6.4 VISION ACCURACY CHECK")
         src = open(os.path.join(HERE, "NERO_V464_Vision_Check.py"), encoding="utf-8").read()
