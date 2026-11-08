@@ -99,4 +99,12 @@ for a in "$@"; do
   esac
 done
 cd "$HERE"
-exec "$PY" "$CONSOLE" "${ARGS[@]}"
+# V4.6.3 NATIVE CRASH GUARD: keep the C-level reason of a crash (Tcl / Xlib / glibc print it to stderr right before
+# an abort) in logs/stderr.log as well as on the terminal; glibc writes its fatal messages to stderr, not /dev/tty.
+mkdir -p "$HERE/logs"
+if [[ -f "$HERE/logs/stderr.log" ]] && (( $(stat -c %s "$HERE/logs/stderr.log" 2>/dev/null || echo 0) > 5000000 )); then
+  mv -f "$HERE/logs/stderr.log" "$HERE/logs/stderr.prev.log"
+fi
+echo "----- console start $(date '+%F %T') (stderr of the console process) -----" >> "$HERE/logs/stderr.log"
+export LIBC_FATAL_STDERR_=1
+exec "$PY" "$CONSOLE" "${ARGS[@]}" 2> >(tee -a "$HERE/logs/stderr.log" >&2)

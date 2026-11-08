@@ -221,7 +221,7 @@ class TestV462(unittest.TestCase):
         import NERO_V312_Console as C
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
-        self.assertEqual(v, "V4.6.2")
+        self.assertIn(v, ("V4.6.2", "V4.6.3"))
         self.assertEqual(C.VERSION, v)
         self.assertEqual(RR.VERSION, v)
         self.assertEqual(TG.MARKER_V462, "V4.6.2 TEACH BAR + GRAVITY COMP")

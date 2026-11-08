@@ -1,5 +1,23 @@
-# NERO V4.6.2 — single-folder release
+# NERO V4.6.3 — single-folder release
 
+**V4.6.3**（热修复：V4.6.2 执行鸡蛋任务时控制台闪退）
+
+### 这次闪退查到了什么
+- `logs/crash.log`：`Fatal Python error: Aborted`，发生在**主线程**里 Tk 刷新「工作区安全」状态标签的 C 代码中（`NERO_V316 _status → configure`）。当时任务线程正在等机械臂下探到位，其他线程是两个相机采集、子进程输出读取和 CAN 监控，**崩溃那一刻都没有在操作界面**。
+- 这是 C 层的 abort（不是 Python 异常）。Tcl / Xlib / glibc 在 abort 前会往终端打印一行真正的原因，但这一行以前**只出现在终端上**，`crash.log` 和 `console.log` 里都没有，所以现在还不能百分之百确定是哪个库。
+- 用"探针"把所有 GUI 测试重跑了一遍，记录每一个**不在主线程**发起的 Tk 调用：发现实机管线、示教、关节运动等工作线程会通过 `real_cfg()` 直接读「实机NERO调试 → 参数」里的输入框（CAN 口、速度、固件等）。这种跨线程读取要排队等主线程；测试里还复现了它会卡住（主线程等工作线程时，工作线程的这次读取 5 秒都没返回）。这不是这次崩溃那一刻的直接原因，但属于同一类风险。之前 V4.5 那次启动时的段错误也发生在 Tk 的 C 代码里。
+
+### 修改
+1. **`real_cfg()` 只在主线程读界面**：工作线程拿到的是主线程最近一次的快照（每次轮询刷新，启动任务前也刷新）。重跑探针：实机任务、示教、关节控制路径上已经**没有任何跨线程 Tk 调用**（只剩冻结的 Camera 模块里手眼标定读标记设置的一处，不在任务路径上）。
+2. **创建 Tk 窗口前调用 `XInitThreads`**：Xlib 变成线程安全的，任何第二个线程碰到 X 连接都不会再把进程 abort（`[xcb] Unknown sequence number … Assertion failed` 这一类）。libX11 1.8 起默认就这样做，Ubuntu 22.04 带的是 1.7.5。可用 `NERO_NO_XINITTHREADS=1` 关闭。
+3. **X 错误不再让控制台消失**：你点「Smol VLA实机任务」那次闪退，crash.log 里**什么也没有**。这说明进程不是被信号杀死，而是 Xlib 遇到 X 错误后直接 `exit(1)`：这种退出只会在终端打几行字，faulthandler 抓不到（已在虚拟显示器上复现这种"无痕退出"）。V4.6.3 在创建窗口前装上自己的 X 错误处理：错误写进 `crash.log`（类型、请求号；请求号 139 = 字体 / 文字绘制），**控制台继续运行**。正常关闭时 crash.log 末尾会写 `console closed normally`，所以以后能分清是正常关闭、X 错误、abort 还是被系统杀掉（没有任何记录 = 被杀，例如内存不够）。
+4. **C 层错误信息落盘**：`start_nero.sh` 把控制台的 stderr 同时写到终端和 `logs/stderr.log`（进程 abort 时也保留，已验证），并设置 `LIBC_FATAL_STDERR_=1`（glibc 的内存错误信息也进 stderr）；超过 5 MB 时转存为 `stderr.prev.log`。`crash.log` 开头会写一行 `XInitThreads ok`。
+
+### 如果还闪退
+请把 `logs/crash.log` 和 **`logs/stderr.log`** 一起发给我，stderr.log 最后几行就是 C 层的原因。如果 V4.6.2 那次的终端窗口还开着，也请把 `Aborted` 上面几行发给我。
+- **没有在真实硬件上运行过**；我不能保证这次就是根因，第 3、4 条保证下次能看到真正的原因。
+
+## V4.6.2
 **V4.6.2**（两个实机任务页都有示教按钮 +「高级」示教重力补偿 + Smol VLA 页日志移到最下方 + 两页都有 Copy Log）
 
 ### 修改

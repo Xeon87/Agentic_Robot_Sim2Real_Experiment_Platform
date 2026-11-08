@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.6.2"
+VERSION = "V4.6.3"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -283,6 +283,18 @@ def v370_crash_write(title, exc_type, exc, tb):
         pass
 
 
+def v370_crash_note(text):
+    """V4.6.3: one info line into the open crash.log (below the start line)."""
+    fh = _V370_CRASH.get("fh")
+    if fh is None:
+        return
+    try:
+        fh.write(f"[info] {text}\n")
+        fh.flush()
+    except Exception:
+        pass
+
+
 def install_crash_log(log_dir, root=None):
     import faulthandler
     import threading as _th
@@ -315,6 +327,81 @@ def install_crash_log(log_dir, root=None):
             traceback.print_exception(t, e, tb)
         root.report_callback_exception = _tk_hook
     return path
+
+
+# V4.6.3 NATIVE CRASH GUARD: the V4.6.2 console aborted inside Tk (C level, main thread) while an egg task ran.
+# (1) Xlib is made thread-safe BEFORE Tk opens the display (XInitThreads; libX11 >= 1.8 does this by itself, Ubuntu
+#     22.04 ships 1.7.5) - an Xlib call from any second thread then cannot corrupt the connection and abort the
+#     process ("[xcb] Unknown sequence number ... Assertion failed").  NERO_NO_XINITTHREADS=1 switches it off.
+# (2) start_nero.sh copies stderr into logs/stderr.log (with LIBC_FATAL_STDERR_=1): the one-line C reason that is
+#     printed right before such an abort (Tcl / Xlib / glibc) was so far only on the terminal.
+MARKER_V463 = "V4.6.3 NATIVE CRASH GUARD"
+
+
+def v463_xinitthreads():
+    """-> 'ok' / 'off' / reason string; must run before the first Xlib call of the process (before tk.Tk())."""
+    if os.environ.get("NERO_NO_XINITTHREADS", "0") == "1":
+        return "off"
+    try:
+        import ctypes
+        import ctypes.util
+        lib = ctypes.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
+        return "ok" if lib.XInitThreads() else "XInitThreads returned 0"
+    except Exception as exc:
+        return f"unavailable: {exc}"
+
+
+_V463_X = {"lib": None, "handlers": None, "n": 0}
+X_ERROR_LOG_MAX = 50
+
+
+def v463_x_error_handlers():
+    """V4.6.3: Xlib's default X error handler EXITS the process (no signal -> faulthandler writes nothing: the
+    V4.6.2 console vanished without a trace when the Smol VLA tab was opened).  Installed BEFORE tk.Tk(), Tk chains
+    unhandled X errors to this handler: the error is written to crash.log and the console keeps running.
+    A lost display connection (X IO error) cannot be survived; it is written to crash.log before Xlib exits.
+    -> 'ok' / 'off' / reason"""
+    if os.environ.get("NERO_NO_X_ERROR_HANDLER", "0") == "1":
+        return "off"
+    try:
+        import ctypes
+        import ctypes.util
+        lib = ctypes.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
+
+        class XErrorEvent(ctypes.Structure):
+            _fields_ = [("type", ctypes.c_int), ("display", ctypes.c_void_p), ("resourceid", ctypes.c_ulong),
+                        ("serial", ctypes.c_ulong), ("error_code", ctypes.c_ubyte), ("request_code", ctypes.c_ubyte),
+                        ("minor_code", ctypes.c_ubyte)]
+        ERR = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(XErrorEvent))
+        IOERR = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)
+
+        def on_error(_dpy, ev):
+            try:
+                _V463_X["n"] += 1
+                if _V463_X["n"] <= X_ERROR_LOG_MAX:
+                    e = ev.contents
+                    names = {1: "BadRequest", 2: "BadValue", 3: "BadWindow", 4: "BadPixmap", 5: "BadAtom",
+                             8: "BadMatch", 9: "BadDrawable", 11: "BadAlloc", 13: "BadGC", 16: "BadLength"}
+                    v370_crash_note(f"V4.6.3 X error #{_V463_X['n']} IGNORED (console keeps running): "
+                                    f"{names.get(e.error_code, e.error_code)} request {e.request_code}.{e.minor_code} "
+                                    f"serial {e.serial} resource 0x{e.resourceid:x}"
+                                    + (" - request 139 = RENDER: font / glyph drawing (Xft)" if e.request_code == 139 else ""))
+            except Exception:
+                pass
+            return 0
+
+        def on_io_error(_dpy):
+            v370_crash_note("V4.6.3 X IO error: connection to the display lost -> Xlib ends the process")
+            return 0
+        h = (ERR(on_error), IOERR(on_io_error))
+        lib.XSetErrorHandler.argtypes, lib.XSetErrorHandler.restype = [ERR], ctypes.c_void_p
+        lib.XSetIOErrorHandler.argtypes, lib.XSetIOErrorHandler.restype = [IOERR], ctypes.c_void_p
+        lib.XSetErrorHandler(h[0])
+        lib.XSetIOErrorHandler(h[1])
+        _V463_X.update(lib=lib, handlers=h)                     # keep the callbacks alive for the whole run
+        return "ok"
+    except Exception as exc:
+        return f"unavailable: {exc}"
 
 
 LOG_KEEP = 10
@@ -369,8 +456,13 @@ def run_console(initial_tab="sim"):
     v46_rotate_console_log(log_dir, console_log)          # V4.6 LOG ROTATION
     open(console_log, "w").close()
 
+    xinit = v463_xinitthreads()                       # V4.6.3 NATIVE CRASH GUARD (before the display is opened)
+    install_crash_log(log_dir)                        # V4.6.3: open crash.log before Tk (X error notes go there)
+    xerr = v463_x_error_handlers()
     root = tk.Tk()
     install_crash_log(log_dir, root)                  # V3.70 CRASH LOG
+    v370_crash_note(f"V4.6.3: XInitThreads {xinit}; X error handler {xerr}; C-level messages (Tcl / Xlib / glibc) "
+                    f"-> logs/stderr.log when started with start_nero.sh")
     _v312_pick_cjk_font(root)
     root.title(f"NERO {VERSION} 控制台")
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
@@ -626,7 +718,24 @@ def run_console(initial_tab="sim"):
     _JCF.fixed_label(tk, r2, 2, textvariable=preview, font=("TkFixedFont", 9), wraplength=900,
                      pack={"side": "left", "fill": "x", "expand": True})
 
+    _cfg_snap = {"v": None}
+
     def real_cfg():
+        """V4.6.3: the Tk variables are read on the Tk main thread only; a worker thread (pipeline, teach, joint jobs)
+        gets the last snapshot taken on the main thread (refreshed by real_poll and before every job start)."""
+        if threading.current_thread() is not threading.main_thread():
+            snap = _cfg_snap["v"]
+            if snap is not None:
+                return dict(snap)
+            return {"can_port": RR.CAN_PORT_DEFAULT, "effector_type": "none", "fw_version": RR.DEFAULT_FW_VERSION,
+                    "push_fw": RR.DEFAULT_FW_VERSION, "speed_percent": 10, "speed_unlocked": False,
+                    "auto_control_gate": False, "follow": True, "use_rviz": True,
+                    "domain_id": int(RR.DEFAULT_DOMAIN_ID), "teach_payload": TG.payload_arg(TG.load())}
+        snap = _real_cfg_read()
+        _cfg_snap["v"] = snap
+        return dict(snap)
+
+    def _real_cfg_read():
         try:
             dom = int(v_domain.get())
         except Exception:
@@ -851,6 +960,7 @@ def run_console(initial_tab="sim"):
         log_append(real_log, "[INFO] [V4.5.1 VLA TAB] NERO_NO_VLA_TAB=1：不加载 VLA / LeRobot 页")
 
     def start_job(name, fn, force=False):
+        real_cfg()                                    # V4.6.3: fresh snapshot before the worker starts
         if not force and real_job["t"] is not None and real_job["t"].is_alive():
             log_append(real_log, f"[WARN] busy: {real_job['name']} still running")
             return
@@ -886,6 +996,10 @@ def run_console(initial_tab="sim"):
 
     def real_poll():
         serve_asks()
+        try:
+            real_cfg()                                # V4.6.3: refresh the snapshot the worker threads read
+        except Exception:
+            pass
         mirrored = []                                 # V3.70 CONSOLE LOG MIRROR
         try:
             while True:
@@ -1152,7 +1266,12 @@ def run_console(initial_tab="sim"):
     update_mode()
     root.after(100, poll)
     root.after(300, real_poll)
-    root.mainloop()
+    try:
+        root.mainloop()
+    except BaseException as exc:                      # V4.6.3: e.g. SystemExit raised inside a Tk callback
+        v370_crash_note(f"V4.6.3 console main loop left by {type(exc).__name__}: {exc}")
+        raise
+    v370_crash_note(f"V4.6.3 console closed normally (X errors ignored during the run: {_V463_X['n']})")
 
 
 def main(argv=None):

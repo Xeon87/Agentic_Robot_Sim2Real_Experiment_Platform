@@ -1,3 +1,13 @@
+## V4.6.3 (2026-11-08) — 热修复：V4.6.2 鸡蛋任务中控制台 abort（Tk 主线程 C 层）
+- 现象：`Fatal Python error: Aborted`，主线程在 `NERO_V316._status → lbl_now.configure`；任务线程在 `_send_move` 等待，其余线程（相机采集、子进程 reader / watcher、CAN、pump）不碰 Tk。C 层原因只打印在终端，未记录。
+- 跨线程 Tk 探针（包装 tkapp，记录非主线程的 Tk 调用，跑全部 GUI 测试）：`real_cfg()` 在工作线程（`_fw_cfg / _run_mode_helper / set_teach_mode / 关节任务 / 一致性测试`）里读 Tk 变量。V4.6.3：`NERO_V312.real_cfg` 在非主线程返回主线程快照（`real_poll` 和 `start_job` 刷新）；重跑探针后只剩冻结的 `NERO_V325._marker_from_ui`（手眼标定）。
+- `NERO_V312_Console.py`（`V4.6.3 NATIVE CRASH GUARD`）：`v463_xinitthreads()` 在 `tk.Tk()` 前调用 libX11 `XInitThreads`（`NERO_NO_XINITTHREADS=1` 关闭）；`v370_crash_note` 在 crash.log 写一行状态。版本 V4.6.3（`NERO_V313` 同步）。
+- `start_nero.sh`：stderr → 终端 + `logs/stderr.log`（`tee`，进程 abort 后仍保留；>5 MB 转 `stderr.prev.log`），`LIBC_FATAL_STDERR_=1`。
+- 测试：新 `tests/test_v4_6_3.py`（4 项，含模拟 abort 的 stderr 落盘）、`tests/test_v4_6_3_gui.py`（启动整个控制台，工作线程调用 `pipe.cfg_fn()`：0 次 Tk 调用、与主线程快照一致；同一测试在 V4.6.2 上失败——工作线程的读取 5 s 未返回）；版本白名单补 V4.6.3。
+- `v463_x_error_handlers()`（tk.Tk() 前用 ctypes `XSetErrorHandler / XSetIOErrorHandler`）：X 错误写入 crash.log 并忽略（最多记 50 条），不再走 Xlib 默认处理的 `exit(1)`（V4.6.2 第二次闪退：点 Smol VLA 页，crash.log 无任何记录 = 不是信号）；IO 错误先记录再由 Xlib 结束；主循环结束写 `console closed normally` / 退出原因。`NERO_NO_X_ERROR_HANDLER=1` 关闭。测试 H5：故意制造 BadPixmap，进程存活并有记录（不装处理器时同样操作 rc=1、无痕退出）。
+- **回归**：同一套测试，非 GUI 103 个文件、GUI 40 个，失败的都是 V4.3 原有的（非 GUI：`v3_16 / v3_16_2 / v3_17 / v3_19 / v3_60 / v3_61 / v3_62`；GUI：`v3_25_gui / v3_53_gui / v3_57_gui / v3_58_gui`，`v3_56_gui` 时好时坏），**0 个回归**；`test_v3_25` 现在通过（V4.6.2 的白名单脚本误改了它的一行，已恢复，脚本已修正）。X 错误处理器加入后，又把所有导入 / 启动控制台的 70 个测试重跑一遍，结果同上。
+- **没有在真实硬件上运行过；不能确定这就是根因**，下次若再崩，`logs/stderr.log` 会有 C 层原因。
+
 ## V4.6.2 (2026-11-08) — 两个实机任务页的示教按钮 +「高级」示教重力补偿 + Smol VLA 页日志移到底部 + Copy Log
 - 新模块 `NERO_V462_Teach_Gravity.py`（`V4.6.2 TEACH BAR + GRAVITY COMP`）：`TeachBar`（「进入示教模式」「退出示教模式」「高级」+ 状态；调用 `RealPipeline.set_teach_mode`，退出 `return_home=False`，与「实机NERO调试」页一致；任务运行 / 机械臂运动时拒绝）；`GravityDialog`（档位 / 自定义质量 + 质心、更轻 / 更重、保存、保存并立即生效、检测驱动接口）；设置 `NERO_CALIB_DIR/teach_gravity.json`（`load / save / normalize / payload_arg / describe`）。Tk 只在主线程操作。
 - `NERO_V313_Real_Robot.py`：`apply_teach_payload` 接受 JSON `{"mass_kg","com_mm","fallback"}`——只发给参数**名字**明确是质量（mass / weight / kg）+ 质心（com / cog / center 或 x / y / z）的接口（`_custom_payload_call`，单位 kg / m），首参数注解为 `str` 的档位接口不会收到数字；没有这类接口时改发 fallback 档位，`teach_payload_line` 写明；新 helper 子命令 `probe` + `RealPipeline.probe_teach_apis()`（列出 load / payload / gravity 接口及签名，不切换模式）。版本号 V4.6.2。
