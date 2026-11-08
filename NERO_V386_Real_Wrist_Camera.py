@@ -1501,6 +1501,43 @@ def wrist_check_cup_concentricity(rgb, K, T_base_flange, calib_eih,
     }
 
 
+MARKER_V461_VIEW = "V4.6.1 WRIST VIEW GATE"
+
+
+def wrist_view_gate(gray, roi_mask, cfg=None):
+    """V4.6.1 WRIST VIEW GATE: (1) the gripper jaws fill a fixed part of the wrist image (the camera rides on the
+    gripper) -> that region is removed from every search; (2) a search area that is mostly near-white (white egg on
+    the white calibration sheet, over-exposure) cannot separate an egg from its background -> "unusable", no number.
+    -> (usable_roi_mask, None) or (None, reason)"""
+    cv2 = _cv2()
+    cfg = cfg or W49.egg_task_config()
+    h_img, w_img = gray.shape[:2]
+    usable = np.full((h_img, w_img), 255, np.uint8)
+    poly = cfg.get("wrist_gripper_mask") or []
+    if len(poly) >= 3:
+        pts = np.array([[int(round(x * (w_img - 1))), int(round(y * (h_img - 1)))] for x, y in poly], np.int32)
+        cv2.fillPoly(usable, [pts], 0)
+    roi = cv2.bitwise_and(roi_mask, usable)
+    n = int(np.count_nonzero(roi))
+    if n < 200:
+        return None, "目标在夹爪遮挡的画面区域里（已排除），腕部相机看不到"
+    level = float(cfg.get("wrist_overexposed_level", 245))
+    frac = float(np.count_nonzero(gray[roi > 0] >= level)) / float(n)
+    if frac > float(cfg.get("wrist_overexposed_frac", 0.35)):
+        return None, f"腕部画面过曝（搜索区 {frac * 100:.0f}% 接近纯白），不可用"
+    return roi, None
+
+
+def wrist_contour_clipped(contour, roi_mask, edge_px=1, max_frac=0.10):
+    """V4.6.1: a blob cut by the excluded gripper region or by the search-area edge has a biased centre -> skip it."""
+    cv2 = _cv2()
+    inner = cv2.erode(roi_mask, np.ones((2 * edge_px + 1, 2 * edge_px + 1), np.uint8))
+    pts = np.asarray(contour, int).reshape(-1, 2)
+    h_i, w_i = inner.shape[:2]
+    xs, ys = np.clip(pts[:, 0], 0, w_i - 1), np.clip(pts[:, 1], 0, h_i - 1)
+    return float(np.mean(inner[ys, xs] == 0)) > max_frac
+
+
 def wrist_check_egg_or_slot(rgb, K, T_base_flange, calib_eih, expected_xyz,
                             z_plane=None, kind="egg", undistort_intr=None, max_shift_m=0.025):
     """V4.1 ROI-GATED WRIST VISUAL SERVOING FOR EGG GRASP & EGG CARTON SLOT PLACEMENT:
@@ -1534,6 +1571,9 @@ def wrist_check_egg_or_slot(rgb, K, T_base_flange, calib_eih, expected_xyz,
 
     gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
     hsv = cv2.cvtColor(arr, cv2.COLOR_RGB2HSV)
+    roi_mask, why_gate = wrist_view_gate(gray, roi_mask)          # V4.6.1: no gripper, no over-exposed view
+    if roi_mask is None:
+        return {"ok": False, "reason": why_gate, "unusable": True}
     if kind == "egg":
         m_egg = cv2.inRange(hsv, np.array([0, 0, 145], np.uint8), np.array([180, 95, 255], np.uint8))
         m_egg = cv2.bitwise_and(m_egg, roi_mask)
@@ -1558,6 +1598,8 @@ def wrist_check_egg_or_slot(rgb, K, T_base_flange, calib_eih, expected_xyz,
 
     best = None
     for c in sorted(cs, key=cv2.contourArea, reverse=True)[:10]:
+        if wrist_contour_clipped(c, roi_mask):                    # V4.6.1: cut by the gripper / search edge
+            continue
         pts_xy, _ = _intersect_contour_with_plane(c, K_s, T_bw, zp, img_shape=(h_img, w_img))
         if len(pts_xy) < 8:
             continue
@@ -1646,6 +1688,9 @@ def wrist_find_slot_cavity(rgb, K, T_base_flange, calib_eih, expected_xyz, slot_
     if int(np.count_nonzero(roi)) < 200:
         return {"ok": False, "reason": "槽位在画面边缘之外"}
     gray = cv2.GaussianBlur(cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY), (5, 5), 0)
+    roi, why_gate = wrist_view_gate(gray, roi)                    # V4.6.1: no gripper, no over-exposed view
+    if roi is None:
+        return {"ok": False, "reason": why_gate, "unusable": True, "n_candidates": 0}
     vals = gray[roi > 0]
     med = float(np.median(vals))
     thr_otsu, _ = cv2.threshold(vals.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -1657,7 +1702,7 @@ def wrist_find_slot_cavity(rgb, K, T_base_flange, calib_eih, expected_xyz, slot_
     zp = exp[2]
     cands = []
     for c in cs:
-        if cv2.contourArea(c) < 30:
+        if cv2.contourArea(c) < 30 or wrist_contour_clipped(c, roi):   # V4.6.1: cut blobs have biased centres
             continue
         pts, ratio = _intersect_contour_with_plane(c.reshape(-1, 2), K_s, T_bw, zp, img_shape=(h_img, w_img))
         if len(pts) < 12 or ratio < 0.85:

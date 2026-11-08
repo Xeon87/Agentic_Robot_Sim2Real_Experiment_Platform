@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.6"
+VERSION = "V4.6.1"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -339,6 +339,11 @@ def v46_rotate_console_log(log_dir, console_log, keep=LOG_KEEP):
             os.unlink(os.path.join(log_dir, f))
     except OSError:
         pass
+
+
+# V4.6.1 TAB NAMES (user's wording)
+TAB_AGENTIC = "Agentic实机任务"      # was 「NERO实机任务」 (V3.65): LLM agent + traditional skills on the real arm
+TAB_SMOLVLA = "Smol VLA实机任务"     # was 「VLA / LeRobot (V4)」
 
 
 def v370_mirror_lines(path, lines):
@@ -778,13 +783,13 @@ def run_console(initial_tab="sim"):
     try:
         import NERO_V365_Real_Cup_Task as RCT
         rct_outer = ttk.Frame(nb, padding=6)
-        nb.add(rct_outer, text="NERO实机任务")
+        nb.add(rct_outer, text=TAB_AGENTIC)
         rct_tab = RCT.RealCupTaskTabUI(tk, ttk, rct_outer, pipe, jpanel, cam_tab, log=pipe.log, ask=confirm_from_worker,
                                        visible_fn=lambda: nb.select() == str(rct_outer))
         nb.bind("<<NotebookTabChanged>>",
                 lambda _e: rct_tab.refresh_skill() if nb.select() == str(rct_outer) else None, add="+")
     except Exception as exc:
-        log_append(real_log, f"[FAIL] [V3.65 REAL CUP TASK] NERO实机任务 tab not available: {exc}")
+        log_append(real_log, f"[FAIL] [V3.65 REAL CUP TASK] {TAB_AGENTIC} tab not available: {exc}")
 
     # ---- V4.1 VLA / LeRobot TAB: Dual-Path Control Arbiter, Observation Bridge, LeRobot Adapter & Action Executor
     # V4.5.1 LAZY VLA TAB: the tab is built the first time it is OPENED, not at console start. A V4.5 console crashed
@@ -795,8 +800,8 @@ def run_console(initial_tab="sim"):
     if os.environ.get("NERO_NO_VLA_TAB", "0") != "1":
         try:
             vla_outer = ttk.Frame(nb, padding=6)
-            nb.add(vla_outer, text="VLA / LeRobot (V4)")
-            vla_hint = ttk.Label(vla_outer, text="正在加载 VLA / LeRobot 页 ...（第一次打开这一页时才加载）")
+            nb.add(vla_outer, text=TAB_SMOLVLA)
+            vla_hint = ttk.Label(vla_outer, text=f"正在加载 {TAB_SMOLVLA} 页 ...（第一次打开这一页时才加载）")
             vla_hint.pack(anchor="w", pady=8)
 
             def _build_vla_tab():

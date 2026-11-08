@@ -251,6 +251,13 @@ def egg_io(arm=None, grip=None, wrist=False):
     return io
 
 
+def egg_cfg(**over):
+    import NERO_V349_Real_Wrist_Camera as W49
+    base = W49.egg_task_config()
+    base.update(over)
+    return lambda path=None: dict(base)
+
+
 class Patch:
     def __init__(self, mod, name, fn):
         self.mod, self.name, self.fn = mod, name, fn
@@ -286,50 +293,41 @@ class TestV46Egg(unittest.TestCase):
         return sk
 
     def test_e1_camera_agreement(self):
-        # small: shifted grasp
-        sk = self._sk(egg_io(wrist=True))
-        g0 = np.asarray(sk.plan["_wps"]["grasp"][0], float).copy()
-        with Patch(RWC, "wrist_check_egg_or_slot", egg_reads([(0.003, -0.002)])):
-            r = sk.pick_egg("egg_1")
-        self.assertTrue(r["ok"], r)
-        self.assertEqual(r["physical_verification"]["camera_agreement"]["egg_1"]["action"], "shift")
-        np.testing.assert_allclose(np.asarray(sk.plan["_wps"]["grasp"][0])[:2] - g0[:2], [0.003, -0.002], atol=1e-9)
-        # 18 mm (the V4.5 run), second read agrees -> wrist position + local correction of the slot
-        sk = self._sk(egg_io(wrist=True))
-        egg0 = np.asarray(sk.cam["egg_1"]["rim"], float).copy()
-        slot0 = np.asarray(sk.cam["slot_12"]["rim"], float).copy()
-        with Patch(RWC, "wrist_check_egg_or_slot", egg_reads([(-0.0066, 0.0167), (0.001, 0.0005)])):
-            r = sk.pick_egg("egg_1")
-        self.assertTrue(r["ok"], r)
-        a = r["physical_verification"]["camera_agreement"]["egg_1"]
-        self.assertEqual(a["action"], "replan")
-        np.testing.assert_allclose(sk.cam["egg_1"]["rim"][:2] - egg0[:2], [-0.0056, 0.0172], atol=1e-6)
-        np.testing.assert_allclose(sk.cam["slot_12"]["rim"][:2] - slot0[:2], [-0.0056, 0.0172], atol=1e-6)
-        self.assertTrue(any("局部修正" in s for s in sk.io.logs))
-        # 18 mm, second read disagrees -> stop before any clamp
-        grip = SeqGrip([38.0])
-        sk = self._sk(egg_io(grip=grip, wrist=True))
-        with Patch(RWC, "wrist_check_egg_or_slot", egg_reads([(-0.0066, 0.0167), (0.012, 0.0)])):
-            r = sk.pick_egg("egg_1")
-        self.assertFalse(r["ok"])
-        self.assertEqual(r["reason"], "CAMERAS_DISAGREE")
-        self.assertEqual(grip.gaps, [38.0])                    # never clamped
-        # 30 mm -> stop
-        sk = self._sk(egg_io(wrist=True))
-        with Patch(RWC, "wrist_check_egg_or_slot", egg_reads([(0.030, 0.0)])):
-            r = sk.pick_egg("egg_1")
-        self.assertEqual(r["reason"], "CAMERAS_DISAGREE")
+        """V4.6.1 (user decision): the wrist egg reading is logged only - no shift, no second look, no stop."""
+        for d in ((0.003, -0.002), (-0.0066, 0.0167), (0.030, 0.0), None):
+            sk = self._sk(egg_io(wrist=True))
+            g0 = np.asarray(sk.plan["_wps"]["grasp"][0], float).copy()
+            egg0 = np.asarray(sk.cam["egg_1"]["rim"], float).copy()
+            with Patch(RWC, "wrist_check_egg_or_slot", egg_reads([d, d])):
+                r = sk.pick_egg("egg_1")
+            self.assertTrue(r["ok"], (d, r))
+            a = r["physical_verification"]["camera_agreement"]["egg_1"]
+            self.assertEqual(a["action"], "log_only")
+            np.testing.assert_allclose(np.asarray(sk.plan["_wps"]["grasp"][0]), g0)   # grasp NOT moved
+            np.testing.assert_allclose(sk.cam["egg_1"]["rim"], egg0)
+            if d is not None:
+                self.assertTrue(any("只记录，按主相机位置夹" in s_ for s_ in sk.io.logs))
 
     def test_e2_off_centre_grasp(self):
-        sk = self._sk(egg_io(grip=SeqGrip([24.3, 40.0])))
+        """V4.6.1: judged against the measured baseline held_gap_mm (26.5) - margin 6; default = log only."""
+        sk = self._sk(egg_io(grip=SeqGrip([26.5])))                 # the user's three good grasps
         r = sk.pick_egg("egg_1")
         self.assertTrue(r["ok"], r)
-        self.assertTrue(any("夹偏了" in s for s in sk.io.logs))
-        sk = self._sk(egg_io(grip=SeqGrip([24.3, 24.0])))
+        self.assertFalse(r["physical_verification"]["camera_agreement"].get("offcentre_suspected", False))
+        sk = self._sk(egg_io(grip=SeqGrip([18.0])))                  # clearly off centre, default: log only
         r = sk.pick_egg("egg_1")
-        self.assertFalse(r["ok"])
-        self.assertEqual(r["reason"], "EGG_GRASP_OFF_CENTRE")
-        self.assertIsNone(sk.held)
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(r["physical_verification"]["camera_agreement"]["offcentre_suspected"])
+        self.assertEqual(sk.held, "egg_1")
+        import NERO_V349_Real_Wrist_Camera as W49
+        with Patch(W49, "egg_task_config", egg_cfg(offcentre_regrasp=True)):
+            sk = self._sk(egg_io(grip=SeqGrip([18.0, 26.4])))
+            r = sk.pick_egg("egg_1")
+            self.assertTrue(r["ok"], r)
+            self.assertTrue(any("松开、抬起、重新看、再夹一次" in s_ for s_ in sk.io.logs))
+            sk = self._sk(egg_io(grip=SeqGrip([18.0, 17.0])))
+            r = sk.pick_egg("egg_1")
+            self.assertEqual(r["reason"], "EGG_GRASP_OFF_CENTRE")
 
     def test_e3_strict_arrival_before_release(self):
         for fix in (True, False):
@@ -367,7 +365,11 @@ class TestV46Egg(unittest.TestCase):
         self.assertGreaterEqual(r["n_neighbours"], 1)
         img2, K, T, he, exp = syn.scene(dark=175)                 # no cavities visible -> not ok
         self.assertFalse(RWC.wrist_find_slot_cavity(img2, K, T, he, exp)["ok"])
-        # pre-pick look in the skill: two agreeing reads -> slot moved, source "wrist", plan redone
+        # pre-pick look in the skill (V4.6.1: behind the switch wrist_slot_look_before_pick, default off)
+        import NERO_V349_Real_Wrist_Camera as W49
+        self._cfg_patch = Patch(W49, "egg_task_config", egg_cfg(wrist_slot_look_before_pick=True))
+        self._cfg_patch.__enter__()
+        self.addCleanup(self._cfg_patch.__exit__)
         io = egg_io(wrist=True)
         sk = RT.RealEggSkills(io)
         sk.observe_scene()
@@ -417,16 +419,14 @@ class TestV46Egg(unittest.TestCase):
         olds = sorted(f for f in os.listdir(d) if f.startswith("console_"))
         self.assertEqual(len(olds), C.LOG_KEEP)
         self.assertEqual(open(os.path.join(d, "console.prev.log")).read(), "run 13\n")
-        cam = open(os.path.join(HERE, "NERO_V325_Camera.py"), encoding="utf-8").read()
-        self.assertIn("def _wait_arrived", cam)
-        for fn in ("def _move_measure", "def _wmove_measure"):
-            body = cam[cam.index(fn):]
-            body = body[:body.index("\n    def ", 10)]
-            self.assertIn("self._wait_arrived(q_rad, label)", body, fn)
+        # V4.6.1: the arrival wait moved from the (frozen since V3.80) NERO_V325_Camera.py into
+        # RealPipeline.move_and_settle, which the calibration photos use (tests/test_v4_6_1.py N8)
+        rr = open(os.path.join(HERE, "NERO_V313_Real_Robot.py"), encoding="utf-8").read()
+        self.assertIn("act = self._v46_wait_arrival(model, tgt, label)", rr)
 
     def test_e6_markers(self):
         with open(os.path.join(HERE, "VERSION")) as f:
-            self.assertEqual(f.read().strip(), "V4.6")
+            self.assertTrue(f.read().strip().startswith("V4.6"))
         self.assertEqual(RT.MARKER_V46, "V4.6 EGG CAMERA AGREEMENT + STRICT ARRIVAL")
         self.assertEqual(RWC.MARKER_V46_SLOT, "V4.6 WRIST SLOT CAVITY DETECTOR")
         self.assertEqual((RT.STRICT_POS_MM, RT.STRICT_ROT_DEG, RT.STRICT_JOINT_DEG), (2.0, 1.0, 0.5))

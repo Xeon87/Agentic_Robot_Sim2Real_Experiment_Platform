@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NERO V3.68 REAL TASK RECORD - debugging aids for the real cup task (「NERO实机任务」).
+"""NERO V3.68 REAL TASK RECORD - debugging aids for the real cup task (「Agentic实机任务」, was 「NERO实机任务」).
 
 V3.68 REAL TASK RECORD
   TaskRecorder   one folder per submitted task under <project>/task/ (env NERO_V368_TASK_DIR overrides): before and

@@ -1048,6 +1048,7 @@ EGG_WRIST_LOOK_ABOVE_M = 0.120    # pre-orient wrist look: grasp origin this hig
 EGG_WRIST_MAX_SHIFT_M = 0.015
 # ---- V4.6 EGG PLACE ACCURACY II (camera agreement, off-centre grasp, strict arrival, pre-pick slot look)
 MARKER_V46 = "V4.6 EGG CAMERA AGREEMENT + STRICT ARRIVAL"
+MARKER_V461 = "V4.6.1 MEASURED HELD GAP + WRIST LOG ONLY"
 STRICT_POS_MM, STRICT_ROT_DEG, STRICT_JOINT_DEG = 2.0, 1.0, 0.5
 EGG_WRIST_SMALL_MM = 6.0          # wrist vs main camera <= this: shift the grasp directly (V4.3 behaviour)
 EGG_WRIST_CONFIRM_MM = 25.0       # 6..25 mm: look again from the corrected position; accept when both agree
@@ -1676,6 +1677,11 @@ class RealEggSkills:
         return chk
 
     # ------------------------------------------------------------------ V4.6 camera agreement helpers
+    def _egg_cfg(self):
+        """V4.6.1: config/egg_carton.json (read only)"""
+        import NERO_V349_Real_Wrist_Camera as W49
+        return W49.egg_task_config()
+
     def _wrist_frame(self):
         ws_fn = getattr(self.io, "wrist_snapshot", None)
         ws = ws_fn() if ws_fn is not None else None
@@ -1775,63 +1781,28 @@ class RealEggSkills:
         return out
 
     def _egg_wrist_align(self, source_egg):
-        """V4.6 EGG CAMERA AGREEMENT at the pregrasp pose (gripper open, above the egg):
-        <= 6 mm  -> shift the grasp (V4.3 behaviour);
-        6-25 mm  -> move over the wrist estimate and look again; both reads agree <= 4 mm -> re-plan with the wrist
-                    position (the V4.5 run: wrist saw 18 mm, was ignored, the egg was gripped at its end);
-        else     -> stop (do not grasp blindly).  -> (ok, info)"""
+        """V4.6.1 (user decision): the wrist camera's egg reading is LOGGED ONLY - no shift, no second look, no stop.
+        The pick uses the fixed D435i position (the V4.5.1 behaviour that picked the egg). Reason: on the white
+        calibration sheet the wrist 'white blob' egg detector jumped (18 mm, then 30 mm in the opposite direction)."""
         ws = self._wrist_frame()
         if ws is None:
-            return True, {"wrist": "not_ready"}
+            return True, {"wrist": "not_ready", "action": "log_only"}
         import NERO_V386_Real_Wrist_Camera as RWC
         egg = self.cam.get(source_egg) or {}
-        exp_xyz = np.asarray(egg.get("rim"), float)
-        chk = RWC.wrist_check_egg_or_slot(ws["rgb"], ws["K"], self._T_flange_now(), ws["calib_eih"], exp_xyz, kind="egg",
-                                          undistort_intr=ws.get("intr"))
+        try:
+            chk = RWC.wrist_check_egg_or_slot(ws["rgb"], ws["K"], self._T_flange_now(), ws["calib_eih"],
+                                              np.asarray(egg.get("rim"), float), kind="egg", undistort_intr=ws.get("intr"))
+        except Exception as exc:
+            chk = {"ok": False, "reason": f"识别出错 {exc}"}
         if not chk.get("ok"):
-            self.io.emit(f"[INFO] [V4.6 WRIST EGG] 腕部相机没有锁定鸡蛋（{chk.get('reason')}）→ 沿用主相机")
-            return True, {"wrist": "no_lock", "detail": chk.get("reason")}
+            self.io.emit(f"[INFO] [V4.6.1 WRIST EGG] 腕部相机：{chk.get('reason')}（只记录，按主相机位置夹）")
+            return True, {"wrist": "unusable" if chk.get("unusable") else "no_lock", "detail": chk.get("reason"),
+                          "action": "log_only"}
         d = np.asarray(chk["delta_xy_m"], float)
-        dmm = float(chk["shift_norm_mm"])
-        self.io.emit(f"[INFO] [V4.6 CAMERA AGREEMENT] 鸡蛋 {source_egg}：主相机 vs 腕部相机 = ({d[0] * 1000:+.1f}, {d[1] * 1000:+.1f}) mm "
-                     f"（{dmm:.1f} mm）")
-        info = {"wrist_vs_main_mm": [round(d[0] * 1000.0, 1), round(d[1] * 1000.0, 1)], "norm_mm": round(dmm, 1)}
-        if dmm < 1.5:
-            return True, dict(info, action="none")
-        W = self.plan["_wps"]
-        if dmm <= EGG_WRIST_SMALL_MM:
-            dd = np.array([d[0], d[1], 0.0])
-            for k in ("pregrasp", "grasp", "lift"):
-                p, R = W[k]
-                W[k] = (p + dd, R)
-            self.io.move_line(f"V4.6 wrist adjust {source_egg}", W["pregrasp"][0], self.CK.R_to_quat_xyzw(W["pregrasp"][1]), 0.03)
-            self._egg_wrist_shift = d
-            return True, dict(info, action="shift")
-        if dmm > EGG_WRIST_CONFIRM_MM or not chk.get("trusted"):
-            self.io.emit(f"[FAIL] [V4.6 CAMERA AGREEMENT] 两个相机对鸡蛋位置相差 {dmm:.0f} mm（> {EGG_WRIST_CONFIRM_MM:.0f} mm）"
-                         "→ 不盲目去夹。请检查主相机手眼标定 / 腕部相机标定，或重新识别")
-            return False, dict(info, action="stop")
-        # 6..25 mm: look again from above the wrist estimate
-        p_pre, R_pre = W["pregrasp"]
-        p2 = np.asarray(p_pre, float) + np.array([d[0], d[1], 0.0])
-        r = self.io.move_line(f"V4.6 second look {source_egg}", p2, self.CK.R_to_quat_xyzw(R_pre), 0.03)
-        ws2 = self._wrist_frame() if r.get("ok") else None
-        chk2 = None
-        if ws2 is not None:
-            exp2 = exp_xyz + np.array([d[0], d[1], 0.0])
-            chk2 = RWC.wrist_check_egg_or_slot(ws2["rgb"], ws2["K"], self._T_flange_now(), ws2["calib_eih"], exp2,
-                                               kind="egg", undistort_intr=ws2.get("intr"))
-        if not chk2 or not chk2.get("ok") or float(chk2["shift_norm_mm"]) > EGG_WRIST_AGREE_MM:
-            self.io.emit(f"[FAIL] [V4.6 CAMERA AGREEMENT] 第二次腕部读数和第一次不一致（"
-                         f"{(chk2 or {}).get('shift_norm_mm', '无')} mm）→ 不夹，停止")
-            return False, dict(info, action="stop", second=(chk2 or {}).get("shift_norm_mm"))
-        d2 = np.asarray(chk2["delta_xy_m"], float)
-        total = d + d2
-        self.io.emit(f"[OK] [V4.6 CAMERA AGREEMENT] 两次腕部读数一致（第二次只差 {chk2['shift_norm_mm']:.1f} mm）→ 鸡蛋位置改用腕部相机："
-                     f"({total[0] * 1000:+.1f}, {total[1] * 1000:+.1f}) mm")
-        self.cam[source_egg]["rim"] = exp_xyz + np.array([total[0], total[1], 0.0])
-        self._egg_wrist_shift = total
-        return True, dict(info, action="replan", total_mm=[round(total[0] * 1000.0, 1), round(total[1] * 1000.0, 1)])
+        self.io.emit(f"[INFO] [V4.6.1 CAMERA AGREEMENT] 鸡蛋 {source_egg}：主相机 vs 腕部相机 = ({d[0] * 1000:+.1f}, "
+                     f"{d[1] * 1000:+.1f}) mm（{float(chk['shift_norm_mm']):.1f} mm，只记录，按主相机位置夹）")
+        return True, {"wrist_vs_main_mm": [round(d[0] * 1000.0, 1), round(d[1] * 1000.0, 1)],
+                      "norm_mm": round(float(chk["shift_norm_mm"]), 1), "action": "log_only"}
 
     def _descend_and_clamp(self, source_egg):
         W = self.plan["_wps"]
@@ -1855,6 +1826,13 @@ class RealEggSkills:
         target_slot = self.plan["target_slot"]
         agree = {}
         # V4.6 (1) pre-pick wrist look at the slot with an EMPTY gripper
+        ecfg = self._egg_cfg()
+        if not getattr(self, "_slot_looked", False) and not ecfg["wrist_slot_look_before_pick"]:
+            self._slot_looked = True
+            self._slot_wrist_shift = None
+            agree["slot"] = {"accepted": False, "skipped": "switch_off"}
+            self.io.emit("[INFO] [V4.6.1 WRIST SLOT] 夹蛋前看槽：关闭（config/egg_carton.json → wrist_slot_look_before_pick）"
+                         "→ 槽位用主相机")
         if not getattr(self, "_slot_looked", False):
             self._slot_looked = True
             self._slot_wrist_shift = None
@@ -1914,17 +1892,27 @@ class RealEggSkills:
                 return self._res("pick_egg", False, {"gripper": st_at_clamp, "clamp": clamp, "gap_mm": gap_clamp,
                                                      "detail": why_clamp, "camera_agreement": agree},
                                  reason="EGG_NOT_HELD", nxt=["observe_scene"])
-            # V4.6 (3) off-centre grasp: a 42 mm egg clamped at its equator leaves ~ its width between the tips
-            if gap_clamp is not None and float(gap_clamp) < width_mm - EGG_OFFCENTRE_TOL_MM:
-                self.io.emit(f"[WARN] [V4.6 EGG PICK] 夹偏了：指尖距离 {float(gap_clamp):.1f} mm < 蛋宽 {width_mm:.0f} − "
-                             f"{EGG_OFFCENTRE_TOL_MM:.0f} mm（夹在鸡蛋一头）→ 松开、抬起、重新看"
+            # V4.6.1 off-centre grasp against the MEASURED baseline (config held_gap_mm, 26.5 mm on this SO-101). V4.6
+            # assumed "reading ~= egg width 42 mm" and released three good grasps (26.5 mm) - that assumption was wrong.
+            base, marg = ecfg["held_gap_mm"], ecfg["offcentre_margin_mm"]
+            if gap_clamp is not None:
+                self.io.emit(f"[INFO] [V4.6.1 EGG PICK] 夹紧读数 {float(gap_clamp):.1f} mm（基准 {base:.1f} mm，"
+                             f"差 {float(gap_clamp) - base:+.1f} mm；判夹偏阈值 < {base - marg:.1f} mm）")
+            offc = gap_clamp is not None and float(gap_clamp) < base - marg
+            if offc and not ecfg["offcentre_regrasp"]:
+                self.io.emit(f"[WARN] [V4.6.1 EGG PICK] 夹紧读数 {float(gap_clamp):.1f} mm 比基准小 {base - float(gap_clamp):.1f} mm，"
+                             "可能夹偏 → 只记录，继续（config/egg_carton.json → offcentre_regrasp=false）")
+                agree["offcentre_suspected"] = True
+            if offc and ecfg["offcentre_regrasp"]:
+                self.io.emit(f"[WARN] [V4.6.1 EGG PICK] 夹偏：读数 {float(gap_clamp):.1f} mm < 基准 {base:.1f} − "
+                             f"{marg:.0f} mm → 松开、抬起、重新看"
                              + ("、再夹一次" if attempt == 1 else "；已经重试过一次，停止"))
                 self.io.gripper_open(EGG_OPEN_MM)
                 self.io.sleep(0.3)
                 self.io.move_line(f"V4.6 regrasp retreat {source_egg}", W["pregrasp"][0],
                                   self.CK.R_to_quat_xyzw(W["pregrasp"][1]), 0.035)
                 if attempt == 2:
-                    return self._res("pick_egg", False, {"gap_mm": gap_clamp, "egg_width_mm": round(width_mm, 1),
+                    return self._res("pick_egg", False, {"gap_mm": gap_clamp, "held_gap_mm": base,
                                                          "camera_agreement": agree},
                                      reason="EGG_GRASP_OFF_CENTRE", nxt=["observe_scene"])
                 continue
@@ -1945,7 +1933,8 @@ class RealEggSkills:
         self.held = source_egg
         self.stage = "HOLDING"
         return self._res("pick_egg", True,
-                         {"source_egg": source_egg, "gap_mm": gap_lift, "egg_width_mm": round(width_mm, 1),
+                         {"source_egg": source_egg, "gap_mm": gap_lift, "gap_at_clamp_mm": gap_clamp,
+                          "held_gap_mm": ecfg["held_gap_mm"],
                           "gripper": st, "camera_agreement": agree},
                          nxt=["orient_for_slot", "place_egg_into_slot"])
 
@@ -2616,8 +2605,55 @@ def overlay_dets(res):
 
 
 # ================================================================================================ GUI tab
+MON_MAIN_TITLE = "主相机实时监控（固定 D435i · 识别到的杯子 / 抓取点）"
+MON_WRIST_TITLE = "腕部相机实时监控（Innomaker 4MP HDR · OV4688）"
+
+
+class CameraMonitorMirror:
+    """V4.6.1 MIRRORED MONITORS: the two live monitors of the 「Agentic实机任务」 tab (same headings, frame size,
+    YOLOE contours / labels, "识别于 … s 前", fingertips F / M, grasp / release marks, wrist cross hair, YOLOE line),
+    drawn into another tab (「Smol VLA实机任务」) by the very same drawing code of RealCupTaskTabUI."""
+
+    def __init__(self, tk, ttk, parent, rct_tab, side_by_side=True, yolo_parent=None):
+        """yolo_parent: where the YOLOE description line goes (default: under the main monitor). The connect buttons
+        sit on the heading line so that nothing falls below the monitors on a 1080-pixel-high screen."""
+        import NERO_V314_Joint_Control as JC
+        self.rct = rct_tab
+        self.photo = self.photo_w = None
+        self._shown = (-1, -1)
+        DW, DH = rct_tab.DW, rct_tab.DH
+        side = "left" if side_by_side else "top"
+        fr_m = ttk.Frame(parent)
+        fr_m.pack(side=side, anchor="n", padx=(0, 6))
+        hm = ttk.Frame(fr_m)
+        hm.pack(fill="x")
+        ttk.Label(hm, text=MON_MAIN_TITLE, font=("TkDefaultFont", 9, "bold")).pack(side="left")
+        ttk.Button(hm, text="▶ 连接主相机", command=rct_tab.on_cam_connect).pack(side="right")
+        self.cv = tk.Canvas(fr_m, width=DW, height=DH, bg="#202020", highlightthickness=1, highlightbackground="#999")
+        self.cv.pack()
+        fr_w = ttk.Frame(parent)
+        fr_w.pack(side=side, anchor="n", padx=(0, 6))
+        hw = ttk.Frame(fr_w)
+        hw.pack(fill="x")
+        ttk.Label(hw, text=MON_WRIST_TITLE, font=("TkDefaultFont", 9, "bold")).pack(side="left")
+        ttk.Button(hw, text="▶ 连接腕部相机", command=rct_tab.on_wrist_connect).pack(side="right")
+        self.cvw = tk.Canvas(fr_w, width=DW, height=DH, bg="#181818", highlightthickness=1, highlightbackground="#607d8b")
+        self.cvw.pack()
+        self.v_yolo = tk.StringVar(value="")
+        JC.fixed_label(tk, yolo_parent if yolo_parent is not None else fr_m, 2, width=DW,
+                       textvariable=self.v_yolo, font=("TkDefaultFont", 8), wraplength=DW - 6, pack={"fill": "x"})
+
+    def refresh(self):
+        try:
+            self.rct._draw_main(self)
+            self.rct._draw_wrist(self)
+            self.v_yolo.set(self.rct.v_yolo.get())
+        except Exception:
+            pass
+
+
 class RealCupTaskTabUI:
-    """「NERO实机任务」 tab (V3.65): live fixed / wrist camera monitors + SO-101 gripper + skill / parameters of the
+    """「Agentic实机任务」 tab (V3.65; V4.6.1 renamed from 「NERO实机任务」): live fixed / wrist camera monitors + SO-101 gripper + skill / parameters of the
     stack_cups_so101 simulation + LLM agent + run modes.  Worker threads never touch Tk (queue + after loop)."""
     DW, DH = 512, 288
 
@@ -2691,12 +2727,11 @@ class RealCupTaskTabUI:
         right.pack(side="left", fill="both", expand=True, padx=(8, 0))
 
         # -- monitors
-        ttk.Label(left, text="主相机实时监控（固定 D435i · 识别到的杯子 / 抓取点）",
-                  font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
+        ttk.Label(left, text=MON_MAIN_TITLE, font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
         self.cv = tk.Canvas(left, width=self.DW, height=self.DH, bg="#202020", highlightthickness=1,
                             highlightbackground="#999")
         self.cv.pack()
-        ttk.Label(left, text="腕部相机实时监控（Innomaker 4MP HDR · OV4688）", font=("TkDefaultFont", 9, "bold")).pack(anchor="w", pady=(4, 0))
+        ttk.Label(left, text=MON_WRIST_TITLE, font=("TkDefaultFont", 9, "bold")).pack(anchor="w", pady=(4, 0))
         self.cvw = tk.Canvas(left, width=self.DW, height=self.DH, bg="#181818", highlightthickness=1,
                              highlightbackground="#607d8b")
         self.cvw.pack()
@@ -2989,24 +3024,27 @@ class RealCupTaskTabUI:
             import NERO_V325_Camera as CAM
             return self.tk.PhotoImage(data=CAM.png_bytes_from_ppm(data), format="PNG")
 
-    def _draw_main(self):
+    def _draw_main(self, view=None):
+        """view: an object with cv / photo / _shown (this tab, or a V4.6.1 CameraMonitorMirror in another tab)"""
+        v_ = view if view is not None else self
         src = getattr(self.cam_tab, "src", None)
         if src is None or not src.running():
             return
         _r, _d, fid = src.frames()
-        if fid == self._shown[0]:
+        if fid == v_._shown[0]:
             return
         data = src.display_ppm("color", size=(self.DW, self.DH))
         if data is None:
             return
-        self.photo = self._photo(data)
-        c = self.cv
+        v_.photo = self._photo(data)
+        c = v_.cv
         c.delete("all")
-        c.create_image(0, 0, image=self.photo, anchor="nw")
-        self._shown = (fid, self._shown[1])
-        self._draw_overlay(src)
+        c.create_image(0, 0, image=v_.photo, anchor="nw")
+        v_._shown = (fid, v_._shown[1])
+        self._draw_overlay(src, v_)
 
-    def _draw_overlay(self, src):
+    def _draw_overlay(self, src, view=None):
+        cv_ = (view if view is not None else self).cv
         calib = getattr(self.cam_tab, "result", None) or getattr(self.cam_tab, "calib", None)
         K = src.K
         if not calib or not K:
@@ -3026,34 +3064,35 @@ class RealCupTaskTabUI:
             for u, v in d["contour"]:
                 pts += [u * sx, v * sy]
             if len(pts) >= 6:
-                self.cv.create_polygon(*pts, outline=d["color"], fill="", width=1 if old else 2,
+                cv_.create_polygon(*pts, outline=d["color"], fill="", width=1 if old else 2,
                                        dash=(4, 3) if old else None)
             if d.get("anchor"):
-                self.cv.create_text(d["anchor"][0] * sx, d["anchor"][1] * sy - 2, text=d["label"], fill=d["color"],
+                cv_.create_text(d["anchor"][0] * sx, d["anchor"][1] * sy - 2, text=d["label"], fill=d["color"],
                                     anchor="s", font=("TkDefaultFont", 8, "bold"))
         if age is not None and (self.overlay.get("dets") or self.overlay.get("cups")):
-            self.cv.create_text(6, self.DH - 4, text=f"识别于 {age:.1f} s 前" + ("（旧）" if old else ""),
+            cv_.create_text(6, self.DH - 4, text=f"识别于 {age:.1f} s 前" + ("（旧）" if old else ""),
                                 fill="#ffab40" if old else "#b2ff59", anchor="sw", font=("TkDefaultFont", 9, "bold"))
         for name, c in self.overlay.get("cups") or []:
             uv = proj(c["rim_xyz_m"])
             if uv:
                 u, v = uv
-                self.cv.create_oval(u - 6, v - 6, u + 6, v + 6, outline="#00e5ff", width=2)
-                self.cv.create_text(u + 8, v - 8, text=f"{name} {c['kind']}", fill="#00e5ff", anchor="sw",
+                cv_.create_oval(u - 6, v - 6, u + 6, v + 6, outline="#00e5ff", width=2)
+                cv_.create_text(u + 8, v - 8, text=f"{name} {c['kind']}", fill="#00e5ff", anchor="sw",
                                     font=("TkDefaultFont", 9, "bold"))
-        self._draw_tips(proj)                          # V3.68 FINGERTIP OVERLAY
+        self._draw_tips(proj, view)                    # V3.68 FINGERTIP OVERLAY
         pl = self.overlay.get("plan")
         if pl:
             for key, col in (("grasp", "#ffeb3b"), ("release", "#76ff03")):
                 uv = proj(pl[key])
                 if uv:
                     u, v = uv
-                    self.cv.create_line(u - 7, v, u + 7, v, fill=col, width=2)
-                    self.cv.create_line(u, v - 7, u, v + 7, fill=col, width=2)
+                    cv_.create_line(u - 7, v, u + 7, v, fill=col, width=2)
+                    cv_.create_line(u, v - 7, u, v + 7, fill=col, width=2)
 
-    def _draw_tips(self, proj):
+    def _draw_tips(self, proj, view=None):
         """V3.68 FINGERTIP OVERLAY: model fixed (F) / moving (M) fingertips for the current arm pose and the mount in
         the fields; compare with the real jaws in the image and tune 「偏转 °」 until they coincide"""
+        cv_ = (view if view is not None else self).cv
         if not bool(self.v_tips.get()) or not getattr(self.jpanel, "model", None):
             return
         try:
@@ -3073,10 +3112,10 @@ class RealCupTaskTabUI:
         uf, um = proj(fx), proj(mv)
         if not uf or not um:
             return
-        self.cv.create_line(uf[0], uf[1], um[0], um[1], fill="#ffeb3b", width=2)
+        cv_.create_line(uf[0], uf[1], um[0], um[1], fill="#ffeb3b", width=2)
         for (u, v), col, t in ((uf, "#ff9800", "F 固定指"), (um, "#00e5ff", "M 动指")):
-            self.cv.create_oval(u - 5, v - 5, u + 5, v + 5, outline=col, width=2)
-            self.cv.create_text(u + 7, v + 7, text=t, fill=col, anchor="nw", font=("TkDefaultFont", 8, "bold"))
+            cv_.create_oval(u - 5, v - 5, u + 5, v + 5, outline=col, width=2)
+            cv_.create_text(u + 7, v + 7, text=t, fill=col, anchor="nw", font=("TkDefaultFont", 8, "bold"))
 
     def on_roll_sweep(self):
         """V3.68 ROLL SWEEP: plan the current cup pair for mount rolls -90..+90 deg (arm does not move)"""
@@ -3129,22 +3168,23 @@ class RealCupTaskTabUI:
                 self._log("[FAIL] [V3.68 ROLL SWEEP] 这组杯子位置在所有偏转角下都规划不到")
         self._start("偏转角扫描", job)
 
-    def _draw_wrist(self):
+    def _draw_wrist(self, view=None):
+        v_ = view if view is not None else self
         w = getattr(self.cam_tab, "wrist_src", None)
         if w is None or not w.running():
             return
         _r, _d, fid = w.frames()
-        if fid == self._shown[1]:
+        if fid == v_._shown[1]:
             return
         data = w.display_ppm("color", size=(self.DW, self.DH))
         if data is None:
             return
-        self.photo_w = self._photo(data)
-        self.cvw.delete("all")
-        self.cvw.create_image(0, 0, image=self.photo_w, anchor="nw")
-        self.cvw.create_line(self.DW / 2 - 10, self.DH / 2, self.DW / 2 + 10, self.DH / 2, fill="#ff5252")
-        self.cvw.create_line(self.DW / 2, self.DH / 2 - 10, self.DW / 2, self.DH / 2 + 10, fill="#ff5252")
-        self._shown = (self._shown[0], fid)
+        v_.photo_w = self._photo(data)
+        v_.cvw.delete("all")
+        v_.cvw.create_image(0, 0, image=v_.photo_w, anchor="nw")
+        v_.cvw.create_line(self.DW / 2 - 10, self.DH / 2, self.DW / 2 + 10, self.DH / 2, fill="#ff5252")
+        v_.cvw.create_line(self.DW / 2, self.DH / 2 - 10, self.DW / 2, self.DH / 2 + 10, fill="#ff5252")
+        v_._shown = (v_._shown[0], fid)
 
     def status_text(self):
         try:

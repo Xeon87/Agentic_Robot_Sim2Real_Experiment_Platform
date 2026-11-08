@@ -30,7 +30,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.3"
+VERSION = "V4.6.1"
 # V3.54 FIRMWARE V1.2.1 (NeroFW.V121) + FOLLOWER MODE TEACH EXIT + STEP 3 PUSH RECOVERY
 DEFAULT_FW_VERSION = "v121"
 SUPPORTED_FW_VERSIONS = ("v121", "v120", "v112", "v111", "default")
@@ -2588,6 +2588,36 @@ class RealPipeline:
         return self._send_move(label, model["arm_group"], model["joints"], target_rad, speed,
                                timeout_s or JC.MOVE_TIMEOUT_S, extra)
 
+    ARRIVE_TOL_DEG, ARRIVE_TIMEOUT_S, ARRIVE_STILL_S = 0.3, 8.0, 0.5
+
+    def _v46_wait_arrival(self, model, tgt_deg, label):
+        """V4.6.1 ARRIVAL: MoveIt reports success before the NERO is really there (user's real_motion_log: J4 9-14 deg,
+        J7 10 deg short 0.8 s after "done" on long moves). Keep reading the joints while the arm is still MOVING
+        (up to ARRIVE_TIMEOUT_S) until every joint is within ARRIVE_TOL_DEG; an arm that has stopped short is not
+        waited for. Every caller (calibration recheck photos, joint panel, motion log) then sees the real end pose."""
+        t_end = time.time() + self.ARRIVE_TIMEOUT_S
+        act = self.actual_arm_deg(model)
+        prev, t_still = act, None
+        while act is not None and time.time() < t_end:
+            err = max(abs(a - b) for a, b in zip(tgt_deg, act))
+            if err <= self.ARRIVE_TOL_DEG:
+                return act
+            moving = prev is not None and max(abs(a - b) for a, b in zip(prev, act)) > 0.05
+            if moving:
+                t_still = None
+            else:
+                t_still = t_still or time.time()
+                if time.time() - t_still >= self.ARRIVE_STILL_S:
+                    break
+            time.sleep(0.1)
+            prev, act = act, self.actual_arm_deg(model)
+        if act is not None:
+            e = [abs(a - b) for a, b in zip(tgt_deg, act)]
+            if max(e) > self.ARRIVE_TOL_DEG:
+                self.log(f"[WARN] [V4.6.1 ARRIVAL] {label}：MoveIt 报告完成后，J{e.index(max(e)) + 1} 仍差 {max(e):.1f}°"
+                         f"（机械臂没有走到目标）")
+        return act
+
     def move_and_settle(self, model, target_rad, speed, label="move", plan_only=False, settle_s=0.8, timeout_s=None,
                         ignore_xy_fence=False):
         """move_joints + settle + final error + one row in logs/real_motion_log.csv."""
@@ -2598,7 +2628,7 @@ class RealPipeline:
         act = None
         if res.get("ok") and not plan_only:
             time.sleep(settle_s)
-            act = self.actual_arm_deg(model)
+            act = self._v46_wait_arrival(model, tgt, label)    # V4.6.1 ARRIVAL (was V4.6 in the frozen V325)
             if act is not None:
                 e = [abs(a - b) for a, b in zip(tgt, act)]
                 res["final_error_deg"] = max(e)

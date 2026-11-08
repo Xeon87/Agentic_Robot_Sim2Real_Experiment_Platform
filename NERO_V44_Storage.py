@@ -318,7 +318,7 @@ def write_activate_script(L: Dict[str, Any]) -> str:
     lines += ["unset PYTHONPATH LEROBOT_HOME   # keep ROS python packages out of the venv; LEROBOT_HOME is deprecated",
               f"if [ -f {shlex.quote(os.path.join(L['venv'], 'bin', 'activate'))} ]; then",
               f"  source {shlex.quote(os.path.join(L['venv'], 'bin', 'activate'))}",
-              "else", "  echo '[WARN] venv not installed yet (NERO console -> VLA / LeRobot (V4) -> 安装 LeRobot+SmolVLA)'", "fi",
+              "else", "  echo '[WARN] venv not installed yet (NERO console -> Smol VLA实机任务 -> 安装 LeRobot+SmolVLA)'", "fi",
               f"cd {shlex.quote(L['root'])}", ""]
     with open(L["activate_sh"], "w", encoding="utf-8") as f:
         f.write("\n".join(lines))

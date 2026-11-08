@@ -92,7 +92,7 @@ class StatusLamp:
 
 
 class VLALeRobotTabUI:
-    """「VLA / LeRobot (V4)」 tab in NERO Console (Phases 0–6 complete integration)."""
+    """「Smol VLA实机任务」 tab (V4.6.1; was 「VLA / LeRobot (V4)」) in NERO Console (Phases 0–6 integration)."""
 
     def __init__(
         self,
@@ -359,9 +359,25 @@ class VLALeRobotTabUI:
             font=("TkFixedFont", 9), wraplength=1150, pack={"fill": "x", "padx": 6, "pady": 2}
         )
 
+        # V4.6.1: the 「Agentic实机任务」 live monitors (main + wrist camera), mirrored here; log to their right
+        bottom = ttk.Frame(parent)
+        bottom.pack(fill="both", expand=True, pady=(3, 0))
+        mons = ttk.Frame(bottom)
+        mons.pack(side="left", anchor="n")
+        logcol = ttk.Frame(bottom)
+        logcol.pack(side="left", fill="both", expand=True)
+        self.monitor = None
+        if self.rct_tab is not None and hasattr(self.rct_tab, "_draw_main"):
+            try:
+                import NERO_V365_Real_Cup_Task as RCT
+                self.monitor = RCT.CameraMonitorMirror(tk, ttk, mons, self.rct_tab, yolo_parent=logcol)
+            except Exception as exc:
+                ttk.Label(mons, text=f"相机监控不可用：{exc}").pack(side="left", anchor="n")
+        else:
+            ttk.Label(mons, text="相机监控：「Agentic实机任务」页不可用", width=30).pack(side="left", anchor="n")
         # Log panel
-        lf = ttk.Frame(parent)
-        lf.pack(fill="both", expand=True, pady=(3, 0))
+        lf = ttk.Frame(logcol)
+        lf.pack(side="top", fill="both", expand=True)
         self.txt = tk.Text(lf, height=12, wrap="word", font=("TkFixedFont", 9))
         self.txt.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(lf, command=self.txt.yview)
@@ -1017,6 +1033,8 @@ class VLALeRobotTabUI:
                 threading.Thread(target=lambda: self._drive_refresh_job(probe=False), daemon=True).start()
         if self.visible_fn():
             self._refresh_status()
+            if self.monitor is not None:
+                self.monitor.refresh()
         self._schedule()
 
     def _refresh_status(self) -> None:

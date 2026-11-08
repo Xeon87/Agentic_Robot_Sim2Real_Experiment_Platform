@@ -215,7 +215,7 @@ def find_lerobot_python() -> Dict[str, Any]:
         "lerobot_installed": has_lr_cur,
         "lerobot_version": lr_ver,
         "setup_hint": (
-            "V4.4: 插上移动硬盘 EMBODIED_AI，在「VLA / LeRobot (V4)」页「0. 移动硬盘」区点「安装 LeRobot+SmolVLA 到移动硬盘」"
+            "V4.4: 插上移动硬盘 EMBODIED_AI，在「Smol VLA实机任务」页「0. 移动硬盘」区点「安装 LeRobot+SmolVLA 到移动硬盘」"
             "（环境装在 <EMBODIED_AI>/nero_lerobot/envs/lerobot）；或自行设置 NERO_LEROBOT_PYTHON=<python 路径>"
         ),
     }

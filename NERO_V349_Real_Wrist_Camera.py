@@ -2112,6 +2112,37 @@ def egg_carton_config(path=None):
     return {"slot_pitch_mm": None, "source": None}
 
 
+EGG_TASK_DEFAULTS = {                                   # V4.6.1 (values measured / chosen with the user)
+    "held_gap_mm": 26.5, "offcentre_margin_mm": 6.0, "offcentre_regrasp": False,
+    "wrist_slot_look_before_pick": False,
+    "wrist_gripper_mask": [[0.0, 0.60], [1.0, 0.60], [1.0, 1.0], [0.0, 1.0]],
+    "wrist_overexposed_frac": 0.35, "wrist_overexposed_level": 245,
+}
+
+
+def egg_task_config(path=None):
+    """V4.6.1: egg-task settings from config/egg_carton.json (read only) over EGG_TASK_DEFAULTS; bad values -> default."""
+    cfg = dict(EGG_TASK_DEFAULTS)
+    try:
+        with open(path or EGG_CARTON_CFG, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        raw = {}
+    for k, dv in EGG_TASK_DEFAULTS.items():
+        v = raw.get(k, dv)
+        try:
+            if isinstance(dv, bool):
+                v = bool(v)
+            elif isinstance(dv, (int, float)):
+                v = float(v)
+            elif k == "wrist_gripper_mask":
+                v = [[float(a), float(b)] for a, b in v] if v else []
+        except Exception:
+            v = dv
+        cfg[k] = v
+    return cfg
+
+
 def refine_slot_grid(u_mm, v_mm, h_mm, R, C, pl_mm, pw_mm, h_top_mm=None, min_pts=8):
     """V4.5 SLOT CAVITY REFINEMENT: the nominal grid (outer box / columns) puts the slot centres wherever the outer box
     says; real cartons have flanges and sometimes a lid inside that box. Each EMPTY slot is a depression in the

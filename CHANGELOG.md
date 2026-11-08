@@ -1,3 +1,14 @@
+## V4.6.1 (2026-11-08) — 修正 V4.6 鸡蛋策略（夹住又松开）+ 页面改名 + Smol VLA 页相机监控 + 测试白名单修复
+- **鸡蛋**：`config/egg_carton.json` 新增 `held_gap_mm`=26.5（实测）、`offcentre_margin_mm`=6、`offcentre_regrasp`=false（默认只记录）、`wrist_slot_look_before_pick`=false、`wrist_gripper_mask`（默认图像下方 40%）、`wrist_overexposed_frac`=0.35 / `wrist_overexposed_level`=245，读取函数 `NERO_V349.egg_task_config()`（只读）。`RealEggSkills._egg_wrist_align` 只写日志；夹偏按基准判断；夹蛋前看槽按开关。`NERO_V386`：`wrist_view_gate`（排除夹爪区域、过曝判"不可用"）+ `wrist_contour_clipped`（被截断的轮廓不计算），两个腕部识别都用。
+- **到位等待从冻结的 `NERO_V325_Camera.py` 移出**：V4.6 改了 V325（V3.80 起由 18 个测试的快照哈希冻结）。V4.6.1 把 V325 恢复到 V4.3 原样，同样的功能改在 `NERO_V313.RealPipeline.move_and_settle` 里（`_v46_wait_arrival`：机械臂还在动就继续等，最多 8 s，到位 ≤ 0.3°；停在半路则不再等，并写 `[WARN] [V4.6.1 ARRIVAL] … J4 仍差 9.2°`）。`NERO_V313` 版本号改为 V4.6.1（`test_v3_46` 要求控制台 / 实机模块 / VERSION 三者一致）。
+- **页面**：「NERO实机任务」→「Agentic实机任务」，「VLA / LeRobot (V4)」→「Smol VLA实机任务」（`NERO_V312.TAB_AGENTIC / TAB_SMOLVLA`）；`NERO_V365.CameraMonitorMirror` 在 Smol VLA 页复用 Agentic 页的绘图代码（`_draw_main / _draw_overlay / _draw_tips / _draw_wrist` 加了可选的 `view` 参数，默认行为不变）。
+- **测试白名单（V4.4 起的遗留问题）**：77 个测试文件里的 167 处版本白名单补上 V4.1–V4.6.1（只改白名单）。以前从 V4.4 起，`test_v3_65` 等十几个测试一开头就因版本号停止，后面的检查没有运行；V4.4–V4.6 说的"和上一版结果一致"因此不充分。
+- **完整回归对比（同一套修好白名单的测试，Python 3.13 + Ubuntu 22.04 Python 3.10/Tk 8.6.12）**：
+  - 非 GUI：原始 V4.3 vs V4.6.1 —— 89 个文件两边都通过，8 个两边都失败且失败原因相同（V4.3 原有），**0 个回归**；V4.4 / V4.5 / V4.6 / V4.6.1 的新测试全部通过。
+  - GUI（虚拟显示器）：32 个两边都通过，5 个两边都失败（V4.3 原有；其中 `test_v3_56_gui` 在 V4.3 上也时好时坏），**0 个回归**；新增 `test_v4_6_1_gui` 通过（Smol VLA 页监控和 Agentic 页逐项一致）。
+- 新测试：`tests/test_v4_6_1.py`（8 项）、`tests/test_v4_6_1_gui.py`；`test_v4_6.py` 的 E1 / E2 / E4 / E5 按 V4.6.1 的行为修改；`test_v3_65` 的页面名断言改为「Agentic实机任务」。
+- **没有在真实硬件上运行过**。
+
 ## V4.6 (2026-11-08) — SmolVLA 实机安全门 + 如实报告 + 状态灯 / 日志；鸡蛋放槽：相机一致性、夹偏重夹、严格到位、夹蛋前看槽
 - `NERO_V4_SmolVLA_Policy.py`：`model_profile()`（状态/动作维度、训练数据集、是否为 NERO 训练、是否允许实机）；`run_vla_closed_loop` 在实机后端拒绝非 NERO 模型（`MODEL_NOT_TRAINED_FOR_NERO`），开始 / 每块 / 结束 / 每种失败都写日志，结果 `executed_unverified`。
 - `NERO_V44_SmolVLA_Worker.py`：返回按归一化统计得到的动作维度、`train_config.json` 里的数据集名和训练步数；`NERO_V44_FAKE_DIMS` 供测试。

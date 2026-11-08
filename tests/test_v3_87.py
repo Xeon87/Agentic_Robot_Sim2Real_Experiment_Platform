@@ -34,7 +34,7 @@ import NERO_V362_Cup_Skills as CK               # noqa: E402
 import NERO_V365_Real_Cup_Task as RCT           # noqa: E402
 import NERO_V386_Real_Wrist_Camera as W86       # noqa: E402
 
-assert W86.VERSION in ("V3.87", "V3.88", "V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2", "V4.3") and W49.VERSION in ("V3.87", "V3.88", "V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2", "V4.3") and RCT.VERSION in ("V3.87", "V3.88", "V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2", "V4.3")
+assert W86.VERSION in ("V3.87", "V3.88", "V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1") and W49.VERSION in ("V3.87", "V3.88", "V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1") and RCT.VERSION in ("V3.87", "V3.88", "V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1")
 
 # ------------------------------------------------------------------ Z1: Phase 2 OV4688 4MP Intrinsics & EIH Calibration
 w_4mp, h_4mp = 2688, 1520

@@ -1,4 +1,18 @@
 {
-  "_comment": "V4.5: measured egg-carton slot pitch in mm [along the long side, across]. Measure centre-to-centre of two neighbouring slots with a ruler and fill in, e.g. [47.0, 47.0]. null = derive from the outer box and correct by the slot cavities seen in depth.",
-  "slot_pitch_mm": null
+  "_comment": "V4.5/V4.6.1 egg task settings (read-only at runtime; edit with a text editor, then restart the task).",
+  "_slot_pitch_mm": "measured egg-carton slot pitch [along, across] in mm, e.g. [47.0, 47.0]; null = derive from the outer box + cavities",
+  "slot_pitch_mm": null,
+  "_held_gap_mm": "SO-101 tip-gap reading (gripper gap_mm) when an egg is clamped properly; measured 26.5 mm on 2026-11-07 (3 grasps: 26.7 / 26.5 / 26.5)",
+  "held_gap_mm": 26.5,
+  "_offcentre_margin_mm": "a clamped reading this much below held_gap_mm counts as an off-centre grasp",
+  "offcentre_margin_mm": 6.0,
+  "_offcentre_regrasp": "false = only log an off-centre grasp and carry on (default); true = release, look again and regrasp once",
+  "offcentre_regrasp": false,
+  "_wrist_slot_look_before_pick": "true = before the pick, look at the target slot with the wrist camera (empty gripper); off until verified",
+  "wrist_slot_look_before_pick": false,
+  "_wrist_gripper_mask": "wrist-image region hidden by the gripper jaws (normalised x, y polygon); excluded from wrist detection",
+  "wrist_gripper_mask": [[0.0, 0.60], [1.0, 0.60], [1.0, 1.0], [0.0, 1.0]],
+  "_wrist_overexposed_frac": "wrist detection is 'unusable' when more than this fraction of the search area is nearly white (>= wrist_overexposed_level)",
+  "wrist_overexposed_frac": 0.35,
+  "wrist_overexposed_level": 245
 }

@@ -100,7 +100,6 @@ MARKER_SIZES_MM = (40.0, 30.0)
 # V3.45 ROBUST CAPTURE: frames per pose, outlier-trimmed jitter limit, settle time, one retry.
 CAPTURE_FRAMES, CAPTURE_TIMEOUT_S, JITTER_MAX_MM = 15, 8.0, 3.0
 SETTLE_S, STILL_TOL_DEG, CAPTURE_RETRIES = 1.5, 0.05, 1
-ARRIVE_TOL_DEG, ARRIVE_TIMEOUT_S = 0.3, 10.0    # V4.6 ARRIVAL: every joint within 0.3 deg before a calibration photo
 # V3.55 FAST CAPTURE & SETTLE: 6 frames (early exit at 5 consistent frames), 0.35 s settle, 0.8 s empty-pose skip
 FAST_CAPTURE_FRAMES, FAST_CAPTURE_TIMEOUT_S, FAST_EMPTY_TIMEOUT_S = 6, 2.2, 0.8
 FAST_SETTLE_S, FAST_STILL_HOLD_S = 0.35, 0.20
@@ -3996,24 +3995,6 @@ class CameraTabUI:
             return list(q)
         return ik
 
-    def _wait_arrived(self, q_target_rad, label, tol_deg=ARRIVE_TOL_DEG, timeout=ARRIVE_TIMEOUT_S):
-        """V4.6 ARRIVAL: MoveIt reports success before the NERO really is there (real_motion_log: J4 9-14 deg, J7
-        10 deg short 0.8 s after "done" on long moves). Wait until every joint is within tol_deg of the target and
-        still. -> (ok, max_err_deg, joint_index)"""
-        tgt = [math.degrees(v) for v in q_target_rad]
-        t_end = time.time() + float(timeout)
-        err, jj = 999.0, -1
-        while time.time() < t_end and not self.stop_flag:
-            q = self.actual_q()
-            if q:
-                e = [abs(a - b) for a, b in zip(q, tgt)]
-                err, jj = max(e), e.index(max(e))
-                if err <= tol_deg and self._wait_still(timeout=1.0, hold_s=0.2):
-                    return True, err, jj
-            time.sleep(0.1)
-        self.log(f"[WARN] [V4.6 ARRIVAL] {label}：{timeout:.0f} s 后仍差 J{jj + 1} {err:.1f}°（机械臂没走到目标）→ 这个样本不采")
-        return False, err, jj
-
     def _move_measure(self, model, q_rad, speed, label):
         try:
             res = self.pipe.move_and_settle(model, list(q_rad), speed, label=label, settle_s=0.35)
@@ -4021,9 +4002,6 @@ class CameraTabUI:
             res = self.pipe.move_and_settle(model, list(q_rad), speed, label=label)
         if not res.get("ok"):
             return None, f"运动失败：{res.get('error')}"
-        arrived, err, jj = self._wait_arrived(q_rad, label)    # V4.6: really there before the photo
-        if not arrived:
-            return None, f"机械臂未到位（J{jj + 1} 差 {err:.1f}°）"
         time.sleep(min(float(SETTLE_S), FAST_SETTLE_S))
         self._wait_still(timeout=1.5, hold_s=FAST_STILL_HOLD_S)
         return self._capture_retry(f"{label}：")
@@ -5939,9 +5917,6 @@ class CameraTabUI:
         res = self.pipe.move_and_settle(model, list(q_rad), speed, label=label)
         if not res.get("ok"):
             return None, f"运动失败：{res.get('error')}"
-        arrived, err, jj = self._wait_arrived(q_rad, label)    # V4.6: really there before the photo
-        if not arrived:
-            return None, f"机械臂未到位（J{jj + 1} 差 {err:.1f}°）"
         time.sleep(min(0.18, FAST_SETTLE_S, SETTLE_S))
         self._wait_still(1.2, hold_s=min(0.18, FAST_STILL_HOLD_S))
         return self._capture_wrist_retry(f"{label}：")

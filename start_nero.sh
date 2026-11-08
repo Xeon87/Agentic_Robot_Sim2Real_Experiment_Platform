@@ -8,7 +8,7 @@
 #   ./start_nero.sh --sim    -> old behaviour: run the full simulation chain
 #                               directly (start_nero_sim.sh), no console
 #   ./start_nero.sh --real   -> console with the 实机NERO调试 tab selected
-#   ./start_nero.sh --no-vla -> V4.5.1: console without the VLA / LeRobot (V4) tab (emergency switch)
+#   ./start_nero.sh --no-vla -> V4.5.1: console without the Smol VLA实机任务 tab (emergency switch)
 #
 # Every NERO file used comes from THIS folder.
 # ============================================================
@@ -25,7 +25,7 @@ CAM="$HERE/NERO_V325_Camera.py"
 YOLO347="$HERE/NERO_V347_Yolo_Perception.py"   # V3.47 YOLOE egg perception (Camera调试 → 视觉定位)
 WRIST349="$HERE/NERO_V349_Real_Wrist_Camera.py" # V3.49 real USB wrist camera + intrinsics + eye-in-hand + holder
 STRAT359="$HERE/NERO_V359_Strategy.py"         # V3.59 skill strategy knobs + skill card + hover dry-run
-REALCUP365="$HERE/NERO_V365_Real_Cup_Task.py"  # V3.65 NERO实机任务 tab (stack_cups_so101 skills on the real arm)
+REALCUP365="$HERE/NERO_V365_Real_Cup_Task.py"  # V3.65 Agentic实机任务 tab (was NERO实机任务) (stack_cups_so101 skills on the real arm)
 GRIP365="$HERE/NERO_V365_STS3215_Gripper.py"   # V3.65 SO-101 jaw on the STS3215 bus servo
 CUPYOLO366="$HERE/NERO_V366_Real_Cup_Yolo.py"   # V3.66 real cup perception = the Camera tab's YOLOE pipeline
 VISION374="$HERE/NERO_V374_Vision_Review.py"    # V3.74 LLM vision review of the real cup perception
@@ -95,7 +95,7 @@ ARGS=()
 for a in "$@"; do
   case "$a" in
     --real) ARGS+=(--real) ;;
-    --no-vla) export NERO_NO_VLA_TAB=1; echo "[INFO] V4.5.1: --no-vla -> console without the VLA / LeRobot (V4) tab" ;;
+    --no-vla) export NERO_NO_VLA_TAB=1; echo "[INFO] V4.5.1: --no-vla -> console without the Smol VLA实机任务 tab" ;;
   esac
 done
 cd "$HERE"
