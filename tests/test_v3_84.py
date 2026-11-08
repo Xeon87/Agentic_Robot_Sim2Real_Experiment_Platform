@@ -58,9 +58,9 @@ import NERO_V383_Gpu_Check as GC383
 import NERO_V384_Object_Tracker as TR384
 
 # ------------------------------------------------------------------ T1 Versions & markers
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.84", "V3.85", "V3.86", "V3.87", "V3.88", "V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1")
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.84", "V3.85", "V3.86", "V3.87", "V3.88", "V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2")
 for m in (CON, RR, YP, W49, TR381, GC383, TR384):
-    assert m.VERSION in ("V3.84", "V3.85", "V3.86", "V3.87", "V3.88", "V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1"), (m.__name__, m.VERSION)
+    assert m.VERSION in ("V3.84", "V3.85", "V3.86", "V3.87", "V3.88", "V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2"), (m.__name__, m.VERSION)
 assert CAM.VERSION == "V3.25"
 
 h08 = hashlib.sha256((ROOT / "NERO_V308_Camera_Perception.py").read_bytes()).hexdigest()

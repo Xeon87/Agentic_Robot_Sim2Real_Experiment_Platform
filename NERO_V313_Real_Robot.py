@@ -30,7 +30,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.6.1"
+VERSION = "V4.6.2"
 # V3.54 FIRMWARE V1.2.1 (NeroFW.V121) + FOLLOWER MODE TEACH EXIT + STEP 3 PUSH RECOVERY
 DEFAULT_FW_VERSION = "v121"
 SUPPORTED_FW_VERSIONS = ("v121", "v120", "v112", "v111", "default")
@@ -823,9 +823,78 @@ DIAG_API_KEYS = ("mode", "leader", "master", "follower", "teach", "drag", "enabl
                  "load", "payload", "gravity", "tcp", "param", "config")
 
 
+CUSTOM_PAYLOAD_APIS = PAYLOAD_APIS + ("set_payload_mass", "set_end_mass", "set_load_param", "set_tcp_payload",
+                                      "set_end_load_param", "set_gravity_compensation")
+_MASS_NAMES = ("mass", "weight", "kg")
+
+
+def _custom_payload_call(fn):
+    """V4.6.2: -> a builder (mass_kg, com_m) -> kwargs when the call's parameters are clearly mass (+ centre of mass),
+    else None.  Only parameters NAMED mass / weight / kg (+ com / cog / center or x / y / z) are used, so a class call
+    such as Piper set_payload(load: str) is never fed a number."""
+    import inspect
+    try:
+        params = [p for p in inspect.signature(fn).parameters.values()
+                  if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)]
+    except (TypeError, ValueError):
+        return None
+    if not params or params[0].annotation is str:
+        return None
+    plan, has_mass = [], False
+    for p in params:
+        n = p.name.lower()
+        if any(k in n for k in _MASS_NAMES):
+            plan.append((p.name, "m"))
+            has_mass = True
+        elif any(k in n for k in ("com", "cog", "center", "centre")) and not n.endswith(("_x", "_y", "_z")):
+            plan.append((p.name, "c"))
+        elif n in ("x", "y", "z") or n.endswith(("_x", "_y", "_z")):
+            plan.append((p.name, n[-1]))
+        elif p.default is p.empty:
+            return None                                # a required parameter we do not understand
+    if not has_mass:
+        return None
+
+    def build(mass_kg, com_m):
+        val = {"m": float(mass_kg), "c": [float(v) for v in com_m], "x": float(com_m[0]), "y": float(com_m[1]),
+               "z": float(com_m[2])}
+        return {name: val[k] for name, k in plan}
+    return build
+
+
 def apply_teach_payload(robot, payload):
-    """V3.70: send the end-load class before teach mode.  Returns a JSON-able report (never raises)."""
-    p = str(payload or "").strip().lower()
+    """V3.70: send the end-load class before teach mode.  Returns a JSON-able report (never raises).
+    V4.6.2: payload may also be JSON {"mass_kg", "com_mm", "fallback"} (「高级」 custom mass): sent with an end-load call
+    that has mass parameters; when the driver has none, the fallback class is sent and the report says so."""
+    p = str(payload or "").strip()
+    if p.startswith("{"):
+        try:
+            d = json.loads(p)
+            mass, com_mm = float(d.get("mass_kg")), [float(v) for v in (d.get("com_mm") or [0, 0, 0])][:3]
+            fb = str(d.get("fallback") or "empty")
+        except Exception as exc:
+            return {"payload": p[:80], "api": None, "ok": False, "note": f"自定义负载格式错误：{exc}"}
+        com_m = [v / 1000.0 for v in (com_mm + [0.0, 0.0, 0.0])[:3]]
+        tried = []
+        for name in CUSTOM_PAYLOAD_APIS:
+            fn = getattr(robot, name, None)
+            if not callable(fn):
+                continue
+            b = _custom_payload_call(fn)
+            if b is None:
+                tried.append(name)
+                continue
+            try:
+                r = fn(**b(mass, com_m))
+                return {"payload": f"{mass:.3f} kg", "custom": True, "api": name, "ok": r is not False,
+                        "result": _jsonable(r), "com_mm": com_mm}
+            except Exception as exc:
+                return {"payload": f"{mass:.3f} kg", "custom": True, "api": name, "ok": False, "note": str(exc)[:200]}
+        rep = apply_teach_payload(robot, fb)
+        rep["custom_note"] = (f"自定义 {mass:.3f} kg 没有发送：驱动没有带质量参数的负载接口"
+                              + (f"（{', '.join(tried)} 只接受档位）" if tried else "") + f"，改发档位 {fb}")
+        return rep
+    p = p.lower()
     if p in ("", "none", "off", "skip", "不设置"):
         return {"payload": None, "api": None, "ok": None, "note": "不设置（沿用控制器当前负载）"}
     if p not in PAYLOAD_CHOICES:
@@ -849,6 +918,8 @@ def apply_teach_payload(robot, payload):
 
 def teach_payload_line(pl):
     """V3.70: one user-facing log line for the payload report of the mode helper."""
+    if pl.get("custom_note"):                          # V4.6.2: custom mass not possible -> class sent instead
+        return teach_payload_line(dict(pl, custom_note=None)) + f"（{pl['custom_note']}）"
     if pl.get("payload") is None:
         return f"[INFO] [V3.70 teach] 示教负载：{pl.get('note') or '不设置'}"
     if pl.get("ok"):
@@ -857,6 +928,51 @@ def teach_payload_line(pl):
             "原因：控制器的重力补偿可能按较重的末端计算，换轻的 SO-101 后松手关节会被拉回。"
             "下一步：看上面「模式接口」一行有没有 load / payload 字样的接口并告诉开发者；"
             "或用 AgileX 上位机把末端负载设为空载 / 实际重量；或在夹爪上临时加配重（约等于原夹爪重量）再试示教")
+
+
+def cmd_probe(channel="can0", fw="v111"):
+    """V4.6.2: list the installed driver's load / payload / gravity calls with their parameters (connect only, no
+    mode switch, nothing sent)."""
+    import inspect
+    try:
+        from pyAgxArm import create_agx_arm_config, AgxArmFactory, ArmModel, NeroFW
+    except Exception as exc:
+        _emit(event="probe", ok=False, error=f"pyAgxArm import failed: {exc}")
+        return 1
+    fw_attr, fw_const = _resolve_nero_fw(NeroFW, fw)
+    if fw_const is None:
+        _emit(event="probe", ok=False, error=f"NeroFW has no {fw_attr}")
+        return 1
+    try:
+        cfg = create_agx_arm_config(robot=ArmModel.NERO, firmeware_version=fw_const,
+                                    interface="socketcan", channel=channel)
+        robot = AgxArmFactory.create_arm(cfg)
+        robot.connect()
+    except Exception as exc:
+        _emit(event="probe", ok=False, error=f"connect: {exc}")
+        return 1
+    apis, pay, custom_ok = [], [], False
+    for n in sorted(m for m in dir(robot) if not m.startswith("_") and any(k in m for k in DIAG_API_KEYS)):
+        fn = getattr(robot, n, None)
+        if not callable(fn):
+            continue
+        try:
+            sig = str(inspect.signature(fn))
+        except (TypeError, ValueError):
+            sig = "(...)"
+        doc = ((getattr(fn, "__doc__", "") or "").strip().splitlines() or [""])[0][:120]
+        a = {"name": n, "sig": sig, "doc": doc}
+        apis.append(a)
+        if any(k in n for k in ("load", "payload", "gravity", "mass")):
+            pay.append(a)
+            if _custom_payload_call(fn) is not None:
+                custom_ok = True
+    _emit(event="probe", ok=True, apis=apis, payload_apis=pay, custom_ok=custom_ok, fw=fw_attr)
+    try:
+        robot.disconnect()
+    except Exception:
+        pass
+    return 0
 
 
 def cmd_mode(channel="can0", fw="v111", mode="teach", enable_timeout_s=6.0, verify_s=3.0, hold=None, speed_pct=10, payload=None):
@@ -2343,6 +2459,24 @@ class RealPipeline:
             self.log(teach_payload_line(pl))
         return ev
 
+    def probe_teach_apis(self, timeout_s=12.0):
+        """V4.6.2 「检测驱动接口」: -> {"ok", "apis", "payload_apis", "custom_ok"} or {"ok": False, "error"}"""
+        cfg = self.cfg_fn()
+        argv = helper_argv("probe", "--channel", cfg.get("can_port", "can0"), "--fw", self._fw_cfg())
+        try:
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s)
+        except Exception as exc:
+            return {"ok": False, "error": f"probe helper: {exc}"}
+        for l in p.stdout.splitlines():
+            if l.startswith("{"):
+                try:
+                    d = json.loads(l)
+                except ValueError:
+                    continue
+                if d.get("event") == "probe":
+                    return d
+        return {"ok": False, "error": f"probe helper produced no result (rc={p.returncode}) {(p.stderr or '')[-300:]}"}
+
     def _sync_fake_controller(self, q):
         """V3.22: ROS-side arm_controller -> real pose while the gate is closed (see monitor do_hold)."""
         if not q or not self.monitor.running():
@@ -2767,12 +2901,16 @@ def main(argv=None):
     md.add_argument("--mode", choices=["teach", "normal"], required=True)
     md.add_argument("--hold", default="", help="V3.22: JSON list of 7 joint angles (rad) to hold when re-enabling")
     md.add_argument("--speed", type=int, default=10)
-    md.add_argument("--payload", default="", help="V3.70: teach end-load class empty / half / full (none = do not set)")
+    md.add_argument("--payload", default="", help="V3.70: teach end-load class empty / half / full (none = do not set); "
+                                                  "V4.6.2: or JSON {mass_kg, com_mm, fallback}")
     ld = sub.add_parser("leader")
     ld.add_argument("--channel", default="can0")
     ld.add_argument("--fw", default="v111")
     ld.add_argument("--period", type=float, default=0.05)
     ld.add_argument("--max-reports", type=int, default=0)
+    pr = sub.add_parser("probe")                       # V4.6.2: driver load / payload API listing
+    pr.add_argument("--channel", default="can0")
+    pr.add_argument("--fw", default="v111")
     m = sub.add_parser("monitor")
     m.add_argument("--period", type=float, default=1.0)
     a = ap.parse_args(argv)
@@ -2781,6 +2919,8 @@ def main(argv=None):
     if a.cmd == "mode":
         return cmd_mode(a.channel, a.fw, a.mode, hold=json.loads(a.hold) if a.hold else None, speed_pct=a.speed,
                         payload=a.payload or None)
+    if a.cmd == "probe":
+        return cmd_probe(a.channel, a.fw)
     if a.cmd == "leader":
         return cmd_leader(a.channel, a.fw, a.period, a.max_reports)
     return cmd_monitor(a.period)

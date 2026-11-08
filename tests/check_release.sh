@@ -87,6 +87,7 @@ grep -qF 'V4.5 EGG PLACE ACCURACY + FINGERTIP Z SAFETY' NERO_V365_Real_Cup_Task.
 grep -qF 'V4.5.1 LAZY VLA TAB' NERO_V312_Console.py && grep -qF -- '--no-vla' start_nero.sh || { echo "[FAIL] V4.5.1 lazy VLA tab / --no-vla missing"; exit 1; }
 grep -qF 'V4.6 EGG CAMERA AGREEMENT + STRICT ARRIVAL' NERO_V365_Real_Cup_Task.py && grep -qF 'V4.6 WRIST SLOT CAVITY DETECTOR' NERO_V386_Real_Wrist_Camera.py && grep -qF 'MODEL_NOT_TRAINED_FOR_NERO' NERO_V4_SmolVLA_Policy.py && grep -qF 'class StatusLamp' NERO_V4_Console_Tab.py && grep -qF 'EXECUTED_NOT_VERIFIED' NERO_V4_Task_Evaluator.py || { echo "[FAIL] V4.6 markers missing"; exit 1; }
 grep -qF 'V4.6.1 MEASURED HELD GAP + WRIST LOG ONLY' NERO_V365_Real_Cup_Task.py && grep -qF 'V4.6.1 WRIST VIEW GATE' NERO_V386_Real_Wrist_Camera.py && grep -qF 'class CameraMonitorMirror' NERO_V365_Real_Cup_Task.py && grep -qF 'TAB_SMOLVLA = "Smol VLA实机任务"' NERO_V312_Console.py && grep -qF '"held_gap_mm": 26.5' config/egg_carton.json || { echo "[FAIL] V4.6.1 markers missing"; exit 1; }
+grep -qF 'V4.6.2 TEACH BAR + GRAVITY COMP' NERO_V462_Teach_Gravity.py && grep -qF 'V4.6.2 TEACH BAR + GRAVITY COMP + FULL-WIDTH LOG' NERO_V365_Real_Cup_Task.py && grep -qF 'def cmd_probe' NERO_V313_Real_Robot.py && grep -qF 'TG.payload_arg(TG.load())' NERO_V312_Console.py && grep -qF 'logbar.pack(side="bottom"' NERO_V4_Console_Tab.py || { echo "[FAIL] V4.6.2 markers missing"; exit 1; }
 grep -qF 'V3.81 YOLOE TRAIN' NERO_V381_Yolo_Train.py && grep -qF 'V3.81 PROFILE FILES + TRAIN PAGE' NERO_V379_Camera_Lab.py && grep -qF 'NERO_V381_Yolo_Train.py' start_nero.sh || { echo "[FAIL] V3.81 train marker missing"; exit 1; }
 grep -qF 'V3.82 FINE-TUNED MODELS' NERO_V347_Yolo_Perception.py && grep -qF 'V3.82 HIGHLIGHTS + GAMMA + LABEL ASSIST' NERO_V379_Camera_Lab.py && grep -qF 'V3.82 APPLY FINE-TUNED + 1280 TRAINING' NERO_V381_Yolo_Train.py || { echo "[FAIL] V3.82 marker missing"; exit 1; }
 grep -qF 'V3.83 MULTI-MODEL DISTRIBUTION' NERO_V347_Yolo_Perception.py && grep -qF 'V3.83 GPU PREFLIGHT' start_nero.sh && grep -qF 'NERO_V383_Gpu_Check.py' start_nero.sh || { echo "[FAIL] V3.83 marker missing"; exit 1; }
@@ -156,4 +157,5 @@ python3 tests/test_v4_4.py 2>&1 | tail -1   # V4.4 EMBODIED_AI drive storage / S
 python3 tests/test_v4_5.py 2>&1 | tail -1   # V4.5 egg place accuracy + fingertip z safety (offline)
 python3 tests/test_v4_6.py 2>&1 | tail -1   # V4.6 SmolVLA gate / honest results / egg camera agreement (offline)
 python3 tests/test_v4_6_1.py 2>&1 | tail -1   # V4.6.1 measured held gap / wrist log only / view gate / tabs
+python3 tests/test_v4_6_2.py 2>&1 | tail -1   # V4.6.2 teach bar / gravity compensation / probe / log layout
 python3 tests/test_v4_6_1_gui.py | tail -1   # skips without tkinter / DISPLAY

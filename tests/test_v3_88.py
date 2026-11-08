@@ -30,7 +30,7 @@ import NERO_V325_Camera as CAM                  # noqa: E402
 import NERO_V349_Real_Wrist_Camera as W49       # noqa: E402
 import NERO_V386_Real_Wrist_Camera as W86       # noqa: E402
 
-assert W86.VERSION in ("V3.88", "V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1") and W49.VERSION in ("V3.88", "V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1")
+assert W86.VERSION in ("V3.88", "V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2") and W49.VERSION in ("V3.88", "V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2")
 
 # ------------------------------------------------------------------ A1: Stale 130° Intrinsics Isolation
 stale_130_intr = {

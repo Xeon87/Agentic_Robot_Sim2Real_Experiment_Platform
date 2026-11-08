@@ -1,3 +1,13 @@
+## V4.6.2 (2026-11-08) — 两个实机任务页的示教按钮 +「高级」示教重力补偿 + Smol VLA 页日志移到底部 + Copy Log
+- 新模块 `NERO_V462_Teach_Gravity.py`（`V4.6.2 TEACH BAR + GRAVITY COMP`）：`TeachBar`（「进入示教模式」「退出示教模式」「高级」+ 状态；调用 `RealPipeline.set_teach_mode`，退出 `return_home=False`，与「实机NERO调试」页一致；任务运行 / 机械臂运动时拒绝）；`GravityDialog`（档位 / 自定义质量 + 质心、更轻 / 更重、保存、保存并立即生效、检测驱动接口）；设置 `NERO_CALIB_DIR/teach_gravity.json`（`load / save / normalize / payload_arg / describe`）。Tk 只在主线程操作。
+- `NERO_V313_Real_Robot.py`：`apply_teach_payload` 接受 JSON `{"mass_kg","com_mm","fallback"}`——只发给参数**名字**明确是质量（mass / weight / kg）+ 质心（com / cog / center 或 x / y / z）的接口（`_custom_payload_call`，单位 kg / m），首参数注解为 `str` 的档位接口不会收到数字；没有这类接口时改发 fallback 档位，`teach_payload_line` 写明；新 helper 子命令 `probe` + `RealPipeline.probe_teach_apis()`（列出 load / payload / gravity 接口及签名，不切换模式）。版本号 V4.6.2。
+- `NERO_V312_Console.py`：`real_cfg()["teach_payload"] = TG.payload_arg(TG.load())`；「参数 → 示教负载」下拉框与「高级」共用同一设置（双向同步）；`safe_tab` 传给两个任务页（退出示教时同步安全区编辑器的模式，与原按钮一致）。
+- `NERO_V365_Real_Cup_Task.py`（`V4.6.2 TEACH BAR + GRAVITY COMP + FULL-WIDTH LOG`）：「运行档位」框加示教按钮条；Copy Log 按钮行先以 `side="bottom"` 打包（以前排在拉伸的日志框后面，被挤出窗口）。
+- `NERO_V4_Console_Tab.py`：控制栏第二行加示教按钮条；底部改为「监控一行（右边是 4. 实时状态，按可用宽度换行）+ 全宽日志 + Copy Log」；「0. 移动硬盘」详情可折叠（默认收起，硬盘缺失时自动展开）；`copy_log()`。
+- 测试：新 `tests/test_v4_6_2.py`（6 项：设置、自定义负载发送规则、helper 参数、接口检测、接线、版本）、`tests/test_v4_6_2_gui.py`（1920×1050 和 1420×1000 下两页按钮 / Copy Log 可见、日志在监控下方且全宽、进入 / 退出调用、「高级」保存 / 立即生效 / 检测、Copy Log 剪贴板、发布目录不被写入）；`test_v4_6_1` 的布局断言跟随修改；版本白名单补 V4.6.2。
+- **完整回归对比（同一套测试，原始 V4.3 vs V4.6.2）**：非 GUI 102 个文件，94 个通过，8 个两边都失败（V4.3 原有，同 V4.6.1），**0 个回归**（第一次跑时 `test_v3_70` 因检查控制台源码里 V3.70 的「示教负载」写法而失败，已改为保留原写法后再叠加 V4.6.2 设置，复测通过）；GUI 39 个，34 个通过，5 个两边都失败（V4.3 原有），**0 个回归**；控制台在 Ubuntu 22.04 Python 3.10 / Tk 8.6.12 下启动、打开 Smol VLA 页、退出正常，`crash.log` 无记录。
+- **没有在真实硬件上运行过**；当前 NERO 驱动是否有负载接口未知（这里无法访问 pyAgxArm）。
+
 ## V4.6.1 (2026-11-08) — 修正 V4.6 鸡蛋策略（夹住又松开）+ 页面改名 + Smol VLA 页相机监控 + 测试白名单修复
 - **鸡蛋**：`config/egg_carton.json` 新增 `held_gap_mm`=26.5（实测）、`offcentre_margin_mm`=6、`offcentre_regrasp`=false（默认只记录）、`wrist_slot_look_before_pick`=false、`wrist_gripper_mask`（默认图像下方 40%）、`wrist_overexposed_frac`=0.35 / `wrist_overexposed_level`=245，读取函数 `NERO_V349.egg_task_config()`（只读）。`RealEggSkills._egg_wrist_align` 只写日志；夹偏按基准判断；夹蛋前看槽按开关。`NERO_V386`：`wrist_view_gate`（排除夹爪区域、过曝判"不可用"）+ `wrist_contour_clipped`（被截断的轮廓不计算），两个腕部识别都用。
 - **到位等待从冻结的 `NERO_V325_Camera.py` 移出**：V4.6 改了 V325（V3.80 起由 18 个测试的快照哈希冻结）。V4.6.1 把 V325 恢复到 V4.3 原样，同样的功能改在 `NERO_V313.RealPipeline.move_and_settle` 里（`_v46_wait_arrival`：机械臂还在动就继续等，最多 8 s，到位 ≤ 0.3°；停在半路则不再等，并写 `[WARN] [V4.6.1 ARRIVAL] … J4 仍差 9.2°`）。`NERO_V313` 版本号改为 V4.6.1（`test_v3_46` 要求控制台 / 实机模块 / VERSION 三者一致）。

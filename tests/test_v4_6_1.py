@@ -140,7 +140,7 @@ class TestV461(unittest.TestCase):
         self.assertNotIn('text="VLA / LeRobot (V4)"', con)
         self.assertTrue(hasattr(RT, "CameraMonitorMirror"))
         tab = open(os.path.join(HERE, "NERO_V4_Console_Tab.py"), encoding="utf-8").read()
-        self.assertIn("RCT.CameraMonitorMirror(tk, ttk, mons, self.rct_tab, yolo_parent=logcol)", tab)
+        self.assertIn("RCT.CameraMonitorMirror(tk, ttk, mons, self.rct_tab, yolo_parent=", tab)   # V4.6.2: log moved below
         self.assertIn("self.monitor.refresh()", tab)
         rct = open(os.path.join(HERE, "NERO_V365_Real_Cup_Task.py"), encoding="utf-8").read()
         self.assertEqual(rct.count("text=MON_MAIN_TITLE"), 2)        # same heading in both tabs
@@ -181,7 +181,7 @@ class TestV461(unittest.TestCase):
 
     def test_n7_markers(self):
         with open(os.path.join(HERE, "VERSION")) as f:
-            self.assertEqual(f.read().strip(), "V4.6.1")
+            self.assertIn(f.read().strip(), ("V4.6.1", "V4.6.2"))
         self.assertEqual(RT.MARKER_V461, "V4.6.1 MEASURED HELD GAP + WRIST LOG ONLY")
         self.assertEqual((RT.STRICT_POS_MM, RT.STRICT_ROT_DEG, RT.STRICT_JOINT_DEG), (2.0, 1.0, 0.5))
 

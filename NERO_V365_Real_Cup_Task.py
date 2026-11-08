@@ -1048,6 +1048,7 @@ EGG_WRIST_LOOK_ABOVE_M = 0.120    # pre-orient wrist look: grasp origin this hig
 EGG_WRIST_MAX_SHIFT_M = 0.015
 # ---- V4.6 EGG PLACE ACCURACY II (camera agreement, off-centre grasp, strict arrival, pre-pick slot look)
 MARKER_V46 = "V4.6 EGG CAMERA AGREEMENT + STRICT ARRIVAL"
+MARKER_V462 = "V4.6.2 TEACH BAR + GRAVITY COMP + FULL-WIDTH LOG"
 MARKER_V461 = "V4.6.1 MEASURED HELD GAP + WRIST LOG ONLY"
 STRICT_POS_MM, STRICT_ROT_DEG, STRICT_JOINT_DEG = 2.0, 1.0, 0.5
 EGG_WRIST_SMALL_MM = 6.0          # wrist vs main camera <= this: shift the grasp directly (V4.3 behaviour)
@@ -2658,8 +2659,9 @@ class RealCupTaskTabUI:
     DW, DH = 512, 288
 
     def __init__(self, tk, ttk, parent, pipe, jpanel, cam_tab, log=None, ask=None, visible_fn=lambda: True,
-                 settings_path=None, gripper=None):
+                 settings_path=None, gripper=None, safe_tab=None):
         import NERO_V365_STS3215_Gripper as GR
+        self.safe_tab = safe_tab
         self.tk, self.ttk, self.pipe, self.jpanel, self.cam_tab = tk, ttk, pipe, jpanel, cam_tab
         self.ext_log = log or (lambda s: None)
         self.ask = ask or (lambda t, q: True)
@@ -2908,8 +2910,18 @@ class RealCupTaskTabUI:
         self.v_speed = tk.StringVar(value=str(self.st.get("speed_mult") or "1X"))
         ttk.Combobox(r4, textvariable=self.v_speed, values=SPEED_CHOICES, width=5, state="readonly").pack(side="right")
         ttk.Label(r4, text="速度").pack(side="right", padx=(8, 2))
+        # V4.6.2 TEACH BAR: 「进入示教模式」 「退出示教模式」 「高级」(gravity compensation) - same bar as 「Smol VLA实机任务」
+        self.teach_bar = None
+        if self.pipe is not None and hasattr(self.pipe, "set_teach_mode"):
+            import NERO_V462_Teach_Gravity as TG
+            self.teach_bar = TG.TeachBar(tk, ttk, rf, self.pipe, jpanel=self.jpanel, log=self._log, cam_tab=self.cam_tab,
+                                         busy_fn=lambda: "实机任务正在运行" if self.busy() else "",
+                                         safe_tab_fn=lambda: self.safe_tab)
 
-        # -- log
+        # -- log (V4.6.2: the Copy Log row is packed first at the bottom, so the expanding log can never hide it)
+        bb = ttk.Frame(right)
+        bb.pack(side="bottom", fill="x")
+        ttk.Button(bb, text="Copy Log", command=self.copy_log).pack(side="right")
         lf = ttk.Frame(right)
         lf.pack(fill="both", expand=True, pady=(6, 0))
         self.txt = tk.Text(lf, height=12, wrap="word", font=("TkFixedFont", 9))
@@ -2917,9 +2929,6 @@ class RealCupTaskTabUI:
         sb = ttk.Scrollbar(lf, command=self.txt.yview)
         sb.pack(side="right", fill="y")
         self.txt.configure(yscrollcommand=sb.set)
-        bb = ttk.Frame(right)
-        bb.pack(fill="x")
-        ttk.Button(bb, text="Copy Log", command=self.copy_log).pack(side="right")
         self.refresh_skill()
 
     # ---------------------------------------------------------------- skill text
@@ -3661,6 +3670,7 @@ class RealCupTaskTabUI:
             t = self.txt.get("1.0", "end")
             self.txt.clipboard_clear()
             self.txt.clipboard_append(t)
+            self._log("[OK] [V4.6.2 UI] 日志已复制到剪贴板")
         except Exception:
             pass
 

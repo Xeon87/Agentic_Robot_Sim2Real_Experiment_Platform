@@ -106,8 +106,10 @@ class VLALeRobotTabUI:
         log: Optional[Callable[[str], None]] = None,
         ask: Optional[Callable[[str, str], bool]] = None,
         visible_fn: Callable[[], bool] = lambda: True,
+        safe_tab=None,
     ):
         self.tk = tk
+        self.safe_tab = safe_tab
         self.ttk = ttk
         self.parent = parent
         self.pipe = pipe
@@ -200,12 +202,17 @@ class VLALeRobotTabUI:
         self.lamp_model = StatusLamp(tk, ttk, d0, "模型", 34)
         self.lamp_job = StatusLamp(tk, ttk, d0, "后台任务", 26)
         self.lamp_drive.set("busy", "检测中")
+        # V4.6.2: the drive details (text + 2 button rows) fold away (default folded) so the log below the monitors
+        # keeps its height in the default 1420x1000 console window; the four lamps above always stay visible.
+        self.drv_detail = ttk.Frame(drv_f)
+        self.btn_drv_fold = ttk.Button(d0, text="硬盘详情 ▾", command=self.toggle_drive_detail)
+        self.btn_drv_fold.pack(side="right")
         self.v_drive = tk.StringVar(value=f"正在检测移动硬盘 {ST.DRIVE_LABEL} ...")
         JC.fixed_label(
-            tk, drv_f, 3, width=1160, textvariable=self.v_drive,
+            tk, self.drv_detail, 3, width=1160, textvariable=self.v_drive,
             font=("TkDefaultFont", 9), wraplength=1150, pack={"fill": "x", "padx": 6, "pady": 1}
         )
-        d1 = ttk.Frame(drv_f)
+        d1 = ttk.Frame(self.drv_detail)
         d1.pack(fill="x", padx=6, pady=1)
         self.btn_drive = ttk.Button(d1, text="检测硬盘", command=self.on_drive_refresh)
         self.btn_drive.pack(side="left", padx=(0, 2))
@@ -219,7 +226,7 @@ class VLALeRobotTabUI:
         ttk.Button(d1, text="打开存储目录", command=self.on_open_storage).pack(side="left", padx=2)
         ttk.Button(d1, text="本机旧文件→硬盘", command=self.on_migrate_legacy).pack(side="left", padx=2)
         ttk.Button(d1, text="安全移除硬盘", command=self.on_eject_drive).pack(side="right", padx=2)
-        d2 = ttk.Frame(drv_f)
+        d2 = ttk.Frame(self.drv_detail)
         d2.pack(fill="x", padx=6, pady=(1, 3))
         ttk.Label(d2, text="Python:").pack(side="left")
         self._py_mode_labels = {"uv312": "3.12 (uv 装到硬盘 · 最新 LeRobot)", "system": "系统 Python (3.10 → LeRobot 0.4.4)"}
@@ -311,6 +318,14 @@ class VLALeRobotTabUI:
         ttk.Button(cb2, text="③ 执行顶层 Agent 双路径任务", command=self.on_run_agent_task).pack(side="left", padx=3)
         self.lamp_3 = StatusLamp(tk, ttk, cb2, "③", 16)
         ttk.Button(cb2, text="④ 停止执行", command=self.on_stop_queue).pack(side="left", padx=3)
+        # V4.6.2 TEACH BAR: 「进入示教模式」 「退出示教模式」 「高级」(gravity compensation) - same bar as 「Agentic实机任务」
+        self.teach_bar = None
+        if self.pipe is not None and hasattr(self.pipe, "set_teach_mode"):
+            import NERO_V462_Teach_Gravity as TG
+            self.teach_bar = TG.TeachBar(
+                tk, ttk, cb2, self.pipe, jpanel=self.jpanel, log=self._log, cam_tab=self.cam_tab,
+                busy_fn=lambda: (f"「{self._run_kind}」正在执行" if self._run_busy.locked() else ""),
+                safe_tab_fn=lambda: self.safe_tab, pack={"side": "left", "padx": (16, 0)})
 
         # Section 11.3B: Dataset Recording, Fine-Tuning, Sim-to-Real Ladder & Benchmark
         rec_f = ttk.LabelFrame(parent, text="3. 示教采集与回放 (Phase 2) · 微调训练 (Phase 3) · Sim-to-Real 阶梯与三模式 Benchmark (Phase 5/6)")
@@ -350,39 +365,67 @@ class VLALeRobotTabUI:
         ttk.Button(rb2, text="开始 SmolVLA 微调 (GPU)", command=self.on_train_lerobot).pack(side="left", padx=2)
         ttk.Button(rb2, text="使用最新训练结果", command=self.on_use_latest_ckpt).pack(side="left", padx=2)
 
-        # Section 11.2: Live Status
-        st_f = ttk.LabelFrame(parent, text="4. 实时状态（8维本体状态 + 双相机同步 + 数据集/模型状态 + 安全监督器）")
-        st_f.pack(fill="x", pady=2)
-        self.v_obs_stat = tk.StringVar(value="等待读取观测...")
-        JC.fixed_label(
-            tk, st_f, 3, width=1160, textvariable=self.v_obs_stat,
-            font=("TkFixedFont", 9), wraplength=1150, pack={"fill": "x", "padx": 6, "pady": 2}
-        )
 
-        # V4.6.1: the 「Agentic实机任务」 live monitors (main + wrist camera), mirrored here; log to their right
+        # V4.6.2: monitors (side by side) in one row, the log below them over the full width with 「Copy Log」
         bottom = ttk.Frame(parent)
         bottom.pack(fill="both", expand=True, pady=(3, 0))
-        mons = ttk.Frame(bottom)
+        mon_row = ttk.Frame(bottom)
+        mon_row.pack(side="top", fill="x")
+        mons = ttk.Frame(mon_row)
         mons.pack(side="left", anchor="n")
-        logcol = ttk.Frame(bottom)
-        logcol.pack(side="left", fill="both", expand=True)
+        mon_side = ttk.Frame(mon_row)
+        mon_side.pack(side="left", fill="both", expand=True, anchor="n")
+        # Section 11.2: Live Status (V4.6.2: right of the monitors, so the log below gets the height)
+        st_f = ttk.LabelFrame(mon_side, text="4. 实时状态（本体 · 双相机 · 数据集 · 安全）")
+        st_f.pack(side="top", fill="x", pady=(0, 2))
+        self.v_obs_stat = tk.StringVar(value="等待读取观测...")
+        lab_st = JC.fixed_label(
+            tk, st_f, 8, textvariable=self.v_obs_stat,
+            font=("TkFixedFont", 9), wraplength=340, pack={"fill": "x", "padx": 6, "pady": 2}
+        )
+        # wrap at the width that is really left next to the monitors (narrow 1420 window ... full HD)
+        lab_st.holder.bind("<Configure>", lambda e, l_=lab_st: l_.configure(wraplength=max(200, e.width - 8)), add="+")
         self.monitor = None
         if self.rct_tab is not None and hasattr(self.rct_tab, "_draw_main"):
             try:
                 import NERO_V365_Real_Cup_Task as RCT
-                self.monitor = RCT.CameraMonitorMirror(tk, ttk, mons, self.rct_tab, yolo_parent=logcol)
+                self.monitor = RCT.CameraMonitorMirror(tk, ttk, mons, self.rct_tab, yolo_parent=mon_side)
             except Exception as exc:
                 ttk.Label(mons, text=f"相机监控不可用：{exc}").pack(side="left", anchor="n")
         else:
             ttk.Label(mons, text="相机监控：「Agentic实机任务」页不可用", width=30).pack(side="left", anchor="n")
-        # Log panel
-        lf = ttk.Frame(logcol)
-        lf.pack(side="top", fill="both", expand=True)
-        self.txt = tk.Text(lf, height=12, wrap="word", font=("TkFixedFont", 9))
+        # Log panel (full width; the Copy Log row is packed first at the bottom so it is never pushed off screen)
+        logbar = ttk.Frame(bottom)
+        logbar.pack(side="bottom", fill="x")
+        ttk.Button(logbar, text="Copy Log", command=self.copy_log).pack(side="right")
+        lf = ttk.Frame(bottom)
+        lf.pack(side="top", fill="both", expand=True, pady=(3, 0))
+        self.txt = tk.Text(lf, height=8, wrap="word", font=("TkFixedFont", 9))
         self.txt.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(lf, command=self.txt.yview)
         sb.pack(side="right", fill="y")
         self.txt.configure(yscrollcommand=sb.set)
+
+    def toggle_drive_detail(self, show: Optional[bool] = None) -> None:
+        """V4.6.2: fold / unfold the drive details of section 0 (lamps stay)."""
+        vis = bool(self.drv_detail.winfo_manager())
+        show = (not vis) if show is None else bool(show)
+        if show and not vis:
+            self.drv_detail.pack(fill="x")
+            self.btn_drv_fold.configure(text="硬盘详情 ▴")
+        elif not show and vis:
+            self.drv_detail.pack_forget()
+            self.btn_drv_fold.configure(text="硬盘详情 ▾")
+
+    def copy_log(self) -> None:
+        """V4.6.2: whole log text -> clipboard."""
+        try:
+            t = self.txt.get("1.0", "end")
+            self.txt.clipboard_clear()
+            self.txt.clipboard_append(t)
+            self._log("[OK] [V4.6.2 UI] 日志已复制到剪贴板")
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ Callbacks
     def on_backend_change(self) -> None:
@@ -1009,6 +1052,8 @@ class VLALeRobotTabUI:
                         "job": self.lamp_job, "model": self.lamp_model}.get(name)
                 if lamp is not None:
                     lamp.set(state, text)
+                if name == "drive" and state == "bad":          # V4.6.2: drive missing -> show its buttons
+                    self.toggle_drive_detail(True)
             elif kind == "drive":
                 self.v_drive.set(str(val))
             elif kind == "repoint_dataset":

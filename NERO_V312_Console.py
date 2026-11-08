@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.6.1"
+VERSION = "V4.6.2"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -573,7 +573,24 @@ def run_console(initial_tab="sim"):
     v_follow = tk.BooleanVar(value=True)
     v_rviz = tk.BooleanVar(value=True)
     v_domain = tk.StringVar(value=str(RR.DEFAULT_DOMAIN_ID))
+    import NERO_V462_Teach_Gravity as TG                              # V4.6.2: one setting for this box and 「高级」
     v_payload = tk.StringVar(value=RR.DEFAULT_TEACH_PAYLOAD)      # V3.70 TEACH PAYLOAD
+    _tg0 = TG.load()["payload"]                                       # V4.6.2: the saved class (if any)
+    v_payload.set("不设置" if _tg0 == "none" else _tg0)
+
+    def _payload_box_changed(*_a):
+        cur = TG.load()
+        val = "none" if v_payload.get() == "不设置" else v_payload.get()
+        if cur["payload"] != val:
+            cur.update(payload=val, mode="class")
+            TG.save(cur)
+    v_payload.trace_add("write", _payload_box_changed)
+
+    def _payload_from_dialog(st_):
+        want = "不设置" if st_["payload"] == "none" else st_["payload"]
+        if v_payload.get() != want:
+            v_payload.set(want)
+    TG.add_listener(_payload_from_dialog)
     r0 = ttk.Frame(pf)
     r0.pack(fill="x", padx=6, pady=3)
     ttk.Label(r0, text="can_port").pack(side="left")
@@ -617,7 +634,8 @@ def run_console(initial_tab="sim"):
         return {"can_port": v_port.get().strip() or "can0", "effector_type": v_eff.get(), "fw_version": v_fw.get(),
                 "push_fw": v_fw.get() or RR.DEFAULT_FW_VERSION, "speed_percent": int(v_speed.get()), "speed_unlocked": bool(v_unlock.get()),
                 "auto_control_gate": bool(v_gate.get()), "follow": bool(v_follow.get()), "use_rviz": bool(v_rviz.get()),
-                "domain_id": dom, "teach_payload": v_payload.get()}
+                "domain_id": dom, "teach_payload": v_payload.get()} | {
+                    "teach_payload": TG.payload_arg(TG.load())}      # V4.6.2: the saved class or custom mass wins
 
     def refresh_preview(*_a):
         preview.set(f"ROS_DOMAIN_ID={real_cfg()['domain_id']}  " + RR.launch_command(real_cfg()))
@@ -785,7 +803,7 @@ def run_console(initial_tab="sim"):
         rct_outer = ttk.Frame(nb, padding=6)
         nb.add(rct_outer, text=TAB_AGENTIC)
         rct_tab = RCT.RealCupTaskTabUI(tk, ttk, rct_outer, pipe, jpanel, cam_tab, log=pipe.log, ask=confirm_from_worker,
-                                       visible_fn=lambda: nb.select() == str(rct_outer))
+                                       visible_fn=lambda: nb.select() == str(rct_outer), safe_tab=safe_tab)
         nb.bind("<<NotebookTabChanged>>",
                 lambda _e: rct_tab.refresh_skill() if nb.select() == str(rct_outer) else None, add="+")
     except Exception as exc:
@@ -814,7 +832,8 @@ def run_console(initial_tab="sim"):
                     vla_hint.destroy()
                     vla_holder["tab"] = V4T.VLALeRobotTabUI(
                         tk, ttk, vla_outer, pipe=pipe, jpanel=jpanel, cam_tab=cam_tab, rct_tab=rct_tab,
-                        log=pipe.log, ask=confirm_from_worker, visible_fn=lambda: nb.select() == str(vla_outer)
+                        log=pipe.log, ask=confirm_from_worker, visible_fn=lambda: nb.select() == str(vla_outer),
+                        safe_tab=safe_tab
                     )
                     log_append(real_log, "[OK] [V4.5.1 VLA TAB] VLA / LeRobot 页已创建")
                 except Exception as exc:
