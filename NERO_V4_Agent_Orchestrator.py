@@ -23,7 +23,7 @@ import sys
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-VERSION = "V4.5"
+VERSION = "V4.6"
 MARKER = "V4.2 TOP-LEVEL AGENT ORCHESTRATOR"
 
 from NERO_V4_Policy_Router import PolicyRouter
@@ -177,9 +177,16 @@ class AgentOrchestrator:
 
             if not sub_succeeded:
                 elapsed_s = round(time.perf_counter() - t_start, 3)
+                last_res = (last_rec or {}).get("result") or {}
+                unverified = last_res.get("status") == "unverified"
+                if unverified:   # V4.6: executed, but nothing checked whether it worked
+                    self.log(f"[WARN] [V4.6 AGENT] 子任务 [{idx + 1}] 已执行，但没有视觉 / 目标检查，无法确认是否完成 → "
+                             f"停止（不当作成功，也不重试）。请人工确认现场。")
+                else:
+                    self.log(f"[FAIL] [V4.6 AGENT] 顶层任务失败：子任务 [{idx + 1}] {last_res.get('reason')}")
                 out = {
                     "ok": False,
-                    "status": "failed",
+                    "status": "unverified" if unverified else "failed",
                     "user_task": user_task,
                     "policy": chosen_policy,
                     "subtasks_planned": len(subtasks),

@@ -1600,6 +1600,96 @@ def wrist_check_egg_or_slot(rgb, K, T_base_flange, calib_eih, expected_xyz,
     }
 
 
+MARKER_V46_SLOT = "V4.6 WRIST SLOT CAVITY DETECTOR"
+
+
+def _poly_area_perim(pts):
+    pts = np.asarray(pts, float)
+    if len(pts) < 3:
+        return 0.0, 0.0
+    x, y = pts[:, 0], pts[:, 1]
+    area = 0.5 * abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
+    perim = float(np.sum(np.hypot(np.diff(np.append(x, x[0])), np.diff(np.append(y, y[0])))))
+    return area, perim
+
+
+def wrist_find_slot_cavity(rgb, K, T_base_flange, calib_eih, expected_xyz, slot_pitch_m=0.047,
+                           cavity_radius_m=0.019, undistort_intr=None, max_shift_m=0.030):
+    """V4.6 WRIST SLOT CAVITY DETECTOR (empty gripper, camera looking down at the carton):
+    an empty egg slot is a round cavity that is darker than the carton top around it. Finds dark blobs near the
+    expected slot, keeps the ones that are round (circularity >= 0.55) and slot-sized (radius 0.45-1.35 x the expected
+    cavity radius) when projected onto the slot plane, takes the one closest to the expected position and counts how
+    many other cavities sit one slot pitch away (neighbour check, so a single dark shadow is not mistaken for a slot).
+    -> {ok, trusted, measured_xyz, delta_xy_m, shift_norm_mm, radius_mm, circularity, n_neighbours, n_candidates}"""
+    if rgb is None:
+        return {"ok": False, "reason": "腕部相机无画面"}
+    if not K or not calib_eih or not calib_eih.get("T_flange_cam") or T_base_flange is None:
+        return {"ok": False, "reason": "缺少腕部内参或 Eye-in-Hand 手眼标定"}
+    cv2 = _cv2()
+    rgb_u = W49.undistort_rgb(rgb, undistort_intr) if (undistort_intr and W49.intrinsics_valid(undistort_intr)) else rgb
+    arr = np.ascontiguousarray(rgb_u, dtype=np.uint8)
+    h_img, w_img = arr.shape[:2]
+    K_s = scale_K_for_frame(K, w_img, h_img)
+    T_bw = np.asarray(W49.wrist_T_base_cam(T_base_flange, calib_eih), float)
+    T_wb = CAM.T_inv(T_bw.tolist())
+    exp = [float(v) for v in expected_xyz]
+    p_cam = CAM.T_apply(T_wb, exp)
+    if p_cam[2] <= 0.04:
+        return {"ok": False, "reason": "槽位不在腕部相机前方"}
+    uv = CAM.project(p_cam, K_s)
+    if uv is None:
+        return {"ok": False, "reason": "槽位投影不到腕部画面"}
+    f_mean = 0.5 * (float(K_s["fx"]) + float(K_s["fy"]))
+    roi_r = int(max(40.0, min(0.48 * max(h_img, w_img), f_mean * (1.4 * float(slot_pitch_m)) / p_cam[2])))
+    roi = np.zeros((h_img, w_img), np.uint8)
+    cv2.circle(roi, (int(round(uv[0])), int(round(uv[1]))), roi_r, 255, -1)
+    if int(np.count_nonzero(roi)) < 200:
+        return {"ok": False, "reason": "槽位在画面边缘之外"}
+    gray = cv2.GaussianBlur(cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY), (5, 5), 0)
+    vals = gray[roi > 0]
+    med = float(np.median(vals))
+    thr_otsu, _ = cv2.threshold(vals.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    thr = min(float(thr_otsu), med - max(10.0, 0.12 * med))
+    dark = ((gray.astype(np.float32) < thr).astype(np.uint8) * 255) & roi
+    dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+    cs, _ = cv2.findContours(dark, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    zp = exp[2]
+    cands = []
+    for c in cs:
+        if cv2.contourArea(c) < 30:
+            continue
+        pts, ratio = _intersect_contour_with_plane(c.reshape(-1, 2), K_s, T_bw, zp, img_shape=(h_img, w_img))
+        if len(pts) < 12 or ratio < 0.85:
+            continue
+        a, per = _poly_area_perim(pts)
+        if a <= 0 or per <= 0:
+            continue
+        r_eq = math.sqrt(a / math.pi)
+        circ = 4.0 * math.pi * a / (per * per)
+        if not (0.45 * cavity_radius_m <= r_eq <= 1.35 * cavity_radius_m) or circ < 0.55:
+            continue
+        cx, cy = float(np.mean(pts[:, 0])), float(np.mean(pts[:, 1]))
+        cands.append({"xy": (cx, cy), "r": r_eq, "circ": circ, "d": math.hypot(cx - exp[0], cy - exp[1])})
+    if not cands:
+        return {"ok": False, "reason": "腕部画面里没有找到圆形的槽穴（光线 / 角度 / 被遮挡？）", "n_candidates": 0}
+    best = min(cands, key=lambda c_: c_["d"])
+    nb = sum(1 for c_ in cands if c_ is not best
+             and abs(math.hypot(c_["xy"][0] - best["xy"][0], c_["xy"][1] - best["xy"][1]) - slot_pitch_m) <= 0.25 * slot_pitch_m)
+    dx, dy = best["xy"][0] - exp[0], best["xy"][1] - exp[1]
+    shift = math.hypot(dx, dy)
+    trusted = shift <= float(max_shift_m) and (nb >= 1 or shift <= 0.012)
+    return {
+        "ok": True, "trusted": bool(trusted), "kind": "slot_cavity",
+        "measured_xyz": [round(best["xy"][0], 5), round(best["xy"][1], 5), round(zp, 5)],
+        "expected_xyz": [round(v, 5) for v in exp],
+        "delta_xy_m": [round(dx, 5), round(dy, 5)], "delta_mm": [round(dx * 1000.0, 2), round(dy * 1000.0, 2)],
+        "shift_norm_mm": round(shift * 1000.0, 2), "radius_mm": round(best["r"] * 1000.0, 1),
+        "circularity": round(best["circ"], 2), "n_neighbours": int(nb), "n_candidates": len(cands),
+        "reason": None if trusted else ("偏差过大" if shift > max_shift_m else "只看到一个圆坑且离预期较远（没有相邻槽验证）"),
+    }
+
+
 def evaluate_cup_rim_preview(rgb, K=None, T_flange_cam=None, tool_T=None, z_work_m=0.10):
     """Preview red cup rim / bottom circular contours in the wrist camera view for Lab calibration check."""
     if rgb is None:

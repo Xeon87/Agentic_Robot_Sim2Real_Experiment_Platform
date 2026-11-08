@@ -41,7 +41,7 @@ import tempfile
 import time
 from typing import Any, Dict, List, Optional
 
-VERSION = "V4.5"
+VERSION = "V4.6"
 MARKER = "V4.4 EMBODIED_AI DRIVE STORAGE"
 
 DRIVE_LABEL = os.environ.get("NERO_DRIVE_LABEL", "EMBODIED_AI")
@@ -108,11 +108,19 @@ def _mount_of(path: str, mounts: Optional[List[Dict[str, str]]] = None) -> Optio
     return best
 
 
-def label_device(label: str = DRIVE_LABEL) -> Optional[str]:
-    """/dev/sdX1 of the partition with this filesystem label (present even when it is not mounted)."""
-    p = os.path.join("/dev/disk/by-label", label)
+def label_device(label: str = DRIVE_LABEL, by_label_dir: str = "/dev/disk/by-label") -> Optional[str]:
+    """/dev/sdX1 of the partition with this filesystem label (present even when it is not mounted).
+    V4.6: case-insensitive (the user's drive is labelled "Embodied_AI"; V4.4/4.5 looked for "EMBODIED_AI" only)."""
+    d = by_label_dir
+    p = os.path.join(d, label)
     if os.path.exists(p):
         return os.path.realpath(p)
+    try:
+        for name in os.listdir(d):
+            if name.replace("\\x20", " ").lower() == label.lower():
+                return os.path.realpath(os.path.join(d, name))
+    except OSError:
+        pass
     return None
 
 
@@ -385,8 +393,11 @@ def fs_checks(path: str) -> Dict[str, Any]:
     return out
 
 
-def venv_status(L: Optional[Dict[str, Any]] = None, timeout: float = 60.0) -> Dict[str, Any]:
-    """Probe the drive venv: python / torch / CUDA / lerobot / SmolVLAPolicy (runs inside the venv, ~5-20 s)."""
+VENV_PROBE_TIMEOUT_S = 180.0   # V4.6: the first torch import from a cold USB drive took > 60 s on the user's laptop
+
+
+def venv_status(L: Optional[Dict[str, Any]] = None, timeout: float = VENV_PROBE_TIMEOUT_S) -> Dict[str, Any]:
+    """Probe the drive venv: python / torch / CUDA / lerobot / SmolVLAPolicy (runs inside the venv, 5-120 s)."""
     L = L or layout()
     py = L["venv_python"]
     st: Dict[str, Any] = {"exists": os.path.isfile(py) and os.access(py, os.X_OK), "python": py}
@@ -442,6 +453,10 @@ print("NERO_JSON=" + json.dumps(o))
                 break
         else:
             st["error"] = (r.stderr or r.stdout or f"returncode={r.returncode}").strip()[-400:]
+    except subprocess.TimeoutExpired:
+        st["error"] = (f"验证超时（{timeout:.0f} s）：第一次从移动硬盘导入 torch 很慢，再点一次「验证环境」通常就好了；"
+                       "若一直超时请检查 USB 接口 / 硬盘")
+        st["timeout"] = True
     except Exception as exc:
         st["error"] = str(exc)
     st["ready"] = bool(st.get("lerobot") and st.get("smolvla_module") and st.get("torch"))

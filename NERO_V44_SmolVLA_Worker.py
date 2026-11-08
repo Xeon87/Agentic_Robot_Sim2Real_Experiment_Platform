@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-VERSION = "V4.5"
+VERSION = "V4.6"
 MARKER = "V4.4 SMOLVLA DRIVE WORKER"
 JOINT_NAMES_8D = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "gripper"]
 
@@ -92,8 +92,10 @@ class SmolVLARuntime:
         t0 = time.perf_counter()
         if self.fake:
             self.path = path
-            self.cfg_summary = {"state_dim": 6, "action_dim": 6, "chunk_size": 50, "n_action_steps": 50,
-                                "image_keys": ["observation.images.camera1", "observation.images.camera2"]}
+            dims = [int(x) for x in os.environ.get("NERO_V44_FAKE_DIMS", "6,6").split(",")[:2]]
+            self.cfg_summary = {"state_dim": dims[0], "action_dim": dims[1], "chunk_size": 50, "n_action_steps": 50,
+                                "image_keys": ["observation.images.camera1", "observation.images.camera2"],
+                                "dataset_repo_id": os.environ.get("NERO_V44_FAKE_REPO") or None}
             return {"ok": True, "device": "fake", "config": self.cfg_summary, "load_ms": 0.0}
         import torch
         cls, mod_path = _import_smolvla()
@@ -133,15 +135,33 @@ class SmolVLARuntime:
         st_norm = self._stat_dim("observation.state")
         if st_norm:
             st_dim = st_norm
+        act_norm = self._stat_dim("action")          # V4.6: the action size the normaliser was fitted on
+        if act_norm:
+            act_dim = act_norm
+        # V4.6: what was this checkpoint trained on? (lerobot-train writes train_config.json beside the weights)
+        repo_id, robot_type, steps = None, None, None
+        try:
+            with open(os.path.join(path, "train_config.json"), "r", encoding="utf-8") as f:
+                tc = json.load(f)
+            repo_id = (tc.get("dataset") or {}).get("repo_id")
+            steps = tc.get("steps")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            with open(os.path.join(path, "config.json"), "r", encoding="utf-8") as f:
+                robot_type = json.load(f).get("robot_type")
+        except Exception:  # noqa: BLE001
+            pass
         img_keys = list(getattr(cfg, "image_features", {}) or {})
         self.cfg_summary = {"state_dim": st_dim, "action_dim": act_dim, "chunk_size": getattr(cfg, "chunk_size", None),
                             "n_action_steps": getattr(cfg, "n_action_steps", None), "image_keys": img_keys,
-                            "module": mod_path, "processors": self.pre is not None}
+                            "module": mod_path, "processors": self.pre is not None,
+                            "dataset_repo_id": repo_id, "robot_type": robot_type, "train_steps": steps}
         return {"ok": True, "device": str(self.device), "config": self.cfg_summary,
                 "load_ms": round((time.perf_counter() - t0) * 1000.0, 1)}
 
     def _stat_dim(self, key: str) -> Optional[int]:
-        for step in getattr(self.pre, "steps", None) or []:
+        for step in list(getattr(self.pre, "steps", None) or []) + list(getattr(self.post, "steps", None) or []):
             st = getattr(step, "stats", None)
             if isinstance(st, dict) and isinstance(st.get(key), dict):
                 for v in st[key].values():

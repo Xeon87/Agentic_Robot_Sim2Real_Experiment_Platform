@@ -187,9 +187,9 @@ class TestV45Egg(unittest.TestCase):
         calls = []
         orig = io.move_line
 
-        def spy(label, xyz, quat, speed=0.05, slow=None):
+        def spy(label, xyz, quat, speed=0.05, slow=None, strict=False):
             calls.append((label, np.asarray(xyz, float).copy(), speed))
-            return orig(label, xyz, quat, speed, slow)
+            return orig(label, xyz, quat, speed, slow, strict=strict)
         io.move_line = spy
         sk, r = planned(io)
         self.assertTrue(sk.pick_egg("egg_1")["ok"])
@@ -224,19 +224,21 @@ class TestV45Egg(unittest.TestCase):
         return sk, before
 
     def test_t7_wrist_look_corrects_slot(self):
-        sk, before = self._wrist_case((0.006, -0.004))
-        after = sk.plan["slot_tip_target"]
-        self.assertAlmostEqual(after[0] - before[0], 0.006, delta=0.0005)
-        self.assertAlmostEqual(after[1] - before[1], -0.004, delta=0.0005)
-        self.assertEqual(sk.plan.get("wrist_slot_shift_mm"), [6.0, -4.0])
-        slot = np.asarray(sk.cam[sk.plan["target_slot"]]["rim"], float)
-        tip, _c, _R = egg_tip_from_q(sk, sk.plan["_q"]["release"])
-        self.assertLess(float(np.linalg.norm(tip[:2] - (slot[:2] + [0.006, -0.004]))) * 1000.0, 1.0)
-        self.assertTrue(sk.place_egg_into_slot(sk.plan["target_slot"])["ok"])
-        for d, tr in (((0.004, 0.0), False), ((0.030, 0.0), True)):
-            sk2, before2 = self._wrist_case(d, trusted=tr)
-            self.assertEqual(sk2.plan["slot_tip_target"], before2)
-            self.assertIsNone(sk2.plan.get("wrist_slot_shift_mm"))
+        """V4.6: the V4.5 pre-ORIENT look (egg already in the gripper) is gone - it could see the held egg as the
+        slot. The slot is now measured BEFORE the pick with an empty gripper (tests/test_v4_6.py)."""
+        frame = {"rgb": np.zeros((8, 8, 3), np.uint8), "K": {"fx": 1}, "calib_eih": {"T_flange_cam": np.eye(4).tolist()}}
+        sk, r = planned(make_io(wrist_fn=lambda: frame))
+        sk._slot_looked = True                     # skip the V4.6 pre-pick look in this V4.5 test
+        import NERO_V386_Real_Wrist_Camera as RWC
+        orig = RWC.wrist_check_egg_or_slot
+        RWC.wrist_check_egg_or_slot = lambda *a, **k: {"ok": False, "reason": "test"}
+        try:
+            self.assertTrue(sk.pick_egg("egg_1")["ok"])
+            ro = sk.orient_for_slot(sk.plan["target_slot"])
+        finally:
+            RWC.wrist_check_egg_or_slot = orig
+        self.assertTrue(ro["ok"], ro)
+        self.assertIsNone(ro["physical_verification"]["wrist_look"])
 
     def test_t8_slot_cavity_refinement(self):
         import NERO_V349_Real_Wrist_Camera as W
@@ -286,7 +288,7 @@ class TestV45Egg(unittest.TestCase):
 
     def test_t9_markers_and_crash_hardening(self):
         with open(os.path.join(HERE, "VERSION")) as f:
-            self.assertTrue(f.read().strip().startswith("V4.5"))
+            self.assertTrue(f.read().strip().startswith("V4."))
         self.assertEqual(RT.MARKER_V45, "V4.5 EGG PLACE ACCURACY + FINGERTIP Z SAFETY")
         tab = open(os.path.join(HERE, "NERO_V4_Console_Tab.py"), encoding="utf-8").read()
         self.assertIn('self.q.put(("apply_env", st["layout"]))', tab)

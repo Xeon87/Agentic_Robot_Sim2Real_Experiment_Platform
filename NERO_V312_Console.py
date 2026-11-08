@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.5.1"
+VERSION = "V4.6"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -317,6 +317,30 @@ def install_crash_log(log_dir, root=None):
     return path
 
 
+LOG_KEEP = 10
+
+
+def v46_rotate_console_log(log_dir, console_log, keep=LOG_KEEP):
+    """V4.6 LOG ROTATION: the previous run's console.log becomes logs/console_<its start time>.log (newest `keep`
+    kept) and is also copied to console.prev.log. V4.5 kept only one previous log - two restarts lost a run."""
+    import shutil
+    try:
+        if os.path.isfile(console_log) and os.path.getsize(console_log) > 0:
+            ts = time.strftime("%Y%m%d_%H%M%S", time.localtime(os.path.getmtime(console_log)))
+            dst = os.path.join(log_dir, f"console_{ts}.log")
+            n = 1
+            while os.path.exists(dst):
+                dst = os.path.join(log_dir, f"console_{ts}_{n}.log")
+                n += 1
+            os.replace(console_log, dst)
+            shutil.copy2(dst, os.path.join(log_dir, "console.prev.log"))
+        olds = sorted(f for f in os.listdir(log_dir) if f.startswith("console_") and f.endswith(".log"))
+        for f in olds[:-keep] if len(olds) > keep else []:
+            os.unlink(os.path.join(log_dir, f))
+    except OSError:
+        pass
+
+
 def v370_mirror_lines(path, lines):
     """V3.70 CONSOLE LOG MIRROR: real-page [V3.xx ...] lines (real NERO, Camera, skills, real task tabs) also go into
     logs/console.log so one file holds the whole story (the subprocess output is already written there)."""
@@ -337,11 +361,7 @@ def run_console(initial_tab="sim"):
     log_dir = os.path.join(HERE, "logs")
     os.makedirs(log_dir, exist_ok=True)
     console_log = os.path.join(log_dir, "console.log")
-    try:  # V4.5: keep the log of the previous run (after a crash the restart used to wipe it)
-        if os.path.isfile(console_log) and os.path.getsize(console_log) > 0:
-            os.replace(console_log, os.path.join(log_dir, "console.prev.log"))
-    except OSError:
-        pass
+    v46_rotate_console_log(log_dir, console_log)          # V4.6 LOG ROTATION
     open(console_log, "w").close()
 
     root = tk.Tk()

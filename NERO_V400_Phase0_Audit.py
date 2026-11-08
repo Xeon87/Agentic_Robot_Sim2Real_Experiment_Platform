@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-VERSION = "V4.5"
+VERSION = "V4.6"
 MARKER = "V4.1 PHASE 0 ARCHITECTURE & ENVIRONMENT AUDIT"
 HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:

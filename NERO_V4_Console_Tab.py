@@ -44,7 +44,7 @@ from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 
-VERSION = "V4.5"
+VERSION = "V4.6"
 MARKER = "V4.2 VLA LEROBOT CONSOLE TAB"
 HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
@@ -62,6 +62,33 @@ from NERO_V4_Policy_Router import PolicyRouter
 from NERO_V4_SmolVLA_Policy import WORKER_PATH, SmolVLAPolicy
 from NERO_V4_Task_Evaluator import TaskEvaluator
 from NERO_V4_VLA_Action_Executor import VLAActionExecutor
+
+
+LAMP_COLORS = {"off": "#9e9e9e", "busy": "#ffb300", "ok": "#2e7d32", "warn": "#ef6c00", "bad": "#c62828"}
+
+
+class StatusLamp:
+    """V4.6 STATUS LAMPS: a coloured dot (Canvas, no font glyph) + a short status text."""
+
+    def __init__(self, tk, ttk, parent, title: str, width_chars: int = 18, side: str = "left"):
+        self.fr = ttk.Frame(parent)
+        self.fr.pack(side=side, padx=(2, 6))
+        self.cv = tk.Canvas(self.fr, width=14, height=14, highlightthickness=0, bd=0)
+        self.cv.pack(side="left")
+        self.dot = self.cv.create_oval(2, 2, 12, 12, fill=LAMP_COLORS["off"], outline="#616161")
+        self.v = tk.StringVar(value=f"{title}: -")
+        self.title = title
+        ttk.Label(self.fr, textvariable=self.v, width=width_chars).pack(side="left", padx=(2, 0))
+        self.state = "off"
+
+    def set(self, state: str, text: Optional[str] = None) -> None:
+        self.state = state if state in LAMP_COLORS else "off"
+        try:
+            self.cv.itemconfigure(self.dot, fill=LAMP_COLORS[self.state])
+            if text is not None:
+                self.v.set(f"{self.title}: {text}")
+        except Exception:
+            pass
 
 
 class VLALeRobotTabUI:
@@ -100,6 +127,9 @@ class VLALeRobotTabUI:
         self._venv_st: Dict[str, Any] = {}
         self._drive_found_last: Optional[bool] = None
         self._tick_n = 0
+        self._run_busy = threading.Lock()          # V4.6: one ③ / benchmark / ladder run at a time
+        self._run_kind = ""
+        self._loading = False
         self.arbiter = ControlArbiter(log=self._log)
         self.obs_bridge = ObservationBridge(env_mode="mock", log=self._log)
         self.obs_bridge.start_mock_sources()
@@ -161,8 +191,15 @@ class VLALeRobotTabUI:
 
         # V4.4 Section 0: EMBODIED_AI removable drive (LeRobot venv, models, datasets, training runs)
         drv_f = ttk.LabelFrame(
-            parent, text=f"0. 移动硬盘 {ST.DRIVE_LABEL}：LeRobot + SmolVLA 环境 / 模型 / 数据集 / 训练文件 (V4.4)")
+            parent, text=f"0. 移动硬盘 {ST.DRIVE_LABEL}：LeRobot + SmolVLA 环境 / 模型 / 数据集 / 训练文件")
         drv_f.pack(fill="x", pady=2)
+        d0 = ttk.Frame(drv_f)                                   # V4.6 STATUS LAMPS
+        d0.pack(fill="x", padx=6, pady=(2, 0))
+        self.lamp_drive = StatusLamp(tk, ttk, d0, "硬盘", 22)
+        self.lamp_env = StatusLamp(tk, ttk, d0, "环境", 22)
+        self.lamp_model = StatusLamp(tk, ttk, d0, "模型", 34)
+        self.lamp_job = StatusLamp(tk, ttk, d0, "后台任务", 26)
+        self.lamp_drive.set("busy", "检测中")
         self.v_drive = tk.StringVar(value=f"正在检测移动硬盘 {ST.DRIVE_LABEL} ...")
         JC.fixed_label(
             tk, drv_f, 3, width=1160, textvariable=self.v_drive,
@@ -170,12 +207,14 @@ class VLALeRobotTabUI:
         )
         d1 = ttk.Frame(drv_f)
         d1.pack(fill="x", padx=6, pady=1)
-        ttk.Button(d1, text="检测硬盘", command=self.on_drive_refresh).pack(side="left", padx=(0, 2))
+        self.btn_drive = ttk.Button(d1, text="检测硬盘", command=self.on_drive_refresh)
+        self.btn_drive.pack(side="left", padx=(0, 2))
         ttk.Button(d1, text=f"挂载 {ST.DRIVE_LABEL}", command=self.on_drive_mount).pack(side="left", padx=2)
         ttk.Button(d1, text="初始化目录", command=self.on_drive_init).pack(side="left", padx=2)
         self.btn_install = ttk.Button(d1, text="安装 LeRobot+SmolVLA 到移动硬盘", command=self.on_install_env)
         self.btn_install.pack(side="left", padx=2)
-        ttk.Button(d1, text="验证环境", command=self.on_verify_env).pack(side="left", padx=2)
+        self.btn_verify = ttk.Button(d1, text="验证环境", command=self.on_verify_env)
+        self.btn_verify.pack(side="left", padx=2)
         ttk.Button(d1, text="停止后台任务", command=self.on_stop_job).pack(side="left", padx=2)
         ttk.Button(d1, text="打开存储目录", command=self.on_open_storage).pack(side="left", padx=2)
         ttk.Button(d1, text="本机旧文件→硬盘", command=self.on_migrate_legacy).pack(side="left", padx=2)
@@ -240,31 +279,38 @@ class VLALeRobotTabUI:
         # Section 11.3A: Explicit 4-Stage Control Separation Bar
         ctrl_f = ttk.LabelFrame(parent, text="2. 四级安全分离控制栏（① 加载模型/连接 → ② 允许控制 → ③ 开始执行 → ④ 停止/急停）")
         ctrl_f.pack(fill="x", pady=2)
-        cb = ttk.Frame(ctrl_f)
-        cb.pack(fill="x", padx=6, pady=3)
-
+        # V4.6: E-STOP group packed FIRST on the right of the whole section, so a long row can never push it off screen
+        es = ttk.Frame(ctrl_f)
+        es.pack(side="right", fill="y", padx=(4, 6), pady=3)
+        self.btn_estop = tk.Button(
+            es, text="■ 紧急急停 (E-STOP)", bg="#c62828", fg="white",
+            font=("TkDefaultFont", 10, "bold"), command=self.on_estop, height=2
+        )
+        self.btn_estop.pack(side="top", fill="x")
+        es2 = ttk.Frame(es)
+        es2.pack(side="top", fill="x", pady=(2, 0))
+        ttk.Button(es2, text="解除急停", command=self.on_clear_estop).pack(side="left")
+        self.lamp_4 = StatusLamp(tk, ttk, es2, "④急停", 10)
+        cb = ttk.Frame(ctrl_f)                                  # row 1: ① load / connect, ② allow control
+        cb.pack(fill="x", padx=6, pady=(3, 1))
         ttk.Button(cb, text="Phase 0 审查", command=self.on_phase0_audit).pack(side="left", padx=(0, 4))
         self.btn_connect = ttk.Button(cb, text="① 加载 SmolVLA & 连接 Adapter", command=self.on_connect_and_load)
         self.btn_connect.pack(side="left", padx=3)
+        self.lamp_1 = StatusLamp(tk, ttk, cb, "①", 10)
         self.btn_ipc = ttk.Button(cb, text="IPC 服务", command=self.on_toggle_ipc)
         self.btn_ipc.pack(side="left", padx=3)
-
         self.v_allow = tk.BooleanVar(value=False)
         self.chk_allow = ttk.Checkbutton(
             cb, text="② 允许机器人控制 (Allow Control)", variable=self.v_allow, command=self.on_toggle_allow
         )
-        self.chk_allow.pack(side="left", padx=8)
-
-        ttk.Button(cb, text="③ 执行 SmolVLA 闭环", command=self.on_run_vla_loop).pack(side="left", padx=3)
-        ttk.Button(cb, text="③ 执行顶层 Agent 双路径任务", command=self.on_run_agent_task).pack(side="left", padx=3)
-        ttk.Button(cb, text="④ 停止执行", command=self.on_stop_queue).pack(side="left", padx=3)
-
-        self.btn_estop = tk.Button(
-            cb, text="■ 紧急急停 (E-STOP)", bg="#c62828", fg="white",
-            font=("TkDefaultFont", 9, "bold"), command=self.on_estop
-        )
-        self.btn_estop.pack(side="right", padx=3)
-        ttk.Button(cb, text="解除急停", command=self.on_clear_estop).pack(side="right", padx=3)
+        self.chk_allow.pack(side="left", padx=(8, 0))
+        self.lamp_2 = StatusLamp(tk, ttk, cb, "②", 8)
+        cb2 = ttk.Frame(ctrl_f)                                 # row 2: ③ run, ④ stop
+        cb2.pack(fill="x", padx=6, pady=(1, 3))
+        ttk.Button(cb2, text="③ 执行 SmolVLA 闭环", command=self.on_run_vla_loop).pack(side="left", padx=(0, 3))
+        ttk.Button(cb2, text="③ 执行顶层 Agent 双路径任务", command=self.on_run_agent_task).pack(side="left", padx=3)
+        self.lamp_3 = StatusLamp(tk, ttk, cb2, "③", 16)
+        ttk.Button(cb2, text="④ 停止执行", command=self.on_stop_queue).pack(side="left", padx=3)
 
         # Section 11.3B: Dataset Recording, Fine-Tuning, Sim-to-Real Ladder & Benchmark
         rec_f = ttk.LabelFrame(parent, text="3. 示教采集与回放 (Phase 2) · 微调训练 (Phase 3) · Sim-to-Real 阶梯与三模式 Benchmark (Phase 5/6)")
@@ -336,6 +382,9 @@ class VLALeRobotTabUI:
             )
             self.benchmark.env_domain = "real_robot"
             self._log("[OK] [V4.2 UI] 已绑定实机 NERO + D435i/OV4688 + SO-101 夹爪数据源")
+            prof = self.vla_policy.model_profile()
+            if prof["loaded"] and not prof["real_allowed"]:
+                self._log(f"[WARN] [V4.6 UI] 当前模型不允许在实机执行：{'；'.join(prof['reasons'])}")
         else:
             self.executor.bind_mock()
             self.benchmark.env_domain = "simulation"
@@ -347,6 +396,8 @@ class VLALeRobotTabUI:
         if not r.get("ok"):
             self._log(f"[WARN] [V4.2 UI] 模式切换被拒: {r.get('error')}")
             self.v_mode.set(self.arbiter.mode)
+        else:
+            self._log(f"[OK] [V4.6 UI] 控制权模式 = {self.arbiter.mode}")
         self.v_allow.set(self.arbiter.status()["allow_control"])
 
     def on_toggle_allow(self) -> None:
@@ -359,19 +410,43 @@ class VLALeRobotTabUI:
         if not r.get("ok"):
             self._log(f"[WARN] [V4.2 UI] 无法开启控制权: {r.get('error')}")
             self.v_allow.set(False)
+        elif want and self.v_backend.get() == "real":
+            prof = self.vla_policy.model_profile()
+            if prof["loaded"] and not prof["real_allowed"] and self.arbiter.mode == "smolvla":
+                self._log("[WARN] [V4.6 UI] 已允许控制，但当前 SmolVLA 模型没有为 NERO 训练过，③ 在实机上会被拒绝执行")
 
     def on_connect_and_load(self) -> None:
         self.obs_bridge.set_task_instruction(self.v_task.get())
         ckpt_target = self.v_ckpt.get().strip()
 
+        if self._loading:
+            self._log("[INFO] [V4.6 UI] ① 正在加载中，请等待（不要重复点击）")
+            return
+        self._loading = True
+        self.lamp_1.set("busy", "加载中")
+        self.lamp_model.set("busy", "加载中…（硬盘上的 SmolVLA 要 10–90 s）")
+        self.btn_connect.configure(state="disabled")
+        self._log(f"[INFO] [V4.6 UI] ① 开始加载 SmolVLA：{ckpt_target or 'lerobot/smolvla_base'}")
+        t0 = time.time()
+
         def _job():
             try:
-                self.vla_policy.load(ckpt_target)
+                r = self.vla_policy.load(ckpt_target)
                 if not self.adapter.is_connected:
                     self.adapter.connect()
+                prof = self.vla_policy.model_profile()
+                self._log(f"[OK] [V4.6 UI] ① 加载完成（{time.time() - t0:.1f} s）：后端={r.get('backend')} · "
+                          f"{prof['state_dim'] or '?'}/{prof['action_dim'] or '?'} 维 · "
+                          f"{'可以在实机执行' if prof['real_allowed'] else '不允许在实机执行'}"
+                          + (f" · {'；'.join(prof['reasons'])}" if prof["reasons"] else ""))
                 self.q.put(("btn_connect", "① 已加载 & 已连接"))
+                self.q.put(("lamp", ("1", "ok", "已加载")))
             except Exception as exc:
-                self._log(f"[FAIL] [V4.5 VLA] 加载失败: {exc}")
+                self._log(f"[FAIL] [V4.6 UI] ① 加载失败（{time.time() - t0:.1f} s）: {exc}")
+                self.q.put(("lamp", ("1", "bad", "加载失败")))
+            finally:
+                self._loading = False
+                self.q.put(("btn_connect_state", "normal"))
 
         threading.Thread(target=_job, daemon=True).start()
 
@@ -429,6 +504,20 @@ class VLALeRobotTabUI:
             self.job.L = st["layout"]
         self.q.put(("drive", ST.format_status(st)))
         self.q.put(("repoint_dataset", None))
+        fs = st.get("fs") or {}
+        if not st["drive"].get("found"):
+            self.q.put(("lamp", ("drive", "bad", "未挂载")))
+        else:
+            self.q.put(("lamp", ("drive", "ok" if fs.get("grade") == "good" else "warn",
+                                 f"{fs.get('free_gb', '?')} GB 空闲" + ("" if fs.get("grade") == "good" else " ⚠"))))
+        v = st.get("venv")
+        if v is None:
+            self.q.put(("lamp", ("env", "off" if not st["venv_exists"] else "warn",
+                                 "未安装" if not st["venv_exists"] else "已安装（未验证）")))
+        elif v.get("ready"):
+            self.q.put(("lamp", ("env", "ok", f"就绪 · CUDA {'✓' if v.get('cuda') else '✗'}")))
+        else:
+            self.q.put(("lamp", ("env", "bad", "验证超时" if v.get("timeout") else ("未安装" if not v.get("exists") else "不完整"))))
         return st
 
     def _repoint_dataset(self) -> None:
@@ -444,14 +533,32 @@ class VLALeRobotTabUI:
             self._log(f"[WARN] [V4.4 DRIVE] 无法切换数据集位置到 {want}: {exc}")
 
     def on_drive_refresh(self) -> None:
-        threading.Thread(target=lambda: self._drive_refresh_job(probe=False), daemon=True).start()
+        self._log(f"[INFO] [V4.6 UI] 检测移动硬盘 {ST.DRIVE_LABEL} ...")
+        self.btn_drive.configure(state="disabled", text="检测中…")
+        self.lamp_drive.set("busy", "检测中")
+
+        def _job():
+            st = self._drive_refresh_job(probe=False)
+            if st:
+                self._log(ST.format_status(st).split("\n")[0])
+            self.q.put(("btn_drive", None))
+        threading.Thread(target=_job, daemon=True).start()
 
     def on_verify_env(self) -> None:
+        if str(self.btn_verify.cget("state")) == "disabled":
+            self._log("[INFO] [V4.6 UI] 正在验证中，请等待")
+            return
+        self.btn_verify.configure(state="disabled", text="验证中…")
+        self.lamp_env.set("busy", "验证中…")
+
         def _job():
-            self._log("[INFO] [V4.4 DRIVE] 正在验证移动硬盘上的 LeRobot 环境（第一次导入 torch 可能要 10–60 s）...")
+            t0 = time.time()
+            self._log(f"[INFO] [V4.4 DRIVE] 正在验证移动硬盘上的 LeRobot 环境（第一次从硬盘导入 torch 可能要 1–2 分钟，"
+                      f"最多等 {ST.VENV_PROBE_TIMEOUT_S:.0f} s）...")
             st = self._drive_refresh_job(probe=True)
             if st:
-                self._log(ST.format_status(st))
+                self._log(ST.format_status(st) + f"\n[INFO] [V4.6 UI] 验证用时 {time.time() - t0:.1f} s")
+            self.q.put(("btn_verify", None))
         threading.Thread(target=_job, daemon=True).start()
 
     def on_drive_mount(self) -> None:
@@ -712,37 +819,68 @@ class VLALeRobotTabUI:
             daemon=True,
         ).start()
 
+    def _start_run(self, kind: str, fn) -> None:
+        """V4.6: one run at a time; start / end always logged; lamp ③ shows running / result."""
+        if not self._run_busy.acquire(blocking=False):
+            self._log(f"[WARN] [V4.6 UI] 「{self._run_kind}」还在执行，这次点击「{kind}」被忽略（先等它结束或点 ④ 停止）")
+            return
+        self._run_kind = kind
+        self.lamp_3.set("busy", "执行中")
+        st = self.arbiter.status()
+        self._log(f"[INFO] [V4.6 UI] ③ 开始「{kind}」· 后端={self.executor.status().get('backend_kind')} · "
+                  f"控制权={st['mode']} · 允许控制={'是' if st['allow_control'] else '否'}")
+        if not st["allow_control"] and kind != "Sim-to-Real 6级验证":
+            self._log("[WARN] [V4.6 UI] 还没有勾选「② 允许机器人控制」：动作会被仲裁器拒绝")
+
+        def _job():
+            t0 = time.time()
+            res: Dict[str, Any] = {}
+            try:
+                res = fn() or {}
+            except Exception as exc:
+                res = {"ok": False, "reason": f"EXCEPTION: {exc}"}
+            finally:
+                self._run_busy.release()
+            status = res.get("status") or ("ok" if res.get("ok") else "failed")
+            if status in ("executed_unverified", "unverified"):
+                lamp, txt, tag = "warn", "已执行·未验证", "WARN"
+            elif res.get("ok"):
+                lamp, txt, tag = "ok", "完成", "OK"
+            else:
+                lamp, txt, tag = "bad", "被拒绝" if status == "refused" else "失败", "FAIL"
+            self.q.put(("lamp", ("3", lamp, txt)))
+            self._log(f"[{tag}] [V4.6 UI] ③「{kind}」结束：{status} · {res.get('reason') or ''} · {time.time() - t0:.1f} s")
+        threading.Thread(target=_job, daemon=True).start()
+
     def on_run_vla_loop(self) -> None:
         # V4.5 CRASH / FREEZE FIX: loading SmolVLA from the drive takes 10-60 s -> never on the Tk main thread
         ckpt = self.v_ckpt.get().strip()
         task = self.v_task.get().strip()
 
-        def _job():
-            try:
-                if not self.vla_policy.is_loaded:
-                    self.vla_policy.load(ckpt)
-                if not self.adapter.is_connected:
-                    self.adapter.connect()
-                self.vla_policy.run_vla_closed_loop(self.adapter, task, max_chunks=3)
-            except Exception as exc:
-                self._log(f"[FAIL] [V4.5 VLA] SmolVLA 闭环出错: {exc}")
-        threading.Thread(target=_job, daemon=True).start()
+        def _fn():
+            if not self.vla_policy.is_loaded:
+                self._log("[INFO] [V4.6 UI] 模型还没加载，先加载（相当于 ①）")
+                self.vla_policy.load(ckpt)
+            if not self.adapter.is_connected:
+                self.adapter.connect()
+            return self.vla_policy.run_vla_closed_loop(self.adapter, task, max_chunks=3)
+        self._start_run("SmolVLA 闭环", _fn)
 
     def on_run_agent_task(self) -> None:
         ckpt = self.v_ckpt.get().strip()   # V4.5: Tk variables read here, slow loading in the worker thread
         task = self.v_task.get().strip()
         pol = self.v_policy.get() or "smolvla"
 
-        def _job():
-            try:
-                if not self.vla_policy.is_loaded:
-                    self.vla_policy.load(ckpt)
-                if not self.adapter.is_connected:
-                    self.adapter.connect()
-                self.orchestrator.run_task(task, policy=pol, max_vla_chunks=3)
-            except Exception as exc:
-                self._log(f"[FAIL] [V4.5 AGENT] 顶层任务出错: {exc}")
-        threading.Thread(target=_job, daemon=True).start()
+        def _fn():
+            if pol == "smolvla" and not self.vla_policy.is_loaded:
+                self._log("[INFO] [V4.6 UI] 模型还没加载，先加载（相当于 ①）")
+                self.vla_policy.load(ckpt)
+            if not self.adapter.is_connected:
+                self.adapter.connect()
+            r = self.orchestrator.run_task(task, policy=pol, max_vla_chunks=3)
+            fr = ((r.get("failed_subtask") or {}).get("result") or {})
+            return dict(r, reason=r.get("reason") or fr.get("reason"))
+        self._start_run(f"顶层 Agent 任务（{pol}）", _fn)
 
     def on_toggle_record(self) -> None:
         ds_name = self.v_ds_name.get().strip() or "nero_v4_demo"
@@ -778,34 +916,45 @@ class VLALeRobotTabUI:
             self._log(f"[INFO] [V4.2 DATASET] 已删除 Episode #{idx}")
 
     def on_finetune(self) -> None:
-        threading.Thread(
-            target=lambda: self.vla_policy.finetune_on_dataset(self.dataset, epochs=20),
-            daemon=True,
-        ).start()
-
-    def on_sim2real_ladder(self) -> None:
-        threading.Thread(target=self.sim2real.run_all_stages, daemon=True).start()
-
-    def on_run_benchmark(self) -> None:
-        task = self.v_task.get().strip()   # V4.4: read Tk variables on the main thread
+        n = len(self.dataset.list_episodes(split="train", valid_only=True))
+        self._log(f"[INFO] [V4.6 UI] 快速微调（内置 NERO VLA，不是真 SmolVLA）：数据集 {self.dataset.dataset_name} · {n} 个 train Episode")
 
         def _job():
+            r = self.vla_policy.finetune_on_dataset(self.dataset, epochs=20)
+            if not r.get("ok"):
+                self._log(f"[FAIL] [V4.6 UI] 快速微调失败：{r.get('error')}")
+        threading.Thread(target=_job, daemon=True).start()
+
+    def on_sim2real_ladder(self) -> None:
+        self._start_run("Sim-to-Real 6级验证", lambda: self.sim2real.run_all_stages())
+
+    def on_run_benchmark(self) -> None:
+        task = self.v_task.get().strip()   # V4.5: read Tk variables on the main thread
+
+        def _fn():
             for m_key in ("mode_a", "mode_b", "mode_c"):
                 self.benchmark.run_single_trial(m_key, task, category="in_distribution", max_vla_chunks=2)
             self._log(self.benchmark.format_report_text())
-        threading.Thread(target=_job, daemon=True).start()
+            self._log("[INFO] [V4.6 UI] 注意：没有视觉 / 目标检查时，Benchmark 的结果都是「未验证」，成功率没有意义")
+            return {"ok": True, "status": "done"}
+        self._start_run("A/B/C Benchmark", _fn)
 
     def on_stop_queue(self) -> None:
+        self._log("[INFO] [V4.6 UI] ④ 停止：取消当前子任务并清空动作队列")
         self.router.request_cancel()
         self.executor.stop_and_flush("manual_ui_stop")
         self._log("[INFO] [V4.2 UI] 已停止当前子任务与动作队列")
 
     def on_estop(self) -> None:
+        self._log("[WARN] [V4.6 UI] 紧急急停！")
+        self.router.request_cancel()
+        self.executor.stop_and_flush("estop")
         self.arbiter.trigger_estop("UI 紧急急停按钮")
         self.v_mode.set("estop")
         self.v_allow.set(False)
 
     def on_clear_estop(self) -> None:
+        self._log("[INFO] [V4.6 UI] 解除急停（控制权回到只读，需要重新勾选 ②）")
         self.arbiter.clear_estop()
         self.v_mode.set(self.arbiter.mode)
         self.v_allow.set(False)
@@ -832,6 +981,18 @@ class VLALeRobotTabUI:
                 self.btn_dl_model.configure(text=str(val))
             elif kind == "btn_connect":
                 self.btn_connect.configure(text=str(val))
+            elif kind == "btn_connect_state":
+                self.btn_connect.configure(state=str(val))
+            elif kind == "btn_drive":
+                self.btn_drive.configure(state="normal", text="检测硬盘")
+            elif kind == "btn_verify":
+                self.btn_verify.configure(state="normal", text="验证环境")
+            elif kind == "lamp":
+                name, state, text = val
+                lamp = {"drive": self.lamp_drive, "env": self.lamp_env, "1": self.lamp_1, "3": self.lamp_3,
+                        "job": self.lamp_job, "model": self.lamp_model}.get(name)
+                if lamp is not None:
+                    lamp.set(state, text)
             elif kind == "drive":
                 self.v_drive.set(str(val))
             elif kind == "repoint_dataset":
@@ -865,17 +1026,43 @@ class VLALeRobotTabUI:
         ex = self.executor.status()
         n_eps = len(self.dataset.list_episodes())
         avg_inf = round(float(np.mean(self.vla_policy.inference_latencies_ms)), 2) if self.vla_policy.inference_latencies_ms else 0.0
+        bk = ex.get("backend_kind") or "mock"
+        bk_txt = {"real": "实机 NERO", "mock": "仿真替身（机械臂不动）", "mujoco_twin": "MuJoCo 替身",
+                  "mujoco_shared": "MuJoCo 仿真"}.get(bk, bk)
         self.v_banner.set(
-            f"控制仲裁器: 模式={arb['mode'].upper()} · 允许控制={'✓ YES' if arb['allow_control'] else '✗ NO (只读保护)'} · "
+            f"后端: {bk_txt} · 控制仲裁器: 模式={arb['mode'].upper()} · 允许控制={'✓ YES' if arb['allow_control'] else '✗ NO (只读保护)'} · "
             f"SmolVLA={self.vla_policy.backend_type} · 数据集={self.dataset.dataset_name} ({n_eps} eps) · "
             f"安全拦截={arb['trip_count']}"
         )
+        self._refresh_lamps(arb)
         self.v_obs_stat.set(
             f"观测帧 #{obs['seq']} ({obs['env_mode']}) | 双相机同步差: {obs['sync_skew_ms']:.1f} ms ({'✓ 同步' if obs['sync_ok'] else '⚠ 超差'}) | "
             f"7关节 (°): {q_deg} | 夹爪: norm={obs['gripper_state']:.2f} ({obs['gripper_gap_mm']:.1f} mm)\n"
             f"执行器: 已执行 {ex['chunks_executed']} Chunks ({ex['steps_executed']} 步) · VLA平均推理 {avg_inf:.2f} ms · "
             f"当前子任务: {obs['task_instruction'] or '(空)'}"
         )
+
+    def _refresh_lamps(self, arb: Dict[str, Any]) -> None:
+        """V4.6: lamps that follow live state (② control authority, ④ e-stop, model, background job)."""
+        self.lamp_2.set("ok" if arb["allow_control"] else "off", "允许" if arb["allow_control"] else "只读")
+        self.lamp_4.set("bad" if arb["mode"] == "estop" else "off", "急停中" if arb["mode"] == "estop" else "正常")
+        if not self._loading:
+            prof = self.vla_policy.model_profile()
+            if not prof["loaded"]:
+                self.lamp_model.set("off", "未加载")
+            elif prof["real_allowed"]:
+                self.lamp_model.set("ok", f"{prof['backend']} · NERO 可用")
+            else:
+                self.lamp_model.set("warn", f"{prof['backend']} · 未为 NERO 训练（禁止实机）")
+            if not prof["loaded"] and self.lamp_1.state == "ok":
+                self.lamp_1.set("off", "未加载")
+        if self.job.running():
+            self.lamp_job.set("busy", f"{self.job.kind} 运行中")
+        elif self.job.kind:
+            ok = self.job.meta.get("done_ok") or self.job.returncode() == 0
+            self.lamp_job.set("ok" if ok else "bad", f"{self.job.kind} {'完成' if ok else '失败/停止'}")
+        else:
+            self.lamp_job.set("off", "无")
 
     def shutdown(self) -> None:
         try:

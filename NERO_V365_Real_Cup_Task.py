@@ -435,7 +435,18 @@ class RealIO:
                 return False, q, why
             time.sleep(0.03)
 
-    def _execute(self, label, path, tcp_pts, vmax_lin, slow):
+    def _strict_check(self, q, goal):
+        """V4.6 STRICT ARRIVAL: position, orientation and every joint (for placement-critical moves)."""
+        T_goal = self.fast.fk(np.asarray(goal, float))
+        T_act = self.fast.fk(np.asarray(q, float))
+        err_mm = float(np.linalg.norm(T_act[:3, 3] - T_goal[:3, 3])) * 1000.0
+        Rd = T_goal[:3, :3].T @ T_act[:3, :3]
+        ang = math.degrees(math.acos(max(-1.0, min(1.0, (float(np.trace(Rd)) - 1.0) / 2.0))))
+        jerr = max(abs(math.degrees(a - b)) for a, b in zip(q, goal))
+        ok = err_mm <= STRICT_POS_MM and ang <= STRICT_ROT_DEG and jerr <= STRICT_JOINT_DEG
+        return ok, round(err_mm, 2), round(ang, 2), round(jerr, 2)
+
+    def _execute(self, label, path, tcp_pts, vmax_lin, slow, strict=False):
         """time + execute a joint path; V3.71: start only with a still arm, then wait until the arm is REALLY at the
         path end and still (timeout from the planned time); a slow arrival teaches the real joint speed cap"""
         if not self.motion_allowed:
@@ -471,10 +482,32 @@ class RealIO:
         err = float(np.linalg.norm(T_act[:3, 3] - T_goal[:3, 3]))
         jerr = max(abs(math.degrees(a - b)) for a, b in zip(q, path[-1]))
         ok = err * 1000.0 <= float(self.cfg["tcp_tol_mm"]) and arrived
+        strict_info = None
+        if ok and strict:
+            # V4.6: the TCP-only 6 mm check let a wrist joint 10 deg short pass (the held egg is several cm off the
+            # wrist axis); placement-critical moves need position, orientation and every joint. One corrective move.
+            s_ok, e_mm, e_deg, e_j = self._strict_check(q, path[-1])
+            strict_info = {"pos_mm": e_mm, "rot_deg": e_deg, "joint_deg": e_j, "corrected": False}
+            if not s_ok:
+                self.emit(f"[INFO] [V4.6 STRICT] {label}：到位误差 {e_mm:.1f} mm / {e_deg:.2f}° / 关节 {e_j:.2f}° "
+                          f"（要求 ≤ {STRICT_POS_MM} mm / {STRICT_ROT_DEG}° / {STRICT_JOINT_DEG}°）→ 小幅修正一次")
+                rc = self._joint_line(f"{label} (V4.6 strict correction)", np.asarray(q, float), np.asarray(path[-1], float), slow)
+                q2 = self.arm.q() or q
+                s_ok, e_mm, e_deg, e_j = self._strict_check(q2, path[-1])
+                strict_info = {"pos_mm": e_mm, "rot_deg": e_deg, "joint_deg": e_j, "corrected": True,
+                               "correction_ok": bool(rc.get("ok"))}
+                q = q2
+            if not s_ok:
+                ok = False
+                why = f"V4.6 STRICT: {e_mm:.1f} mm / {e_deg:.2f}° / joint {e_j:.2f}° after one correction"
+            err = strict_info["pos_mm"] / 1000.0
+            jerr = strict_info["joint_deg"]
         return {"ok": ok, "label": label, "tcp_error_mm": round(err * 1000, 1), "joint_error_deg": round(jerr, 2),
+                "strict": strict_info,
                 "kind": r.get("kind", "path"), "arrived_s": round(t_arr, 2), "planned_s": round(times[-1], 2),
                 "error": None if ok else (f"ARM_NOT_AT_GOAL: {why} {t_arr:.1f} s after the start (planned "
-                                          f"{times[-1]:.1f} s) - the arm did not reach the goal")}
+                                          f"{times[-1]:.1f} s) - the arm did not reach the goal"
+                                          if not (strict and strict_info) else f"ARM_NOT_PRECISE: {why}")}
 
     def _learn_speed(self, label, planned_s, t_arr, v_used, arrived):
         """V3.71 SPEED CAP: the arm needed much longer than planned -> its real joint speed is lower than the speed
@@ -536,7 +569,7 @@ class RealIO:
             ps.append(p)
         return qs, ps, ""
 
-    def move_line(self, label, xyz, quat, speed=0.05, slow=None):
+    def move_line(self, label, xyz, quat, speed=0.05, slow=None, strict=False):
         try:
             qs, ps, why = self.cartesian_path(xyz, quat)
         except Exception as exc:
@@ -547,7 +580,7 @@ class RealIO:
         if not chk["ok"]:
             return dict(self._refuse(label, chk["why"]), path_check=chk)
         vlin = min(float(speed), float(self.cfg["line_vmax_mm_s"]) / 1000.0)
-        r = self._execute(label, qs, ps, vlin, slow)
+        r = self._execute(label, qs, ps, vlin, slow, strict=strict)
         r["path_check"] = chk
         r["kind"] = "line"
         return r
@@ -1013,6 +1046,16 @@ PLAN_MARGIN_HEADROOM_DEG = 1.0    # planned straight lines keep 1 deg more joint
 EGG_SLOW_SPEED = 0.010
 EGG_WRIST_LOOK_ABOVE_M = 0.120    # pre-orient wrist look: grasp origin this high above the slot, gripper pointing down
 EGG_WRIST_MAX_SHIFT_M = 0.015
+# ---- V4.6 EGG PLACE ACCURACY II (camera agreement, off-centre grasp, strict arrival, pre-pick slot look)
+MARKER_V46 = "V4.6 EGG CAMERA AGREEMENT + STRICT ARRIVAL"
+STRICT_POS_MM, STRICT_ROT_DEG, STRICT_JOINT_DEG = 2.0, 1.0, 0.5
+EGG_WRIST_SMALL_MM = 6.0          # wrist vs main camera <= this: shift the grasp directly (V4.3 behaviour)
+EGG_WRIST_CONFIRM_MM = 25.0       # 6..25 mm: look again from the corrected position; accept when both agree
+EGG_WRIST_AGREE_MM = 4.0
+EGG_OFFCENTRE_TOL_MM = 8.0        # clamped tip gap < egg width - this -> gripped off the equator (V4.5 run: 24 mm)
+SLOT_WRIST_MAX_MM = 30.0
+SLOT_LOOK_POSES = ((0.0, 0.0, 0.14), (0.0, 0.0, 0.18), (0.025, 0.0, 0.16), (-0.025, 0.0, 0.16),
+                   (0.0, 0.025, 0.16), (0.0, -0.025, 0.16))
 EGG_PITCH_ORDER = (-90.0, 90.0, -85.0, 85.0, -80.0, 80.0, -75.0, 75.0, -70.0, 70.0, -65.0)
 
 
@@ -1113,6 +1156,9 @@ class RealEggSkills:
         self.cam = {}
         self.last_obs = None
         self._fast = CK.FastArm()
+        self._slot_looked = False          # V4.6: pre-pick wrist slot look done for this scene
+        self._slot_wrist_shift = None
+        self._egg_wrist_shift = None
 
     def _Abort(self, reason, info=None):
         err = self.CK.CupSkills._Abort(reason, info or {})
@@ -1292,6 +1338,7 @@ class RealEggSkills:
     def observe_scene(self, **_):
         res = self.io.perceive_eggs("observe_scene")
         self.last_obs = res
+        self._slot_looked, self._slot_wrist_shift, self._egg_wrist_shift = False, None, None   # V4.6: new scene
         self.cam = {}
         eggs_out = []
         for i, e in enumerate(res.get("eggs") or []):
@@ -1628,43 +1675,260 @@ class RealEggSkills:
                               self.CK.R_to_quat_xyzw(W["above_target"][1]), 0.03)
         return chk
 
-    def pick_egg(self, source_egg="egg_1", **_):
-        if not self.plan or self.plan.get("source_egg") != source_egg:
-            r = self.plan_egg_place(source_egg=source_egg)
+    # ------------------------------------------------------------------ V4.6 camera agreement helpers
+    def _wrist_frame(self):
+        ws_fn = getattr(self.io, "wrist_snapshot", None)
+        ws = ws_fn() if ws_fn is not None else None
+        if not ws or ws.get("rgb") is None or not ws.get("K") or not ws.get("calib_eih"):
+            return None
+        return ws
+
+    def _T_flange_now(self):
+        T_tcp = self._fast.fk(np.asarray(self.io.current_q(), float))
+        return T_tcp @ np.linalg.inv(self.CK.T_L7_TCP)
+
+    def _ik_reachable(self, p, R, zt):
+        q_now = self.io.current_q()
+        for sd in (q_now, (self.plan or {}).get("_q", {}).get("pregrasp"), (self.plan or {}).get("_q", {}).get("lift")):
+            if sd is None:
+                continue
+            r_ik = self._fast.ik([list(sd)], p, R, iters=40)
+            if r_ik and r_ik[0] is not None:
+                cand = list(r_ik[0])
+                if self.CK.check_joint_path([q_now, cand], jump_deg=1e9).get("ok") and self._check_path_fence([q_now, cand], zt):
+                    return cand
+        return None
+
+    def _carton_pitch_m(self):
+        c = (self.last_obs or {}).get("carton") or {}
+        pm = c.get("pitch_mm")
+        try:
+            if pm and len(pm) >= 2:
+                return float(sum(pm[:2])) / 2000.0
+        except Exception:
+            pass
+        return 0.047
+
+    def _wrist_look_slot_prepick(self, target_slot):
+        """V4.6 PRE-PICK WRIST SLOT LOOK: gripper still EMPTY and pointing down (the held egg can no longer hide the
+        slot or be mistaken for it, the V4.5 flaw). Up to 6 look poses above the slot; the cavity detector needs two
+        reads that agree within 4 mm; then the slot moves by the measured shift (<= 30 mm) and the whole place is
+        re-planned before the egg is picked.  -> dict or None"""
+        ws = self._wrist_frame()
+        if ws is None:
+            self.io.emit("[INFO] [V4.6 WRIST SLOT] 腕部相机未就绪（未连接或未做手眼标定）→ 槽位沿用主相机")
+            return None
+        slot = self.cam.get(target_slot) or {}
+        if slot.get("rim") is None or self.plan is None or self.plan.get("R_grasp") is None:
+            return None
+        import NERO_V386_Real_Wrist_Camera as RWC
+        rim = np.asarray(slot["rim"], float)
+        zt = float(self.plan.get("table_z_m", 0.0))
+        R_gr = np.asarray(self.plan["R_grasp"], float)
+        pitch = self._carton_pitch_m()
+        reads, tried, notes = [], 0, []
+        for dx, dy, h in SLOT_LOOK_POSES:
+            p_a = np.array([rim[0] + dx, rim[1] + dy, rim[2] + h])
+            p_look, R_look = self.prof.tcp_from_grasp(p_a, R_gr)
+            q_look = self._ik_reachable(p_look, R_look, zt)
+            if q_look is None:
+                notes.append(f"({dx * 1000:+.0f},{dy * 1000:+.0f},{h * 1000:.0f}) 不可达")
+                continue
+            r = self.io.move_joints(f"V4.6 wrist look {target_slot}", q_look)
             if not r.get("ok"):
-                return r
-        W, Q = self.plan["_wps"], self.plan["_q"]
-        self.io.gripper_open(EGG_OPEN_MM)
-        r = self.io.move_joints(f"V4.3 pregrasp {source_egg}", Q["pregrasp"])
-        if not r.get("ok"):
-            return self._res("pick_egg", False, r, reason="MOTION_FAILED", nxt=["return_to_safe_pose"])
-        wchk = self._wrist_recheck_egg_grasp(source_egg, W, Q)
-        self.io.emit(
-            f"[INFO] [V4.5 EGG PICK] 垂直下探至鸡蛋赤道：胶垫中心离桌 {self.plan.get('grasp_pad_z_mm', 21.0):.1f} mm，"
-            f"最低指尖离桌 {self.plan.get('lowest_tip_z_mm', 9.5):.1f} mm（桌面取 {self.plan.get('table_z_source', '?')}），"
-            f"最后 {EGG_SLOW_LAST_M * 1000:.0f} mm 慢速"
-        )
-        # V4.5 TWO-STAGE DESCENT: normal speed to 15 mm above the grasp height, then slowly
+                notes.append(f"移动失败 {r.get('error')}")
+                continue
+            tried += 1
+            self.io.sleep(0.3)
+            fr = self._wrist_frame()
+            if fr is None:
+                break
+            try:
+                chk = RWC.wrist_find_slot_cavity(fr["rgb"], fr["K"], self._T_flange_now(), fr["calib_eih"], rim,
+                                                 slot_pitch_m=pitch, undistort_intr=fr.get("intr"),
+                                                 max_shift_m=SLOT_WRIST_MAX_MM / 1000.0)
+            except Exception as exc:
+                notes.append(f"识别出错 {exc}")
+                continue
+            if not chk.get("ok") or not chk.get("trusted"):
+                notes.append(chk.get("reason") or "不可信")
+                continue
+            reads.append(np.asarray(chk["measured_xyz"][:2], float))
+            self.io.emit(f"[INFO] [V4.6 WRIST SLOT] 第 {len(reads)} 次读数：{target_slot} 偏 ({chk['delta_mm'][0]:+.1f}, "
+                         f"{chk['delta_mm'][1]:+.1f}) mm · 半径 {chk.get('radius_mm')} mm · 相邻槽 {chk.get('n_neighbours')} 个")
+            if len(reads) >= 2 and float(np.linalg.norm(reads[-1] - reads[-2])) * 1000.0 <= EGG_WRIST_AGREE_MM:
+                break
+        out = {"tried": tried, "reads": len(reads), "notes": notes[-4:]}
+        if len(reads) < 2 or float(np.linalg.norm(reads[-1] - reads[-2])) * 1000.0 > EGG_WRIST_AGREE_MM:
+            self.io.emit(f"[WARN] [V4.6 WRIST SLOT] 腕部相机没有得到两次一致的槽位读数（{len(reads)} 次可信 / 看了 {tried} 个位置；"
+                         f"{'；'.join(notes[-3:]) or '-'}）→ 槽位沿用主相机")
+            out["accepted"] = False
+            return out
+        meas = 0.5 * (reads[-1] + reads[-2])
+        shift = meas - rim[:2]
+        out.update(accepted=True, shift_mm=[round(float(shift[0]) * 1000.0, 1), round(float(shift[1]) * 1000.0, 1)])
+        self.cam[target_slot]["rim"] = np.array([meas[0], meas[1], rim[2]])
+        self.cam[target_slot]["source"] = "wrist"
+        self._slot_wrist_shift = shift
+        self.io.emit(f"[OK] [V4.6 CAMERA AGREEMENT] 槽位 {target_slot}：主相机 vs 腕部相机 = ({shift[0] * 1000:+.1f}, "
+                     f"{shift[1] * 1000:+.1f}) mm → 采用腕部相机位置")
+        return out
+
+    def _egg_wrist_align(self, source_egg):
+        """V4.6 EGG CAMERA AGREEMENT at the pregrasp pose (gripper open, above the egg):
+        <= 6 mm  -> shift the grasp (V4.3 behaviour);
+        6-25 mm  -> move over the wrist estimate and look again; both reads agree <= 4 mm -> re-plan with the wrist
+                    position (the V4.5 run: wrist saw 18 mm, was ignored, the egg was gripped at its end);
+        else     -> stop (do not grasp blindly).  -> (ok, info)"""
+        ws = self._wrist_frame()
+        if ws is None:
+            return True, {"wrist": "not_ready"}
+        import NERO_V386_Real_Wrist_Camera as RWC
+        egg = self.cam.get(source_egg) or {}
+        exp_xyz = np.asarray(egg.get("rim"), float)
+        chk = RWC.wrist_check_egg_or_slot(ws["rgb"], ws["K"], self._T_flange_now(), ws["calib_eih"], exp_xyz, kind="egg",
+                                          undistort_intr=ws.get("intr"))
+        if not chk.get("ok"):
+            self.io.emit(f"[INFO] [V4.6 WRIST EGG] 腕部相机没有锁定鸡蛋（{chk.get('reason')}）→ 沿用主相机")
+            return True, {"wrist": "no_lock", "detail": chk.get("reason")}
+        d = np.asarray(chk["delta_xy_m"], float)
+        dmm = float(chk["shift_norm_mm"])
+        self.io.emit(f"[INFO] [V4.6 CAMERA AGREEMENT] 鸡蛋 {source_egg}：主相机 vs 腕部相机 = ({d[0] * 1000:+.1f}, {d[1] * 1000:+.1f}) mm "
+                     f"（{dmm:.1f} mm）")
+        info = {"wrist_vs_main_mm": [round(d[0] * 1000.0, 1), round(d[1] * 1000.0, 1)], "norm_mm": round(dmm, 1)}
+        if dmm < 1.5:
+            return True, dict(info, action="none")
+        W = self.plan["_wps"]
+        if dmm <= EGG_WRIST_SMALL_MM:
+            dd = np.array([d[0], d[1], 0.0])
+            for k in ("pregrasp", "grasp", "lift"):
+                p, R = W[k]
+                W[k] = (p + dd, R)
+            self.io.move_line(f"V4.6 wrist adjust {source_egg}", W["pregrasp"][0], self.CK.R_to_quat_xyzw(W["pregrasp"][1]), 0.03)
+            self._egg_wrist_shift = d
+            return True, dict(info, action="shift")
+        if dmm > EGG_WRIST_CONFIRM_MM or not chk.get("trusted"):
+            self.io.emit(f"[FAIL] [V4.6 CAMERA AGREEMENT] 两个相机对鸡蛋位置相差 {dmm:.0f} mm（> {EGG_WRIST_CONFIRM_MM:.0f} mm）"
+                         "→ 不盲目去夹。请检查主相机手眼标定 / 腕部相机标定，或重新识别")
+            return False, dict(info, action="stop")
+        # 6..25 mm: look again from above the wrist estimate
+        p_pre, R_pre = W["pregrasp"]
+        p2 = np.asarray(p_pre, float) + np.array([d[0], d[1], 0.0])
+        r = self.io.move_line(f"V4.6 second look {source_egg}", p2, self.CK.R_to_quat_xyzw(R_pre), 0.03)
+        ws2 = self._wrist_frame() if r.get("ok") else None
+        chk2 = None
+        if ws2 is not None:
+            exp2 = exp_xyz + np.array([d[0], d[1], 0.0])
+            chk2 = RWC.wrist_check_egg_or_slot(ws2["rgb"], ws2["K"], self._T_flange_now(), ws2["calib_eih"], exp2,
+                                               kind="egg", undistort_intr=ws2.get("intr"))
+        if not chk2 or not chk2.get("ok") or float(chk2["shift_norm_mm"]) > EGG_WRIST_AGREE_MM:
+            self.io.emit(f"[FAIL] [V4.6 CAMERA AGREEMENT] 第二次腕部读数和第一次不一致（"
+                         f"{(chk2 or {}).get('shift_norm_mm', '无')} mm）→ 不夹，停止")
+            return False, dict(info, action="stop", second=(chk2 or {}).get("shift_norm_mm"))
+        d2 = np.asarray(chk2["delta_xy_m"], float)
+        total = d + d2
+        self.io.emit(f"[OK] [V4.6 CAMERA AGREEMENT] 两次腕部读数一致（第二次只差 {chk2['shift_norm_mm']:.1f} mm）→ 鸡蛋位置改用腕部相机："
+                     f"({total[0] * 1000:+.1f}, {total[1] * 1000:+.1f}) mm")
+        self.cam[source_egg]["rim"] = exp_xyz + np.array([total[0], total[1], 0.0])
+        self._egg_wrist_shift = total
+        return True, dict(info, action="replan", total_mm=[round(total[0] * 1000.0, 1), round(total[1] * 1000.0, 1)])
+
+    def _descend_and_clamp(self, source_egg):
+        W = self.plan["_wps"]
         p_mid = np.asarray(W["grasp"][0], float) + np.array([0.0, 0.0, EGG_SLOW_LAST_M])
         r = self.io.move_line(f"V4.5 descend {source_egg} (to +{EGG_SLOW_LAST_M * 1000:.0f} mm)", p_mid,
                               self.CK.R_to_quat_xyzw(W["grasp"][1]), 0.025)
         if r.get("ok"):
             r = self.io.move_line(f"V4.5 descend {source_egg} (slow last {EGG_SLOW_LAST_M * 1000:.0f} mm)", W["grasp"][0],
-                                  self.CK.R_to_quat_xyzw(W["grasp"][1]), EGG_SLOW_SPEED)
+                                  self.CK.R_to_quat_xyzw(W["grasp"][1]), EGG_SLOW_SPEED, strict=True)
         if not r.get("ok"):
-            return self._res("pick_egg", False, r, reason="DESCENT_FAILED", nxt=["return_to_safe_pose"])
+            return r, None, None
         clamp = self.io.gripper_clamp(EGG_CLAMP_N)
         self.io.sleep(0.35)
-        st_at_clamp = self.io.gripper_state()
-        held_clamp, gap_clamp, why_clamp = self._is_egg_held(clamp, st_at_clamp)
-        if not held_clamp:
-            self.io.emit(f"[FAIL] [V4.3 EGG PICK] 下探合拢后未抓到鸡蛋：{why_clamp} → 立即张开夹爪并退回安全高度，中止后续平移与插槽")
-            self.io.gripper_open(EGG_OPEN_MM)
-            self.io.move_line(f"V4.3 abort retreat {source_egg}", W["pregrasp"][0],
-                              self.CK.R_to_quat_xyzw(W["pregrasp"][1]), 0.035)
-            self.held = None
-            return self._res("pick_egg", False, {"gripper": st_at_clamp, "clamp": clamp, "gap_mm": gap_clamp, "detail": why_clamp},
-                             reason="EGG_NOT_HELD", nxt=["observe_scene"])
+        return r, clamp, self.io.gripper_state()
+
+    def pick_egg(self, source_egg="egg_1", **_):
+        if not self.plan or self.plan.get("source_egg") != source_egg:
+            r = self.plan_egg_place(source_egg=source_egg)
+            if not r.get("ok"):
+                return r
+        target_slot = self.plan["target_slot"]
+        agree = {}
+        # V4.6 (1) pre-pick wrist look at the slot with an EMPTY gripper
+        if not getattr(self, "_slot_looked", False):
+            self._slot_looked = True
+            self._slot_wrist_shift = None
+            sl = self._wrist_look_slot_prepick(target_slot)
+            agree["slot"] = sl
+            if sl and sl.get("accepted"):
+                r = self.plan_egg_place(source_egg=source_egg, target_slot=target_slot)
+                if not r.get("ok"):
+                    return self._res("pick_egg", False, r.get("physical_verification"), reason="REPLAN_AFTER_SLOT_LOOK_FAILED",
+                                     nxt=["observe_scene"])
+        W, Q = self.plan["_wps"], self.plan["_q"]
+        self.io.gripper_open(EGG_OPEN_MM)
+        r = self.io.move_joints(f"V4.3 pregrasp {source_egg}", Q["pregrasp"])
+        if not r.get("ok"):
+            return self._res("pick_egg", False, r, reason="MOTION_FAILED", nxt=["return_to_safe_pose"])
+        width_mm = float((self.cam.get(source_egg) or {}).get("width_m", 0.042)) * 1000.0
+        clamp = st_at_clamp = None
+        gap_clamp = None
+        for attempt in (1, 2):
+            # V4.6 (2) main vs wrist camera at the egg
+            ok_al, al = self._egg_wrist_align(source_egg)
+            agree[f"egg_{attempt}"] = al
+            if not ok_al:
+                return self._res("pick_egg", False, {"camera_agreement": agree}, reason="CAMERAS_DISAGREE",
+                                 nxt=["observe_scene"])
+            if al.get("action") == "replan":
+                if self._slot_wrist_shift is None and self._egg_wrist_shift is not None:
+                    # the slot was not measured by the wrist camera: the same calibration error lies over the carton
+                    sh = self._egg_wrist_shift
+                    sr = np.asarray(self.cam[target_slot]["rim"], float)
+                    self.cam[target_slot]["rim"] = sr + np.array([sh[0], sh[1], 0.0])
+                    self.io.emit(f"[INFO] [V4.6 CAMERA AGREEMENT] 槽位没有被腕部相机测到 → 把鸡蛋处测到的偏差 "
+                                 f"({sh[0] * 1000:+.1f}, {sh[1] * 1000:+.1f}) mm 作为局部修正，同样用在 {target_slot}")
+                rp = self.plan_egg_place(source_egg=source_egg, target_slot=target_slot)
+                if not rp.get("ok"):
+                    return self._res("pick_egg", False, rp.get("physical_verification"), reason="REPLAN_AFTER_EGG_LOOK_FAILED",
+                                     nxt=["observe_scene"])
+                W, Q = self.plan["_wps"], self.plan["_q"]
+                r = self.io.move_joints(f"V4.6 pregrasp (wrist position) {source_egg}", Q["pregrasp"])
+                if not r.get("ok"):
+                    return self._res("pick_egg", False, r, reason="MOTION_FAILED", nxt=["return_to_safe_pose"])
+            self.io.emit(
+                f"[INFO] [V4.5 EGG PICK] 垂直下探至鸡蛋赤道：胶垫中心离桌 {self.plan.get('grasp_pad_z_mm', 21.0):.1f} mm，"
+                f"最低指尖离桌 {self.plan.get('lowest_tip_z_mm', 9.5):.1f} mm（桌面取 {self.plan.get('table_z_source', '?')}），"
+                f"最后 {EGG_SLOW_LAST_M * 1000:.0f} mm 慢速、到位误差 ≤ {STRICT_POS_MM} mm / {STRICT_ROT_DEG}°")
+            r, clamp, st_at_clamp = self._descend_and_clamp(source_egg)
+            if not r.get("ok"):
+                self.io.move_line(f"V4.6 abort retreat {source_egg}", W["pregrasp"][0], self.CK.R_to_quat_xyzw(W["pregrasp"][1]), 0.035)
+                return self._res("pick_egg", False, r, reason="DESCENT_FAILED", nxt=["return_to_safe_pose"])
+            held_clamp, gap_clamp, why_clamp = self._is_egg_held(clamp, st_at_clamp)
+            if not held_clamp:
+                self.io.emit(f"[FAIL] [V4.3 EGG PICK] 下探合拢后未抓到鸡蛋：{why_clamp} → 立即张开夹爪并退回安全高度，中止后续平移与插槽")
+                self.io.gripper_open(EGG_OPEN_MM)
+                self.io.move_line(f"V4.3 abort retreat {source_egg}", W["pregrasp"][0],
+                                  self.CK.R_to_quat_xyzw(W["pregrasp"][1]), 0.035)
+                self.held = None
+                return self._res("pick_egg", False, {"gripper": st_at_clamp, "clamp": clamp, "gap_mm": gap_clamp,
+                                                     "detail": why_clamp, "camera_agreement": agree},
+                                 reason="EGG_NOT_HELD", nxt=["observe_scene"])
+            # V4.6 (3) off-centre grasp: a 42 mm egg clamped at its equator leaves ~ its width between the tips
+            if gap_clamp is not None and float(gap_clamp) < width_mm - EGG_OFFCENTRE_TOL_MM:
+                self.io.emit(f"[WARN] [V4.6 EGG PICK] 夹偏了：指尖距离 {float(gap_clamp):.1f} mm < 蛋宽 {width_mm:.0f} − "
+                             f"{EGG_OFFCENTRE_TOL_MM:.0f} mm（夹在鸡蛋一头）→ 松开、抬起、重新看"
+                             + ("、再夹一次" if attempt == 1 else "；已经重试过一次，停止"))
+                self.io.gripper_open(EGG_OPEN_MM)
+                self.io.sleep(0.3)
+                self.io.move_line(f"V4.6 regrasp retreat {source_egg}", W["pregrasp"][0],
+                                  self.CK.R_to_quat_xyzw(W["pregrasp"][1]), 0.035)
+                if attempt == 2:
+                    return self._res("pick_egg", False, {"gap_mm": gap_clamp, "egg_width_mm": round(width_mm, 1),
+                                                         "camera_agreement": agree},
+                                     reason="EGG_GRASP_OFF_CENTRE", nxt=["observe_scene"])
+                continue
+            break
 
         r = self.io.move_line(f"V4.3 lift {source_egg}", W["lift"][0],
                               self.CK.R_to_quat_xyzw(W["lift"][1]), 0.035)
@@ -1681,7 +1945,8 @@ class RealEggSkills:
         self.held = source_egg
         self.stage = "HOLDING"
         return self._res("pick_egg", True,
-                         {"source_egg": source_egg, "gap_mm": gap_lift, "gripper": st, "wrist_check": wchk},
+                         {"source_egg": source_egg, "gap_mm": gap_lift, "egg_width_mm": round(width_mm, 1),
+                          "gripper": st, "camera_agreement": agree},
                          nxt=["orient_for_slot", "place_egg_into_slot"])
 
     def _wrist_look_slot(self, target_slot):
@@ -1789,7 +2054,7 @@ class RealEggSkills:
                              reason="EGG_NOT_HELD", nxt=["observe_scene"])
 
         target_slot = target_slot or self.plan["target_slot"]
-        wlook = self._wrist_look_slot(target_slot)          # V4.5: may re-plan the insertion with a corrected slot
+        wlook = None   # V4.6: the V4.5 look here saw the HELD egg; the slot is now measured before the pick
         Q = self.plan["_q"]
         pitch_deg = float(self.plan.get("place_pitch_deg", 90.0))
         vert_err = float(self.plan.get("egg_long_axis_vertical_err_deg", 0.0))
@@ -1838,9 +2103,16 @@ class RealEggSkills:
             return self._res("place_egg_into_slot", False, {"gap_mm": gap_pre_ins, "detail": why_pre_ins},
                              reason="EGG_LOST_BEFORE_INSERTION", nxt=["observe_scene"])
         r = self.io.move_line(f"V4.3 vertical insert into {target_slot}", W["release"][0],
-                              self.CK.R_to_quat_xyzw(W["release"][1]), 0.02)
+                              self.CK.R_to_quat_xyzw(W["release"][1]), 0.02, strict=True)
         if not r.get("ok"):
-            return self._res("place_egg_into_slot", False, r, reason="LOWER_FAILED", nxt=["return_to_safe_pose"])
+            # V4.6: never let go of the egg somewhere that is not the planned release pose
+            self.io.emit(f"[FAIL] [V4.6 EGG PLACE] 下插没有精确到位（{r.get('error')}）→ 不松开鸡蛋，退回槽位上方")
+            self.io.move_line(f"V4.6 retreat with egg {target_slot}", W["above_target"][0],
+                              self.CK.R_to_quat_xyzw(W["above_target"][1]), 0.03)
+            return self._res("place_egg_into_slot", False, r,
+                             reason="INSERT_NOT_PRECISE" if "PRECISE" in str(r.get("error")) else "LOWER_FAILED",
+                             nxt=["return_to_safe_pose"])
+        rel = self._release_tip_error(target_slot)       # V4.6: where the egg tip really is (measured joints)
         self.io.gripper_open(EGG_OPEN_MM)
         self.io.sleep(0.25)
         r = self.io.move_line(f"V4.3 retreat from {target_slot}", W["above_target"][0],
@@ -1848,11 +2120,35 @@ class RealEggSkills:
         self.held = None
         self.stage = "PLACED"
         return self._res("place_egg_into_slot", bool(r.get("ok", True)),
-                         {"target_slot": target_slot,
+                         {"target_slot": target_slot, "release_check": rel,
                           "place_pitch_deg": self.plan.get("place_pitch_deg"),
                           "egg_long_axis_vertical_err_deg": self.plan.get("egg_long_axis_vertical_err_deg"),
                           "wrist_check": wchk},
                          nxt=["verify_egg_in_slot"])
+
+    def _release_tip_error(self, target_slot):
+        """V4.6: from the MEASURED joints just before opening: where the held egg's lower tip is (model) vs the slot
+        target -> tells afterwards whether a miss came from the motion (this is large) or from the cameras / the
+        calibration (this is small but the egg still missed)."""
+        try:
+            q = np.asarray(self.io.current_q(), float)
+            T_tcp = self._fast.fk(q)
+            T_g = T_tcp @ np.linalg.inv(self.prof.T_grasp_tcp)
+            R, p_a = T_g[:3, :3], T_g[:3, 3]
+            e_G = np.asarray(self.plan.get("egg_in_G_m") or [0.0, EGG_HELD_CENTER_Y_M, 0.0], float)
+            centre = p_a + R @ e_G
+            ax = R[:, 0]
+            down = ax if ax[2] <= 0.0 else -ax
+            tip = centre + float(self.plan.get("egg_half_len_m", 0.0275)) * down
+            tgt = np.asarray(self.plan.get("slot_tip_target") or tip, float)
+            dxy = (tip[:2] - tgt[:2]) * 1000.0
+            dz = (tip[2] - tgt[2]) * 1000.0
+            self.io.emit(f"[INFO] [V4.6 RELEASE CHECK] 松开前（实测关节）鸡蛋下端 vs 目标：水平 ({dxy[0]:+.1f}, {dxy[1]:+.1f}) mm、"
+                         f"高度 {dz:+.1f} mm · 槽位来源 {(self.cam.get(target_slot) or {}).get('source', 'main')}")
+            return {"tip_xy_err_mm": [round(float(dxy[0]), 1), round(float(dxy[1]), 1)], "tip_z_err_mm": round(float(dz), 1),
+                    "slot_source": (self.cam.get(target_slot) or {}).get("source", "main")}
+        except Exception as exc:
+            return {"error": str(exc)}
 
     def verify_egg_in_slot(self, target_slot=None, **_):
         target_slot = target_slot or (self.plan or {}).get("target_slot") or "slot_1"

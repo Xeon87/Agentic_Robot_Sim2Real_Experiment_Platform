@@ -25,7 +25,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
-VERSION = "V4.5"
+VERSION = "V4.6"
 MARKER = "V4.2 INDEPENDENT TASK OUTCOME EVALUATOR"
 HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
@@ -100,7 +100,8 @@ class TaskEvaluator:
             )
         if not exec_result.get("ok"):
             return self._report(
-                task_id, instruction, False, "failed", exec_result.get("reason") or "EXECUTION_ERROR",
+                task_id, instruction, False, "refused" if exec_result.get("status") == "refused" else "failed",
+                exec_result.get("reason") or "EXECUTION_ERROR",
                 elapsed_s=elapsed_s, eval_source="execution_monitor",
                 details={"exec_error": exec_result.get("reason") or exec_result.get("error")},
             )
@@ -141,9 +142,12 @@ class TaskEvaluator:
                 details={"max_joint_err_deg": round(math.degrees(q_err), 2), "gripper_err": round(g_err, 3)},
             )
 
+        # V4.6 HONEST RESULT: no simulator truth, no vision check and no goal state -> nothing tells whether the task
+        # happened. "Executed without errors" is NOT success (V4.5 reported SUBTASK_COMPLETED here).
         return self._report(
-            task_id, instruction, True, "succeeded", "SUBTASK_COMPLETED",
+            task_id, instruction, False, "unverified", "EXECUTED_NOT_VERIFIED",
             elapsed_s=elapsed_s, eval_source="execution_monitor",
+            details={"note": "已执行，但没有视觉 / 仿真真值 / 目标状态检查，无法确认任务是否完成（请人工确认）"},
         )
 
     def _report(
@@ -167,7 +171,9 @@ class TaskEvaluator:
             "eval_source": eval_source,
             "details": details or {},
             "recommended_agent_action": "next_subtask" if ok else (
-                "stop_and_report" if status in ("aborted", "timeout") or "SAFETY" in reason else "replan_or_retry"
+                "stop_and_report" if status in ("aborted", "timeout", "unverified", "refused") or "SAFETY" in reason
+                or "MODEL_NOT_TRAINED" in reason or "AUTHORITY" in reason or "CONTROL_ARBITER" in reason
+                else "replan_or_retry"
             ),
         }
         self.log(

@@ -1,3 +1,16 @@
+## V4.6 (2026-11-08) — SmolVLA 实机安全门 + 如实报告 + 状态灯 / 日志；鸡蛋放槽：相机一致性、夹偏重夹、严格到位、夹蛋前看槽
+- `NERO_V4_SmolVLA_Policy.py`：`model_profile()`（状态/动作维度、训练数据集、是否为 NERO 训练、是否允许实机）；`run_vla_closed_loop` 在实机后端拒绝非 NERO 模型（`MODEL_NOT_TRAINED_FOR_NERO`），开始 / 每块 / 结束 / 每种失败都写日志，结果 `executed_unverified`。
+- `NERO_V44_SmolVLA_Worker.py`：返回按归一化统计得到的动作维度、`train_config.json` 里的数据集名和训练步数；`NERO_V44_FAKE_DIMS` 供测试。
+- `NERO_V4_Task_Evaluator.py`：没有仿真真值 / 视觉 / 目标状态时返回 `unverified`（`EXECUTED_NOT_VERIFIED`），不再是 `SUBTASK_COMPLETED`；unverified / 模型被拒 / 控制权被拒 → 不重试。`NERO_V4_Agent_Orchestrator.py`：顶层任务 `unverified` 时如实报告。
+- `NERO_V4_Console_Tab.py`：`StatusLamp`（Canvas 圆点，不依赖字体）；硬盘 / 环境 / 模型 / 后台任务 / ① / ② / ③ / ④ 灯；`_start_run`（一次只跑一个、开始和结束都有日志）；按钮忙碌状态；横幅显示后端；急停按钮单独固定在控制栏右侧，控制栏分两行。
+- `NERO_V44_Storage.py`：卷标不区分大小写；环境验证超时 180 s，超时提示可读。
+- `NERO_V365_Real_Cup_Task.py`（`V4.6 EGG CAMERA AGREEMENT + STRICT ARRIVAL`）：`_wrist_look_slot_prepick`（空爪、最多 6 个观察位置、两次一致）、`_egg_wrist_align`（≤ 6 mm 修正 / 6–25 mm 复看确认 / 否则停止）、夹偏检测与重夹一次、`RealIO.move_line(strict=True)`（2 mm / 1° / 0.5°，修正一次）、下插不精确时不松开、`_release_tip_error`；删除 V4.5 的转腕前复测。
+- `NERO_V386_Real_Wrist_Camera.py`：`wrist_find_slot_cavity`（圆形暗坑 + 相邻槽检查）。
+- `NERO_V325_Camera.py`：`_wait_arrived`（标定拍照前每个关节 ≤ 0.3°，10 s 未到位则跳过该样本）。
+- `NERO_V312_Console.py`：`v46_rotate_console_log`（`console_<时间>.log` 保留 10 份）。
+- 测试：新 `tests/test_v4_6.py`（11 项）+ `tests/v46_synth_slot.py`；`test_v4_2` Benchmark 测试按设计修改；`test_v4_5` T6 / T7 跟随 V4.6 修改。
+- **没有在真实硬件上运行过**。
+
 ## V4.5.1 (2026-11-08) — 热修复：控制台启动时在 VLA 页创建控件处段错误
 - `NERO_V312_Console.py`（`V4.5.1 LAZY VLA TAB`）：「VLA / LeRobot (V4)」页在第一次打开时才 import 和创建；`NERO_NO_VLA_TAB=1` 完全不加载。
 - `start_nero.sh`：新参数 `--no-vla`。

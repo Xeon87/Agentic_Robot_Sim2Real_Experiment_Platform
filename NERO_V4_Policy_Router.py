@@ -23,7 +23,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-VERSION = "V4.5"
+VERSION = "V4.6"
 MARKER = "V4.2 DUAL-PATH POLICY ROUTER"
 
 from NERO_V4_Control_Arbiter import ControlArbiter

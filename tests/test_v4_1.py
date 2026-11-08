@@ -47,7 +47,7 @@ class TestV41Phase0AndPhase1(unittest.TestCase):
     def test_t1_phase0_architecture_and_sync_audit(self):
         rep = AUD.run_phase0_audit(HERE)
         self.assertTrue(rep["ok"], f"Phase 0 audit failed: {rep}")
-        self.assertIn(rep["version"], ("V4.1", "V4.2", "V4.3", "V4.4", "V4.5"))
+        self.assertIn(rep["version"], ("V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.6"))
         self.assertEqual(len(rep["baseline"]["missing_baseline"]), 0)
         self.assertEqual(len(rep["baseline"]["missing_v4"]), 0)
         self.assertLessEqual(rep["sync_benchmark"]["max_skew_ms"], 25.0)

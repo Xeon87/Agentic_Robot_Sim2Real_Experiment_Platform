@@ -47,7 +47,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-VERSION = "V4.5"
+VERSION = "V4.6"
 MARKER = "V4.2 SMOLVLA POLICY & CLOSED-LOOP CONTROLLER"
 HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
@@ -956,6 +956,51 @@ class SmolVLAPolicy:
         )
         return metrics
 
+    # ------------------------------------------------------------------ V4.6 MODEL PROFILE + REAL-ROBOT GATE
+    def model_profile(self) -> Dict[str, Any]:
+        """V4.6: what the loaded policy was trained for, and whether it may drive the REAL NERO.
+        NERO = 7 joints + gripper (8-D state / 8-D action, radians). The official lerobot/smolvla_base was trained on
+        other robots (SO-100: 6-D, different units, cameras camera1..3) -> its actions mean nothing on NERO."""
+        prof: Dict[str, Any] = {"backend": self.backend_type, "loaded": self.is_loaded, "path": self.model_id_or_path,
+                                "state_dim": None, "action_dim": None, "dataset": None, "nero_trained": False,
+                                "real_allowed": False, "reasons": []}
+        if not self.is_loaded:
+            prof["reasons"].append("模型未加载")
+            return prof
+        if self.backend_type == "nero_vla_pretrained":
+            prof["reasons"].append("没有可用的 SmolVLA（未安装 / 加载失败），当前是未训练的内置替身，动作没有意义")
+            return prof
+        if self.backend_type == "nero_vla_finetuned":
+            prof.update(state_dim=8, action_dim=8, nero_trained=True, real_allowed=True,
+                        dataset=(self.training_info or {}).get("dataset_name"))
+            prof["reasons"].append("内置简化模型（在 NERO 示教数据上快速微调），不是真 SmolVLA，只适合打通流程")
+            return prof
+        cfg = (self.ext_info or {}).get("config") or {}
+        if self.backend_type == "hf_smolvla" and self._hf_policy is not None:
+            c = getattr(self._hf_policy, "config", None)
+            try:
+                cfg = {"state_dim": int(c.input_features["observation.state"].shape[0]),
+                       "action_dim": int(c.output_features["action"].shape[0])}
+            except Exception:
+                cfg = {}
+        sd, ad = cfg.get("state_dim"), cfg.get("action_dim")
+        prof.update(state_dim=sd, action_dim=ad, dataset=cfg.get("dataset_repo_id"))
+        if sd == 8 and ad == 8:
+            prof["nero_trained"] = True
+            prof["real_allowed"] = True
+            if prof["dataset"]:
+                prof["reasons"].append(f"在数据集 {prof['dataset']} 上微调（{cfg.get('train_steps') or '?'} 步）")
+        else:
+            prof["reasons"].append(
+                f"这个模型是为 {sd or '?'} 维状态 / {ad or '?'} 维动作的机器人训练的（官方 smolvla_base 是 SO-100 等 6 轴小臂），"
+                f"不是 NERO（7 关节 + 夹爪 = 8 维）：先用 NERO 示教数据微调（第 3 区「导出为 LeRobot 数据集」→「开始 SmolVLA 微调」）")
+        return prof
+
+    @staticmethod
+    def _backend_of(adapter) -> str:
+        ex = getattr(adapter, "executor", None)
+        return str(getattr(ex, "_backend_kind", "mock") or "mock")
+
     def run_vla_closed_loop(
         self,
         adapter: NEROLeRobotAdapter,
@@ -966,16 +1011,44 @@ class SmolVLAPolicy:
         cancel_ev: Optional[ Any ] = None,
     ) -> Dict[str, Any]:
         """Execute the Section 5.7 VLA Closed-Loop Control cycle:
-        Observe -> Predict Action Chunk -> Execute Horizon K -> Update Observation -> Repeat."""
+        Observe -> Predict Action Chunk -> Execute Horizon K -> Update Observation -> Repeat.
+        V4.6: refuses the REAL backend with a policy not trained on NERO; logs the start, every chunk and the end
+        (also every failure); the result is "executed_unverified" - running without errors is not task success."""
         if not self.is_loaded:
             self.load()
         if not adapter.is_connected:
             adapter.connect()
-
+        backend = self._backend_of(adapter)
+        prof = self.model_profile()
         k_exec = int(execute_horizon if execute_horizon is not None else self.execute_horizon)
+        self.log(f"[INFO] [V4.6 VLA LOOP] 开始：后端={backend} · 模型={prof['backend']}"
+                 f"（{prof['state_dim'] or '?'}/{prof['action_dim'] or '?'} 维）· 最多 {max_chunks} 块 × {k_exec} 步 · "
+                 f"指令「{task_instruction}」")
+
+        def _end(res: Dict[str, Any]) -> Dict[str, Any]:
+            res.setdefault("backend", backend)
+            res.setdefault("model", prof["backend"])
+            res.setdefault("elapsed_s", round(time.perf_counter() - t0, 3))
+            if res.get("ok"):
+                self.log(f"[OK] [V4.6 VLA LOOP] 执行完毕（未验证任务是否完成）：{res.get('chunks_executed')} 块 / "
+                         f"{res.get('steps_executed')} 步 · 钳制 {res.get('clamped_chunks', 0)} 块 · 平均推理 "
+                         f"{res.get('avg_inference_ms', 0.0)} ms · {res['elapsed_s']:.2f} s · 后端={backend}")
+            else:
+                self.log(f"[FAIL] [V4.6 VLA LOOP] 失败：{res.get('reason')} · 已执行 {res.get('chunks_executed', 0)} 块 / "
+                         f"{res.get('steps_executed', 0)} 步 · {res['elapsed_s']:.2f} s · 后端={backend}"
+                         + (f" · 详情: {res.get('detail')}" if res.get("detail") else ""))
+            return res
+
         t0 = time.perf_counter()
+        if backend == "real" and not prof["real_allowed"]:
+            return _end({"ok": False, "status": "refused", "reason": "MODEL_NOT_TRAINED_FOR_NERO",
+                         "detail": "；".join(prof["reasons"]), "chunks_executed": 0, "steps_executed": 0})
+        if not prof["nero_trained"]:
+            self.log(f"[WARN] [V4.6 VLA LOOP] 模型不是为 NERO 训练的，只在{backend}后端测试接口：{'；'.join(prof['reasons'])}")
+
         chunks_run = 0
         steps_run = 0
+        clamped_chunks = 0
         infer_times: List[float] = []
         exec_times: List[float] = []
         trajectory_log: List[List[float]] = []
@@ -985,19 +1058,17 @@ class SmolVLAPolicy:
 
         for c_idx in range(max(1, int(max_chunks))):
             if cancel_ev is not None and hasattr(cancel_ev, "is_set") and cancel_ev.is_set():
-                return {
-                    "ok": False,
-                    "status": "aborted",
-                    "reason": "CANCELLED_BY_USER",
-                    "chunks_executed": chunks_run,
-                    "steps_executed": steps_run,
-                }
+                return _end({"ok": False, "status": "aborted", "reason": "CANCELLED_BY_USER",
+                             "chunks_executed": chunks_run, "steps_executed": steps_run})
 
             obs = adapter.get_observation()
             if stop_condition_fn is not None and c_idx > 0 and stop_condition_fn(obs):
                 break
-
-            pred = self.predict_action_chunk(obs, task_instruction=task_instruction)
+            try:
+                pred = self.predict_action_chunk(obs, task_instruction=task_instruction)
+            except Exception as exc:
+                return _end({"ok": False, "status": "failed", "reason": "INFERENCE_FAILED", "detail": str(exc),
+                             "chunks_executed": chunks_run, "steps_executed": steps_run})
             infer_times.append(float(pred["inference_ms"]))
             chunk_to_send = pred["action_chunk"][:k_exec]
 
@@ -1006,39 +1077,39 @@ class SmolVLAPolicy:
             exec_times.append(round((time.perf_counter() - t_ex) * 1000.0, 2))
 
             if not res_ex.get("ok"):
-                return {
-                    "ok": False,
-                    "status": "failed",
-                    "reason": res_ex.get("error") or "ACTION_EXECUTION_FAILED",
-                    "chunks_executed": chunks_run,
-                    "steps_executed": steps_run,
+                err = str(res_ex.get("error") or "ACTION_EXECUTION_FAILED")
+                code = err.split(":")[0].strip() or "ACTION_EXECUTION_FAILED"
+                return _end({
+                    "ok": False, "status": "failed", "reason": code, "detail": err,
+                    "failed_chunk": c_idx + 1, "failed_step_index": res_ex.get("failed_step_index"),
+                    "chunks_executed": chunks_run, "steps_executed": steps_run, "clamped_chunks": clamped_chunks,
                     "avg_inference_ms": round(float(np.mean(infer_times)), 2) if infer_times else 0.0,
                     "last_error": res_ex,
-                }
+                })
 
             chunks_run += 1
             n_step = int(res_ex.get("executed_steps", len(chunk_to_send)))
             steps_run += n_step
+            if res_ex.get("clamped"):
+                clamped_chunks += 1
             if res_ex.get("final_action"):
                 trajectory_log.append(list(res_ex["final_action"]))
+            self.log(f"[INFO] [V4.6 VLA LOOP] 块 {c_idx + 1}/{max_chunks}: 推理 {pred['inference_ms']:.0f} ms · 执行 {n_step} 步"
+                     + (" · 有关节被钳制（超出单步或软限位）" if res_ex.get("clamped") else ""))
 
         obs_final = adapter.get_observation()
         final_state = np.asarray(obs_final["observation.state"], dtype=float).flatten().tolist()
-        elapsed_s = round(time.perf_counter() - t0, 3)
-
-        self.log(
-            f"[OK] [V4.2 SMOLVLA LOOP] 闭环执行完成: {chunks_run} Chunks ({steps_run} 步) · "
-            f"平均推理 {np.mean(infer_times) if infer_times else 0.0:.2f} ms · 总耗时 {elapsed_s:.2f} s"
-        )
-        return {
+        return _end({
             "ok": True,
-            "status": "succeeded",
+            "status": "executed_unverified",
+            "verified": False,
             "task_instruction": task_instruction,
             "chunks_executed": chunks_run,
             "steps_executed": steps_run,
+            "clamped_chunks": clamped_chunks,
             "avg_inference_ms": round(float(np.mean(infer_times)), 2) if infer_times else 0.0,
             "avg_exec_ms": round(float(np.mean(exec_times)), 2) if exec_times else 0.0,
-            "elapsed_s": elapsed_s,
+            "elapsed_s": round(time.perf_counter() - t0, 3),
             "final_state_8d": [round(float(x), 5) for x in final_state],
             "trajectory_tail": trajectory_log[-3:],
-        }
+        })

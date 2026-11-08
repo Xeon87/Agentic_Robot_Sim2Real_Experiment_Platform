@@ -289,7 +289,20 @@ class TestV42FullClosedLoopPhases2To6(unittest.TestCase):
         adapter = LRA.NEROLeRobotAdapter(obs_bridge=bridge, executor=executor, arbiter=arb, log=lambda _s: None)
         policy = VLA.SmolVLAPolicy(chunk_size=8, execute_horizon=4, log=lambda _s: None)
         policy.load()
-        evaluator = TEV.TaskEvaluator(obs_bridge=bridge, arbiter=arb, log=lambda _s: None)
+        # V4.6: without any success check a trial is "unverified", never a success (V4.2-V4.5 counted it as success)
+        ev0 = TEV.TaskEvaluator(obs_bridge=bridge, arbiter=arb, log=lambda _s: None)
+        router0 = PRT.PolicyRouter(arbiter=arb, adapter=adapter, vla_policy=policy, evaluator=ev0, log=lambda _s: None)
+        orch0 = AOR.AgentOrchestrator(router=router0, log=lambda _s: None)
+        arb.request_mode("smolvla", owner_tag="bench_unverified")
+        arb.set_allow_control(True)
+        r0 = orch0.run_task("Pick up the red block", policy="smolvla", max_vla_chunks=1)
+        self.assertFalse(r0["ok"])
+        self.assertEqual(r0["status"], "unverified")
+        self.assertEqual(r0["retry_count"], 0)            # nothing to retry: it ran, it just was not checked
+
+        # the benchmark pipeline itself, with a (fake) vision check standing in for the real success detector
+        evaluator = TEV.TaskEvaluator(obs_bridge=bridge, arbiter=arb, log=lambda _s: None,
+                                      vision_eval_fn=lambda instr: {"ok": True, "reason": "VISION_GOAL_VERIFIED"})
         router = PRT.PolicyRouter(arbiter=arb, adapter=adapter, vla_policy=policy, evaluator=evaluator, log=lambda _s: None)
         orch = AOR.AgentOrchestrator(router=router, log=lambda _s: None)
 
