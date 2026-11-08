@@ -36,6 +36,8 @@ import time
 import numpy as np
 
 MARKER_V464 = "V4.6.4 VISION ACCURACY CHECK"
+MARKER_V468_VC = "V4.6.8 RECOGNIZE BEFORE EVERY HOVER"
+MOVED_WARN_MM = 5.0                # V4.6.8: target moved more than this since the last recognition -> warning
 MODES = (("main", "① 只用主相机"), ("wrist", "② 只用腕部相机"), ("assist", "③ 主相机 + 腕部辅助"))
 MODE_LABEL = dict(MODES)
 HOVER_DEFAULT_MM = 10.0
@@ -50,7 +52,7 @@ YAW_TRY_DEG = tuple(sorted(range(-180, 180, 15), key=lambda d: (abs(d), d)))
 CSV_FIELDS = ("time", "mode", "target", "kind", "hover_mm", "main_x_mm", "main_y_mm", "wrist_x_mm", "wrist_y_mm",
               "wrist_reads", "used_x_mm", "used_y_mm", "used_from", "decision", "target_top_z_mm",
               "cmd_tip_x_mm", "cmd_tip_y_mm", "cmd_tip_z_mm", "act_tip_x_mm", "act_tip_y_mm", "act_tip_z_mm",
-              "arrive_err_mm", "user_dx_mm", "user_dy_mm", "user_note", "photo_main", "photo_wrist")
+              "arrive_err_mm", "recog_age_s", "target_moved_mm", "user_dx_mm", "user_dy_mm", "user_note", "photo_main", "photo_wrist")
 
 
 def calib_dir():
@@ -238,6 +240,7 @@ class VisionCheck:
             out[tid] = {"kind": kind, "xyz": np.asarray(e["rim"], float).copy(), "top_z": target_top_z(e, kind),
                         "yaw": float(e.get("yaw_deg", 0.0))}
         self.targets = out
+        self.t_obs = time.time()
         return out
 
     # -- motion helpers
@@ -321,9 +324,22 @@ class VisionCheck:
         return None, reads, notes
 
     # -- one check
-    def run(self, mode, tid, hover_mm):
+    def run(self, mode, tid, hover_mm, refresh=True):
         if tid not in self.targets:
             raise RuntimeError(f"没有目标 {tid}：先点「识别目标」")
+        moved = None
+        if refresh:                                    # V4.6.8: never hover on an old recognition
+            old_xy = np.asarray(self.targets[tid]["xyz"][:2], float).copy()
+            self.observe()
+            if tid not in self.targets:
+                return {"ok": False, "row": {"mode": mode, "target": tid, "decision": "重新识别后没有这个目标"},
+                        "error": f"重新识别后没有 {tid}（蛋托 / 鸡蛋被移动或遮挡？）"}
+            moved = round(float(np.linalg.norm(np.asarray(self.targets[tid]["xyz"][:2], float) - old_xy)) * 1000.0, 1)
+            self.log(f"[{'WARN' if moved > MOVED_WARN_MM else 'INFO'}] [V4.6.8 VISION CHECK] 已重新识别：{tid} 与上次识别相比移动了 "
+                     f"{moved:.1f} mm" + ("（目标被移动过：旧的识别结果已经不能用）" if moved > MOVED_WARN_MM else ""))
+        age = round(time.time() - float(getattr(self, "t_obs", time.time())), 1)
+        if not refresh and age > 30.0:
+            self.log(f"[WARN] [V4.6.8 VISION CHECK] 用的是 {age:.0f} s 前的识别结果（没勾「悬停前重新识别」）")
         t = self.targets[tid]
         hover_m = min(max(float(hover_mm), HOVER_RANGE_MM[0]), HOVER_RANGE_MM[1]) / 1000.0
         self.close_gripper()
@@ -339,7 +355,8 @@ class VisionCheck:
                "hover_mm": round(hover_m * 1000.0, 1), "main_x_mm": _mm(main_xy[0]), "main_y_mm": _mm(main_xy[1]),
                "wrist_x_mm": None if wrist_xy is None else _mm(wrist_xy[0]),
                "wrist_y_mm": None if wrist_xy is None else _mm(wrist_xy[1]), "wrist_reads": len(reads),
-               "used_from": src or "", "decision": decision, "target_top_z_mm": _mm(t["top_z"])}
+               "used_from": src or "", "decision": decision, "target_top_z_mm": _mm(t["top_z"]),
+               "recog_age_s": age, "target_moved_mm": moved}
         self.log(f"[INFO] [V4.6.4 VISION CHECK] {MODE_LABEL[mode]} · {tid}：{decision}")
         if xy is None:
             row["user_note"] = "没有悬停"
@@ -419,19 +436,25 @@ class VisionCheckPanel:
         self.btn_go.pack(side="left", padx=(4, 2))
         ttk.Button(r2, text="↑ 抬起", command=self.on_lift).pack(side="left", padx=2)
         ttk.Button(r2, text="■ 停止", command=self.on_stop).pack(side="left", padx=2)
-        ttk.Label(r2, text="  爪尖−目标 dx").pack(side="left")
+        self.v_refresh = tk.BooleanVar(value=True)      # V4.6.8: recognize again before every hover (default on)
+        ttk.Checkbutton(r2, text="悬停前重新识别", variable=self.v_refresh).pack(side="left", padx=(8, 0))
+        r3 = ttk.Frame(fr)                             # V4.6.8: the Camera tab scrolls now -> a third row again
+        r3.pack(fill="x", padx=4, pady=1)
+        ttk.Label(r3, text="爪尖 − 目标中心：dx").pack(side="left")
         self.v_dx = tk.StringVar(value="")
-        ttk.Entry(r2, textvariable=self.v_dx, width=5).pack(side="left")
-        ttk.Label(r2, text="dy").pack(side="left")
+        ttk.Entry(r3, textvariable=self.v_dx, width=6).pack(side="left")
+        ttk.Label(r3, text=" dy").pack(side="left")
         self.v_dy = tk.StringVar(value="")
-        ttk.Entry(r2, textvariable=self.v_dy, width=5).pack(side="left")
-        ttk.Label(r2, text="mm").pack(side="left")
+        ttk.Entry(r3, textvariable=self.v_dy, width=6).pack(side="left")
+        ttk.Label(r3, text=" mm（基座坐标） 备注").pack(side="left")
         self.v_note = tk.StringVar(value="")
-        self.btn_rec = ttk.Button(r2, text="记录偏差", command=self.on_record)
+        ttk.Entry(r3, textvariable=self.v_note, width=16).pack(side="left")
+        self.btn_rec = ttk.Button(r3, text="记录偏差", command=self.on_record)
         self.btn_rec.pack(side="left", padx=4)
         self.v_status = tk.StringVar(value="悬停高度 = 爪尖 − 目标顶端；dx / dy = 爪尖 − 目标中心（基座坐标，悬停后提示 +X / +Y 在主相机画面里的方向）")
-        lab = JC.fixed_label(tk, fr, 1, textvariable=self.v_status, font=("TkDefaultFont", 9), wraplength=2000,
+        lab = JC.fixed_label(tk, fr, 2, textvariable=self.v_status, font=("TkDefaultFont", 9), wraplength=780,
                              pack={"fill": "x", "padx": 4})
+        lab.holder.bind("<Configure>", lambda e, w=lab: w.configure(wraplength=max(300, e.width - 8)), add="+")
         self.v_sum = tk.StringVar(value=self._summary_text())
         self._poll()
 
@@ -555,6 +578,7 @@ class VisionCheckPanel:
             self._say("先点「识别目标」")
             return
         tid, mode = self.v_target.get(), self.v_mode.get()
+        refresh = bool(self.v_refresh.get())
         try:
             hover = float(self.v_hover.get())
         except ValueError:
@@ -584,7 +608,7 @@ class VisionCheckPanel:
         self._say(f"{MODE_LABEL[mode]} · {tid}：运行中 ...")
 
         def job():
-            res = vc.run(mode, tid, hover)
+            res = vc.run(mode, tid, hover, refresh=refresh)
 
             def ui():
                 self.pending = res["row"]
@@ -592,8 +616,11 @@ class VisionCheckPanel:
                     self.v_dx.set("")
                     self.v_dy.set("")
                     self.v_note.set("")
-                    self._say(f"{MODE_LABEL[mode]} · {tid}：{res['row']['decision']} · 到位误差 "
-                                      f"{res['row'].get('arrive_err_mm')} mm。看爪尖偏离目标中心多少，填 dx / dy → "
+                    mv = res["row"].get("target_moved_mm")
+                    self._say(f"{MODE_LABEL[mode]} · {tid}：{res['row']['decision']} · 识别 "
+                              + ("刚刚重做" if mv is not None else f"{res['row'].get('recog_age_s')} s 前")
+                              + (f"（目标移动了 {mv:.0f} mm！）" if mv is not None and mv > MOVED_WARN_MM else "")
+                              + f" · 到位误差 {res['row'].get('arrive_err_mm')} mm。看爪尖偏离目标中心多少，填 dx / dy → "
                                       f"「记录偏差」。{res.get('hint', '')}")
                 else:
                     self._say(f"{MODE_LABEL[mode]} · {tid}：没有完成 —— {res.get('error')}")
@@ -669,13 +696,5 @@ def attach(tk, ttk, cam_tab, rct_tab, pipe, jpanel, log=None):
             break
     if page is None:
         raise RuntimeError("找不到「视觉定位」页")
-    # room for the panel in the default 1420x1000 window: the page's recognition table (tv_eggs, 6 rows) shows 3 rows
-    # (it still scrolls); only the widget option is changed at run time - NERO_V325_Camera.py stays as it is (frozen)
-    tv = getattr(cam_tab, "tv_eggs", None)
-    if tv is not None:
-        try:
-            if int(tv.cget("height")) > 3:
-                tv.configure(height=3)
-        except Exception:
-            pass
+    # V4.6.8: the Camera tab scrolls (console) -> the recognition table keeps its 6 rows
     return VisionCheckPanel(tk, ttk, page, rct_tab, cam_tab, pipe, jpanel, log=log)

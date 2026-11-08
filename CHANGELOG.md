@@ -1,3 +1,37 @@
+## V4.6.8 (2026-11-08) — 悬停前重新识别；按"槽心凸起"判定放蛋；连续放满蛋托；标签精简；Try harder；Camera 页可滚动
+- `NERO_V464_Vision_Check.py`（`V4.6.8 RECOGNIZE BEFORE EVERY HOVER`）：
+  - `VisionCheck.run(..., refresh=True)`：先 `observe()`，记录目标相对上次识别移动了多少（超过 5 mm 写 WARN）。
+  - CSV 新增 `recog_age_s`、`target_moved_mm`；面板新增「悬停前重新识别」（默认开），恢复第三排（dx / dy / 备注），状态行 2 行。
+  - 不再把识别表缩到 3 行（Camera 页现在可以滚动）。
+- `NERO_V349`：
+  - 新增 `slot_rise`：在裁剪区域的**全部**深度像素里量每个槽，槽心第 90 百分位高度减去槽口环的中位高度；≥ 8 mm 判为有蛋（`SLOT_EGG_RISE_MM`）。
+  - 每个槽的数据里新增 `rise`。
+- `NERO_V365`（`V4.6.8 FILL CARTON + VERIFY BY RISE + TRY HARDER`）：
+  - `verify_egg_in_slot(looks=2)`：三条证据——槽被占 / 0.5 个孔距内有鸡蛋 / 槽心比放蛋前高 ≥ 15 mm；第 1 次看在起点，第 2 次抬高 100 mm 再看；每次的结果写 `[V4.6.8 VERIFY]`。
+  - `observe_scene`：离任一槽心小于 0.55 个孔距的鸡蛋算作"已在蛋托里"（`eggs_in_carton`），不作为要抓的蛋。
+  - `_jaws_clear` / `_occupied_xy`：两个夹爪指尖与相邻已立鸡蛋的水平距离 ≥ 21 + 6 mm；有相邻鸡蛋时偏航角多试每 15° 一个。
+  - `fill_carton_episode`：每轮先识别，空槽按离底座由远到近，`FILL_MAX_FAILS = 3`。
+  - `scripted_episode(try_harder)` → `_one_egg`（各步重试策略）、`replan_place`、`refresh_slots`。
+  - `run_execute(try_harder, fill_all)`：LLM 模式下在任务说明里追加 TRY HARDER 指示，工具步数翻倍（上限 90）。
+  - `is_fill_all_task`：识别"全部 / 所有 / 放满 / all eggs"等说法。
+  - 监控标签：槽只显示编号、鸡蛋显示 e1…、蛋托显示「蛋托 R×C」，字体缩小；槽和蛋不再画第二个标签。
+  - 「Try harder」勾选框放在「速度」左边，状态保存在设置里。
+- `NERO_V312_Console.py`（`V4.6.8 CAMERA TAB SCROLL`）：Camera调试 页包进 Canvas + 滚动条 + 鼠标滚轮，做法和「实机NERO调试」页一样；鼠标在 Text / Treeview / Combobox / Scale / Listbox 上时滚动它们自己。
+- 测试：
+  - 新 `tests/test_v4_6_8.py`（9 项）：
+    - 合成画面里的槽占用判断；
+    - 验证判定的三条证据和多次查看；
+    - 蛋托里的鸡蛋不当作要抓的蛋；
+    - 夹爪避让旁边的鸡蛋；
+    - 连续放满（假场景，每次放蛋后场景随之变化）；
+    - Try harder 下的夹取重试和重新规划放蛋；
+    - run_execute；标签；界面接线。
+  - `tests/v466_synth_carton.py` 支持在槽里立鸡蛋（`eggs_in`）。
+  - `test_v4_6_4_gui` 先滚到页面底部再检查。
+  - 版本白名单补 V4.6.8（跳过 V4.6.7）。
+- **回归**（和 V4.6.6 用同一套测试对比）：非 GUI 106 个文件、GUI 41 个，**0 个回归**（`v3_56_gui` 照旧时好时坏）。
+- **没有在真实硬件上运行过。**
+
 ## V4.6.6 (2026-11-08) — 蛋托固定模板（2×3，46×47 mm）+ 原生崩溃调用栈 + Tk 输入法默认关
 - **蛋托**：
   - `NERO_V349`（`V4.6.6 FIXED CARTON TEMPLATE`）新增 `carton_template_config`（`config/egg_carton.json` 的 `carton_grid` + `slot_pitch_mm`；环境变量 `NERO_EGG_CARTON_GRID` 可覆盖，设为 `none` 时退回旧方法）。

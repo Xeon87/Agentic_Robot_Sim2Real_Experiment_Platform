@@ -95,7 +95,7 @@ SCENE_DEFAULT_PROMPTS = {
 }
 SCENE_EXAMPLES = {
     "stack_cups": EXAMPLES,
-    "fill_egg_holder": (("egg_1 → slot_1", "Put egg_1 into slot_1"), ("全部入托", "Place all eggs into empty carton slots")),
+    "fill_egg_holder": (("egg_1 → slot_1", "Put egg_1 into slot_1"), ("全部入托", "Place all eggs into empty carton slots")),   # V4.6.8: 全部入托 = fill the carton egg by egg
     "sort_items": (("水果→红 其余→蓝", "Put the fruit into the red bin and everything else into the blue bin"),
                    ("item_1 → red", "Put item_1 into red")),
 }
@@ -1062,6 +1062,13 @@ STRICT_POS_MM, STRICT_ROT_DEG, STRICT_JOINT_DEG = 2.0, 1.0, 0.5
 EGG_WRIST_SMALL_MM = 6.0          # wrist vs main camera <= this: shift the grasp directly (V4.3 behaviour)
 EGG_WRIST_CONFIRM_MM = 25.0       # 6..25 mm: look again from the corrected position; accept when both agree
 EGG_WRIST_AGREE_MM = 4.0
+MARKER_V468 = "V4.6.8 FILL CARTON + VERIFY BY RISE + TRY HARDER"
+EGG_IN_CARTON_FRAC = 0.55         # an egg closer than this x pitch to a slot centre stands in the carton (not a source)
+VERIFY_EGG_NEAR_FRAC = 0.50       # verify: an egg within this x pitch of the slot centre = placed
+VERIFY_RISE_GAIN_MM = 15.0        # verify: cup middle this much higher than before the place = placed
+JAW_CLEAR_M = 0.006               # place: jaw tip >= egg radius + this from an egg already standing next to the slot
+JAW_REACH_M = 0.027               # jaw tip distance from the held egg's centre along the closing axis
+FILL_MAX_FAILS = 3                # fill the carton: stop after this many eggs that could not be placed
 EGG_OFFCENTRE_TOL_MM = 8.0        # clamped tip gap < egg width - this -> gripped off the equator (V4.5 run: 24 mm)
 SLOT_WRIST_MAX_MM = 30.0
 SLOT_LOOK_POSES = ((0.0, 0.0, 0.14), (0.0, 0.0, 0.18), (0.025, 0.0, 0.16), (-0.025, 0.0, 0.16),
@@ -1131,6 +1138,13 @@ def parse_task_eggs(task):
     src = f"egg_{me[0]}" if me else "egg_1"
     dst = f"slot_{ms[0]}" if ms else "slot_1"
     return src, dst
+
+
+def is_fill_all_task(task):
+    """V4.6.8: 'Place all eggs into empty carton slots' / '把所有鸡蛋放进蛋托' / 'fill the carton' -> True"""
+    t = str(task or "").lower()
+    return any(k in t for k in ("all egg", "all the egg", "every egg", "each egg", "fill the carton", "fill carton",
+                                "所有", "全部", "每个鸡蛋", "放满", "装满"))
 
 
 class RealEggSkills:
@@ -1351,7 +1365,18 @@ class RealEggSkills:
         self._slot_looked, self._slot_wrist_shift, self._egg_wrist_shift = False, None, None   # V4.6: new scene
         self.cam = {}
         eggs_out = []
-        for i, e in enumerate(res.get("eggs") or []):
+        # V4.6.8 FILL CARTON: an egg standing in the carton (close to a slot centre) is not a source egg
+        slot_xy = [np.asarray(s_["center_base"][:2], float) for s_ in ((res.get("carton") or {}).get("slots") or [])]
+        pm = (res.get("carton") or {}).get("pitch_mm") or [47.0, 47.0]
+        lim = EGG_IN_CARTON_FRAC * min(float(pm[0]), float(pm[1])) / 1000.0
+        src_eggs, self.eggs_in_carton = [], []
+        for e in res.get("eggs") or []:
+            c_ = np.asarray(e["center_base"][:2], float)
+            if slot_xy and min(float(np.linalg.norm(c_ - q)) for q in slot_xy) < lim:
+                self.eggs_in_carton.append([float(v) for v in e["center_base"]])
+            else:
+                src_eggs.append(e)
+        for i, e in enumerate(src_eggs):
             eid = f"egg_{i + 1}"
             c = [float(v) for v in e["center_base"]]
             w_m = float(e.get("width_m", 0.042))
@@ -1378,6 +1403,7 @@ class RealEggSkills:
             self.stage = "OBSERVED"
         return self._res("observe_scene", True,
                          {"eggs": len(eggs_out), "carton_found": carton is not None,
+                          "eggs_in_carton": len(self.eggs_in_carton),
                           "free_slots": [s["id"] for s in slots_out if not s["occupied"]]},
                          nxt=["plan_egg_place"],
                          scene={"eggs": eggs_out, "carton": carton, "slots": slots_out})
@@ -1473,11 +1499,17 @@ class RealEggSkills:
         # the lower tip (not the centre) is aimed at the slot
         pitch_order = EGG_PITCH_ORDER
         yaw_order = (150.0, 180.0, 135.0, 120.0) if float(p_slot[1]) >= 0.0 else (-150.0, 180.0, -135.0, -120.0)
+        # V4.6.8 FILL CARTON: eggs already standing next to this slot -> the jaws must not point at them
+        occ_xy = self._occupied_xy(exclude=slot)
+        if occ_xy:
+            yaw_order = tuple(yaw_order) + tuple(float(a) for a in range(-165, 181, 15) if float(a) not in yaw_order)
         cands = []
         for pitch_deg in pitch_order:
             for pyaw in yaw_order:
                 R_rel_g = self._slot_vertical_grasp_R(pyaw, pitch_deg)
                 p_a_rel = egg_place_grasp_origin(tip_target, R_rel_g, egg_in_G, half_len_m)
+                if occ_xy and not self._jaws_clear(p_a_rel, R_rel_g, egg_in_G, occ_xy):
+                    continue
                 p_rel, R_rel = self.prof.tcp_from_grasp(p_a_rel, R_rel_g)
                 p_above = p_rel + np.array([0.0, 0.0, 0.065])
                 for sd in seeds:
@@ -1524,6 +1556,82 @@ class RealEggSkills:
                 break
         cands.sort(key=lambda c: (-int(c["margin"] >= 5.0), c["vert_err_deg"], -c["margin"]))
         return cands
+
+    # ------------------------------------------------------------------ V4.6.8 helpers
+    def _pitch_m(self):
+        return self._carton_pitch_m() if self.last_obs else 0.047
+
+    def _occupied_xy(self, exclude=None):
+        """xy of eggs standing in the carton: occupied slots + eggs found inside the carton"""
+        out = []
+        for k, e in self.cam.items():
+            if k.startswith("slot_") and e.get("occupied") and e is not exclude:
+                out.append(np.asarray(e["rim"][:2], float))
+        for e in getattr(self, "eggs_in_carton", []) or []:
+            p = np.asarray(e[:2], float)
+            if not any(float(np.linalg.norm(p - q)) < 0.02 for q in out):
+                out.append(p)
+        if exclude is not None:
+            ex = np.asarray(exclude["rim"][:2], float)
+            out = [q for q in out if float(np.linalg.norm(q - ex)) > 0.01]
+        return out
+
+    def _jaws_clear(self, p_a_rel, R_rel_g, egg_in_G, occ_xy):
+        """V4.6.8: both jaw tips (held egg centre +- closing axis x JAW_REACH_M) keep egg radius + JAW_CLEAR_M from
+        every egg already standing in the carton (horizontal distance)"""
+        c = np.asarray(p_a_rel, float) + np.asarray(R_rel_g, float) @ np.asarray(egg_in_G, float)
+        y = np.asarray(R_rel_g, float)[:, 1]
+        y_h = y[:2] / max(1e-9, float(np.linalg.norm(y[:2])))
+        for sgn in (1.0, -1.0):
+            jp = c[:2] + sgn * JAW_REACH_M * y_h
+            for q in occ_xy:
+                if float(np.linalg.norm(jp - q)) < 0.021 + JAW_CLEAR_M:
+                    return False
+        return True
+
+    def free_slots(self):
+        return [k for k in sorted(self.cam, key=lambda x: int(x.split("_")[-1]) if x.split("_")[-1].isdigit() else 99)
+                if k.startswith("slot_") and not self.cam[k].get("occupied")]
+
+    def source_eggs(self):
+        return [k for k in sorted(self.cam, key=lambda x: int(x.split("_")[-1]) if x.split("_")[-1].isdigit() else 99)
+                if k.startswith("egg_")]
+
+    def replan_place(self, target_slot):
+        """V4.6.8 TRY HARDER: re-plan only the place (the egg is already held) for target_slot from the current joints"""
+        if not self.plan or target_slot not in self.cam:
+            return False
+        zt = float(self.plan.get("table_z_m", 0.0))
+        egg_in_G = np.asarray(self.plan.get("egg_in_G_m") or [0.0, EGG_HELD_CENTER_Y_M, 0.0], float)
+        s_c = self._plan_slot_candidates(self.cam[target_slot], zt, self.io.current_q(), egg_in_G=egg_in_G,
+                                         half_len_m=float(self.plan.get("egg_half_len_m", 0.0275)))
+        if not s_c:
+            return False
+        sc = s_c[0]
+        self.plan.update(target_slot=target_slot, slot_tip_target=[round(float(v), 4) for v in sc["tip_target"]],
+                         place_yaw_deg=round(sc["pyaw"], 1), place_pitch_deg=round(sc["pitch_deg"], 1),
+                         egg_long_axis_vertical_err_deg=sc["vert_err_deg"])
+        self.plan["_wps"].update(orient=(sc["p_above"], sc["R_rel"]), above_target=(sc["p_above"], sc["R_rel"]),
+                                 release=(sc["p_rel"], sc["R_rel"]))
+        self.plan["_q"].update(rotate=sc["q_above"], orient=sc["q_above"], above_target=sc["q_above"],
+                               release=sc["q_rel"])
+        if self.held:
+            self.stage = "HOLDING"
+        self.io.emit(f"[INFO] [V4.6.8 TRY HARDER] 重新规划放蛋 → {target_slot}（偏航 {sc['pyaw']:+.0f}°，俯仰 {sc['pitch_deg']:+.0f}°）")
+        return True
+
+    def refresh_slots(self, tag="V4.6.8 refresh carton"):
+        """V4.6.8: new carton / slot coordinates while an egg is held (eggs in the view are ignored)"""
+        res = self.io.perceive_eggs(tag)
+        carton = res.get("carton")
+        if not carton:
+            return False
+        for s_ in carton.get("slots") or []:
+            sid = f"slot_{s_['slot_id']}"
+            sc = [float(v) for v in s_["center_base"]]
+            if sid in self.cam:
+                self.cam[sid].update(rim=np.array(sc, float), occupied=bool(s_.get("occupied")), raw=s_)
+        return True
 
     def plan_egg_place(self, source_egg="egg_1", target_slot="slot_1", **_):
         source_egg, target_slot = self._resolve_pair(source_egg, target_slot)
@@ -2148,29 +2256,63 @@ class RealEggSkills:
         except Exception as exc:
             return {"error": str(exc)}
 
-    def verify_egg_in_slot(self, target_slot=None, **_):
+    def verify_egg_in_slot(self, target_slot=None, looks=2, **_):
+        """V4.6.8 VERIFY BY RISE: the egg counts as placed when, on any of `looks` views from the main camera,
+        (a) the slot is occupied (cup middle >= 8 mm above its rim - measured from all depth pixels, an egg standing in
+        the cup is often not part of the carton mask), or (b) an egg is detected within 0.5 x pitch of the slot centre,
+        or (c) the cup middle rose >= 15 mm compared with the view before the place.  Look 1: arm back at the start pose;
+        look 2: 100 mm higher.  Every look and its evidence is logged."""
         target_slot = target_slot or (self.plan or {}).get("target_slot") or "slot_1"
-        if hasattr(self.io, "clear_view"):
-            self.io.clear_view(0, "verify_egg_in_slot")
-        res = self.io.perceive_eggs("verify_egg_in_slot")
-        carton = res.get("carton")
+        before = ((self.cam.get(target_slot) or {}).get("raw") or {}).get("rise") or {}
         sid_num = int(str(target_slot).split("_")[-1]) if "_" in str(target_slot) else 1
-        slot_info = None
-        for s in (carton or {}).get("slots") or []:
-            if int(s.get("slot_id", 0)) == sid_num:
-                slot_info = s
-                break
-        ok = bool(slot_info and slot_info.get("occupied"))
-        if not ok and res.get("eggs") and slot_info:
-            sc = np.asarray(slot_info["center_base"][:2], float)
-            for e in res["eggs"]:
-                if float(np.linalg.norm(np.asarray(e["center_base"][:2], float) - sc)) < 0.038:
-                    ok = True
+        ok, ev, res = False, [], {}
+        for look in range(max(1, int(looks))):
+            if hasattr(self.io, "clear_view"):
+                self.io.clear_view(look, "verify_egg_in_slot")
+            res = self.io.perceive_eggs("verify_egg_in_slot")
+            carton = res.get("carton")
+            slot_info = None
+            for s_ in (carton or {}).get("slots") or []:
+                if int(s_.get("slot_id", 0)) == sid_num:
+                    slot_info = s_
                     break
+            pm = (carton or {}).get("pitch_mm") or [47.0, 47.0]
+            near_lim = VERIFY_EGG_NEAR_FRAC * min(float(pm[0]), float(pm[1])) / 1000.0
+            rise = (slot_info or {}).get("rise") or {}
+            d_egg = None
+            if slot_info and res.get("eggs"):
+                sc = np.asarray(slot_info["center_base"][:2], float)
+                d_egg = min(float(np.linalg.norm(np.asarray(e["center_base"][:2], float) - sc)) for e in res["eggs"])
+            gain = (None if rise.get("core_top_mm") is None or before.get("core_top_mm") is None
+                    else round(float(rise["core_top_mm"]) - float(before["core_top_mm"]), 1))
+            why = []
+            if slot_info is None:
+                why.append("蛋托 / 槽位没识别到")
+            else:
+                if slot_info.get("occupied"):
+                    why.append(f"槽被占（槽心比槽口高 {rise.get('rise_mm')} mm）" if rise.get("rise_mm") is not None
+                               else "槽被占")
+                if d_egg is not None and d_egg <= near_lim:
+                    why.append(f"槽旁 {d_egg * 1000:.0f} mm 有鸡蛋")
+                if gain is not None and gain >= VERIFY_RISE_GAIN_MM:
+                    why.append(f"槽心比放蛋前高了 {gain:.0f} mm")
+            hit = slot_info is not None and len(why) > 0 and why[0] != "蛋托 / 槽位没识别到"
+            ev.append({"look": look + 1, "slot_found": slot_info is not None, "occupied": bool((slot_info or {}).get("occupied")),
+                       "rise_mm": rise.get("rise_mm"), "rise_gain_mm": gain,
+                       "nearest_egg_mm": None if d_egg is None else round(d_egg * 1000.0, 1)})
+            self.io.emit(f"[{'OK' if hit else 'INFO'}] [V4.6.8 VERIFY] 第 {look + 1} 次看 {target_slot}："
+                         + ("；".join(why) if hit else ("没有放好的证据（槽心-槽口 "
+                                                         f"{rise.get('rise_mm')} mm，放蛋前 {before.get('rise_mm')} mm；"
+                                                         f"最近的鸡蛋 {'-' if d_egg is None else f'{d_egg * 1000:.0f} mm'}）"
+                                                         if slot_info is not None else why[0])))
+            if hit:
+                ok = True
+                break
         if ok:
             self.stage = "VERIFIED"
         return self._res("verify_egg_in_slot", ok,
-                         {"target_slot": target_slot, "occupied": ok, "remaining_eggs": len(res.get("eggs") or [])},
+                         {"target_slot": target_slot, "occupied": ok, "looks": ev,
+                          "remaining_eggs": len(res.get("eggs") or [])},
                          reason=None if ok else "SLOT_EMPTY",
                          nxt=["return_to_safe_pose"] if ok else ["observe_scene"])
 
@@ -2199,23 +2341,124 @@ class RealEggSkills:
             return {"ok": False, "tool": name, "reason": "UNKNOWN_TOOL"}
         return fn(**(args or {}))
 
-    def scripted_episode(self, source="egg_1", target="slot_1"):
-        out = [self.run_tool("observe_scene", {})]
-        if not out[-1].get("ok"):
-            return out
-        out.append(self.run_tool("plan_egg_place", {"source_egg": source, "target_slot": target}))
-        if not out[-1].get("ok"):
-            return out
-        out.append(self.run_tool("pick_egg", {"source_egg": self.plan["source_egg"]}))
-        if not out[-1].get("ok"):
-            return out
-        out.append(self.run_tool("orient_for_slot", {"target_slot": self.plan["target_slot"]}))
-        if not out[-1].get("ok"):
-            return out
-        out.append(self.run_tool("place_egg_into_slot", {"target_slot": self.plan["target_slot"]}))
-        if not out[-1].get("ok"):
-            return out
-        out.append(self.run_tool("verify_egg_in_slot", {"target_slot": self.plan["target_slot"]}))
+    def scripted_episode(self, source="egg_1", target="slot_1", try_harder=False):
+        """one egg: observe -> plan -> pick -> orient -> place -> verify.  V4.6.8 TRY HARDER: every failed step is
+        retried with a different strategy before the episode gives up (see _one_egg)."""
+        out = []
+        self._one_egg(out, source, target, try_harder)
+        return out
+
+    def _try(self, out, name, args):
+        r = self.run_tool(name, args)
+        out.append(r)
+        return r
+
+    def _observe(self, out, try_harder):
+        r = self._try(out, "observe_scene", {})
+        n = 0
+        while try_harder and n < 2 and (not r.get("ok") or not (r.get("scene") or {}).get("carton")):
+            n += 1
+            self.io.emit(f"[INFO] [V4.6.8 TRY HARDER] 识别不完整 → 让开视线后再看（第 {n + 1} 次）")
+            if hasattr(self.io, "clear_view"):
+                self.io.clear_view(n, "observe_scene")
+            r = self._try(out, "observe_scene", {})
+        return r
+
+    def _one_egg(self, out, source, target, try_harder, max_pick=None, observed=False):
+        """-> True when the egg is verified in a slot.  Try-harder strategies: observe again from a clearer view;
+        plan with another egg / slot; a failed pick -> open, back up, look again, re-plan, pick again (2x); a failed
+        orient / insert -> look at the carton again, re-plan the place to the same slot, then to the other free slots
+        (egg stays in the gripper); a failed verify -> a third look from higher."""
+        if not observed:
+            r = self._observe(out, try_harder)
+            if not r.get("ok"):
+                return False
+        r = self._try(out, "plan_egg_place", {"source_egg": source, "target_slot": target})
+        if not r.get("ok") and try_harder:
+            for egg in [e for e in self.source_eggs() if e != source]:
+                self.io.emit(f"[INFO] [V4.6.8 TRY HARDER] {source} 规划失败（{r.get('reason')}）→ 换鸡蛋 {egg}")
+                r = self._try(out, "plan_egg_place", {"source_egg": egg, "target_slot": target})
+                if r.get("ok"):
+                    break
+        if not r.get("ok"):
+            return False
+        picks = (3 if try_harder else 1) if max_pick is None else max_pick
+        for k in range(picks):
+            r = self._try(out, "pick_egg", {"source_egg": self.plan["source_egg"]})
+            if r.get("ok"):
+                break
+            if k + 1 >= picks or self.held:
+                return False
+            self.io.emit(f"[INFO] [V4.6.8 TRY HARDER] 夹取失败（{r.get('reason')}）→ 张开、退回、重新识别、重新规划后再夹"
+                         f"（第 {k + 2} 次）")
+            self.io.gripper_open(EGG_OPEN_MM)
+            self.io.go_home("V4.6.8 try harder: back before a new pick")
+            r2 = self._observe(out, try_harder)
+            if not r2.get("ok") or not self.source_eggs():
+                return False
+            r2 = self._try(out, "plan_egg_place", {"source_egg": self.source_eggs()[0], "target_slot": target})
+            if not r2.get("ok"):
+                return False
+        tried = [self.plan["target_slot"]]
+        while True:
+            r = self._try(out, "orient_for_slot", {"target_slot": self.plan["target_slot"]})
+            if r.get("ok"):
+                r = self._try(out, "place_egg_into_slot", {"target_slot": self.plan["target_slot"]})
+            if r.get("ok"):
+                break
+            if not try_harder or not self.held:
+                return False
+            # look at the carton again (fresh slot coordinates), same slot first, then the other free slots
+            self.refresh_slots()
+            nxt = [sl for sl in [self.plan["target_slot"]] + self.free_slots() if sl not in tried[1:]]
+            done = False
+            for sl in nxt:
+                if tried.count(sl) >= 2:
+                    continue
+                if self.replan_place(sl):
+                    tried.append(sl)
+                    done = True
+                    break
+            if not done or len(tried) > 4:
+                self.io.emit("[WARN] [V4.6.8 TRY HARDER] 没有别的可行放蛋方案了")
+                return False
+        r = self._try(out, "verify_egg_in_slot", {"target_slot": self.plan["target_slot"],
+                                                  "looks": 3 if try_harder else 2})
+        return bool(r.get("ok"))
+
+    def fill_carton_episode(self, try_harder=False, max_eggs=12):
+        """V4.6.8 FILL CARTON: put the eggs on the table into the empty slots one after the other.  Each round looks
+        again (eggs already in the carton are not picked again, occupied slots are not used), takes the free slot
+        FARTHEST from the robot base first (the gripper does not pass over eggs it placed), any reachable egg; the
+        jaws never point at an egg already standing next to the slot.  Ends when no egg is left on the table, no slot
+        is free, or FILL_MAX_FAILS eggs could not be placed."""
+        out, placed, fails = [], [], 0
+        for _round in range(int(max_eggs)):
+            r = self._observe(out, try_harder)
+            if not r.get("ok"):
+                break
+            eggs, free = self.source_eggs(), self.free_slots()
+            self.io.emit(f"[INFO] [V4.6.8 FILL] 第 {_round + 1} 轮：桌上鸡蛋 {len(eggs)} 个 · 空槽 {len(free)} 个 · "
+                         f"已放 {len(placed)} 个 · 蛋托里 {len(getattr(self, 'eggs_in_carton', []) or [])} 个")
+            if not eggs or not free:
+                break
+            free.sort(key=lambda k: -float(np.linalg.norm(self.cam[k]["rim"][:2])))
+            self.held, self.stage, self.plan = None, "OBSERVED", None
+            ok = self._one_egg(out, eggs[0], free[0], try_harder, observed=True)
+            if ok:
+                placed.append(self.plan["target_slot"])
+            else:
+                fails += 1
+                if self.held:
+                    self.io.emit("[FAIL] [V4.6.8 FILL] 鸡蛋还在夹爪里，停止（请人工处理）")
+                    break
+                if fails >= (FILL_MAX_FAILS if try_harder else 1):
+                    self.io.emit(f"[FAIL] [V4.6.8 FILL] {fails} 个鸡蛋没放成功 → 停止")
+                    break
+            if not self.held:
+                self._try(out, "return_to_safe_pose", {})
+        self.io.emit(f"[{'OK' if placed else 'WARN'}] [V4.6.8 FILL] 结束：放好 {len(placed)} 个 {placed} · 失败 {fails} 次")
+        self.fill_result = {"placed": placed, "fails": fails}
         return out
 
 
@@ -2447,22 +2690,39 @@ def run_hover(io, source, target, knobs=None, skill=None, recorder=None, scene="
     return {"ok": ok, "results": res, "steps": steps, "skills": sk}
 
 
-def run_execute(io, source, target, knobs=None, skill=None, agent=None, llm_cfg=None, recorder=None, scene="stack_cups"):
-    """mode 3: the full task - scripted (observe, plan, pick, place, verify, back) or the LLM agent"""
+def run_execute(io, source, target, knobs=None, skill=None, agent=None, llm_cfg=None, recorder=None, scene="stack_cups",
+                try_harder=False, fill_all=False):
+    """mode 3: the full task - scripted (observe, plan, pick, place, verify, back) or the LLM agent.
+    V4.6.8: try_harder (eggs: retry strategies per step; LLM: told not to give up + twice the tool steps),
+    fill_all (eggs: one egg after the other into the empty slots)."""
     import NERO_V362_Cup_Skills as CK
     sk = _record(make_skills(io, knobs, skill, scene=scene), io, recorder)
     io.home_q = io.current_q()
+    if scene == "fill_egg_holder" and fill_all:
+        out = sk.fill_carton_episode(try_harder=try_harder)
+        if not getattr(sk, "held", None):
+            out.append(sk.run_tool("return_to_safe_pose", {}))
+        fr = getattr(sk, "fill_result", {}) or {}
+        return {"ok": bool(fr.get("placed")) and not fr.get("fails"), "results": out, "skills": sk, "fill": fr}
     if agent is None or scene in ("fill_egg_holder", "sort_items"):
-        out = sk.scripted_episode(source, target)
+        out = (sk.scripted_episode(source, target, try_harder=try_harder) if scene == "fill_egg_holder"
+               else sk.scripted_episode(source, target))
         held = getattr(sk, "held", None)
         if not held:
             out.append(sk.run_tool("return_to_safe_pose", {}))
         ok = any(r.get("tool") in ("verify_stack", "verify_egg_in_slot") and r.get("ok") for r in out)
         return {"ok": ok, "results": out, "skills": sk}
     c = dict(llm_cfg or {})
-    final = CK.run_cup_task(agent, sk, c.get("task") or f"Stack {source} into {target}", c.get("model"),
+    task = c.get("task") or f"Stack {source} into {target}"
+    steps = max(10, min(60, int(c.get("max_tool_steps", 30))))
+    if try_harder:                                   # V4.6.8 TRY HARDER for the LLM agent
+        task += ("\n\nTRY HARDER: do not report failure early. When a step fails, read its reason and try a different "
+                 "strategy (observe the scene again, re-plan with other angles / another target, move to a clearer "
+                 "view, retry the step) before giving up. Only give up when several different strategies failed.")
+        steps = min(90, steps * 2)
+    final = CK.run_cup_task(agent, sk, task, c.get("model"),
                             c.get("api_key", ""), c.get("reasoning_effort", "low"),
-                            max(10, min(60, int(c.get("max_tool_steps", 30)))), emit=io.emit, dry_run=False)
+                            steps, emit=io.emit, dry_run=False)
     return {"ok": sk.stage == "VERIFIED", "final": final, "skills": sk}
 
 
@@ -2607,9 +2867,16 @@ def overlay_dets(res):
         txt, col = KIND_TEXT.get(e.get("kind"), (str(e.get("kind")), "#ff9100"))
         h = e.get("height_mm")
         top = min(e["contour"], key=lambda p: p[1])
-        out.append({"contour": e["contour"], "color": col, "anchor": top,
-                    "label": f"{e.get('det_id', '')} {txt}" + (f" {h:.0f}mm" if h is not None else "")
-                             + f" {e.get('conf', 0):.2f}"})
+        kind, did = str(e.get("kind") or ""), str(e.get("det_id") or "")
+        if kind in ("slot_free", "slot_occ"):          # V4.6.8 SHORT LABELS: a slot = its number only
+            lab, small = did.split("_")[-1], True
+        elif kind == "egg":
+            lab, small = f"{did.replace('egg_', 'e')}", True
+        elif kind == "carton":
+            lab, small = f"{txt} {e.get('rows', '')}×{e.get('cols', '')}".replace(" ×", ""), False
+        else:
+            lab, small = f"{did} {txt}" + (f" {h:.0f}mm" if h is not None else "") + f" {e.get('conf', 0):.2f}", False
+        out.append({"contour": e["contour"], "color": col, "anchor": top, "label": lab, "small": small})
     return out
 
 
@@ -2918,6 +3185,9 @@ class RealCupTaskTabUI:
         self.v_speed = tk.StringVar(value=str(self.st.get("speed_mult") or "1X"))
         ttk.Combobox(r4, textvariable=self.v_speed, values=SPEED_CHOICES, width=5, state="readonly").pack(side="right")
         ttk.Label(r4, text="速度").pack(side="right", padx=(8, 2))
+        # V4.6.8 TRY HARDER (left of the speed multiplier): do not give up early, try other strategies per step
+        self.v_try_harder = tk.BooleanVar(value=bool(self.st.get("try_harder", False)))
+        ttk.Checkbutton(r4, text="Try harder", variable=self.v_try_harder).pack(side="right", padx=(8, 0))
         # V4.6.2 TEACH BAR: 「进入示教模式」 「退出示教模式」 「高级」(gravity compensation) - same bar as 「Smol VLA实机任务」
         self.teach_bar = None
         if self.pipe is not None and hasattr(self.pipe, "set_teach_mode"):
@@ -3085,7 +3355,7 @@ class RealCupTaskTabUI:
                                        dash=(4, 3) if old else None)
             if d.get("anchor"):
                 cv_.create_text(d["anchor"][0] * sx, d["anchor"][1] * sy - 2, text=d["label"], fill=d["color"],
-                                    anchor="s", font=("TkDefaultFont", 8, "bold"))
+                                    anchor="s", font=("TkDefaultFont", 7 if d.get("small") else 8, "bold"))
         if age is not None and (self.overlay.get("dets") or self.overlay.get("cups")):
             cv_.create_text(6, self.DH - 4, text=f"识别于 {age:.1f} s 前" + ("（旧）" if old else ""),
                                 fill="#ffab40" if old else "#b2ff59", anchor="sw", font=("TkDefaultFont", 9, "bold"))
@@ -3093,6 +3363,9 @@ class RealCupTaskTabUI:
             uv = proj(c["rim_xyz_m"])
             if uv:
                 u, v = uv
+                if str(name).startswith(("slot_", "egg_")):  # V4.6.8: number already drawn by the detection label
+                    cv_.create_oval(u - 3, v - 3, u + 3, v + 3, outline="#00e5ff", width=1)
+                    continue
                 cv_.create_oval(u - 6, v - 6, u + 6, v + 6, outline="#00e5ff", width=2)
                 cv_.create_text(u + 8, v - 8, text=f"{name} {c['kind']}", fill="#00e5ff", anchor="sw",
                                     font=("TkDefaultFont", 9, "bold"))
@@ -3322,6 +3595,7 @@ class RealCupTaskTabUI:
                  model=self.v_model.get().strip(), effort=self.v_effort.get(), task=self.v_task.get().strip(),
                  use_llm=bool(self.v_use_llm.get()), cup_prompt=self.v_cup_prompt.get().strip() or "cup",
                  show_tips=bool(self.v_tips.get()), speed_mult=self.v_speed.get(),
+                 try_harder=bool(self.v_try_harder.get()) if hasattr(self, "v_try_harder") else False,
                  record_video=bool(self.v_video.get()), vision_review=bool(self.v_vision.get()),
                  task_scene=(self.v_task_scene.get() if hasattr(self, "v_task_scene") else "stack_cups"))
         try:
@@ -3488,6 +3762,7 @@ class RealCupTaskTabUI:
         mult = float(str(self.v_speed.get() or "1X").rstrip("Xx") or 1)      # V3.69 SPEED MULTIPLIER
         mc, speed_desc = apply_speed(mc, mult)
         record_video = bool(self.v_video.get())
+        try_harder = bool(self.v_try_harder.get())          # V4.6.8 (read in the Tk thread)
         self._save()
         self.refresh_skill()
         scene = self.v_task_scene.get() if hasattr(self, "v_task_scene") else "stack_cups"
@@ -3596,7 +3871,12 @@ class RealCupTaskTabUI:
                         agent = AG.NeroLLMAgent(emit=self._log, tool_runner=None)
                         agent.provider = llm["provider"]
                         self.agent = agent
-                    out = run_execute(io, source, target, knobs, skill, agent=agent, llm_cfg=llm, recorder=rec, scene=scene)
+                    fill_all = scene == "fill_egg_holder" and is_fill_all_task(task)   # V4.6.8 FILL CARTON
+                    if try_harder or fill_all:
+                        self._log(f"[INFO] [V4.6.8] Try harder {'开' if try_harder else '关'} · "
+                                  f"{'连续放满蛋托（每轮重新识别）' if fill_all else '单个鸡蛋'}")
+                    out = run_execute(io, source, target, knobs, skill, agent=agent, llm_cfg=llm, recorder=rec, scene=scene,
+                                      try_harder=try_harder, fill_all=fill_all)
             except Exception as exc:
                 err = exc
             finally:

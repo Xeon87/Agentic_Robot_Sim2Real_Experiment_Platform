@@ -2,7 +2,7 @@
 """V4.6.4 GUI test (needs tkinter + DISPLAY; skips otherwise): the whole console is started; Camera调试 -> 视觉定位
 carries the 视觉精度验证 panel (3 modes, hover height 10 mm, 识别目标 / 合爪并悬停 / 抬起 / 停止, dx / dy / 备注,
 记录偏差), the gripper is taken from the Agentic tab at click time, the Camera log keeps its V4.6.3 height,
-every control is inside the default 1420x1000 window; without a camera the buttons refuse with the
+V4.6.8: the Camera tab scrolls (scrolled to the bottom here), every control is inside the default 1420x1000 window; without a camera the buttons refuse with the
 reason (nothing moves); 记录偏差 without a hover result asks for one first; dx / dy must be numbers."""
 import gc
 import os
@@ -55,6 +55,15 @@ def loop(self, n=0):
             if cnb.tab(t, "text") == "视觉定位":
                 cnb.select(t)
         RES["panel"] = panel
+        # V4.6.8: the Camera tab scrolls -> scroll to the bottom (the panel is the last thing on 视觉定位)
+        w = cnb
+        while w is not None and w.winfo_class() != "Canvas":
+            w = w.master
+        RES["cam_canvas"] = w
+        if w is not None:
+            self.update()
+            RES["scroll_before"] = w.yview()
+            w.yview_moveto(1.0)
         self.after(1500, step2)
 
     def step2():
@@ -98,7 +107,7 @@ def loop(self, n=0):
             connected = True
         fake_io = types.SimpleNamespace(grip=None, stop_ev=types.SimpleNamespace(clear=lambda: None))
         p.vc = types.SimpleNamespace(io=fake_io, targets={"egg_1": {}},
-                                     run=lambda mode, tid, h: seen.update(grip=fake_io.grip) or
+                                     run=lambda mode, tid, h, **k: seen.update(grip=fake_io.grip, kw=k) or
                                      {"ok": False, "row": {"mode": mode, "target": tid}, "error": "test"})
         p._blocked = lambda motion=True: ""
         p.v_target.set("egg_1")
@@ -107,6 +116,7 @@ def loop(self, n=0):
         p.on_go()
         p.worker.join(5)
         RES["grip_seen"] = seen.get("grip")
+        RES["refresh_kw"] = (seen.get("kw") or {}).get("refresh")
         p.rct.grip = types.SimpleNamespace(connected=False)
         p.on_go()
         RES["grip_off"] = p.v_status.get()
@@ -141,7 +151,10 @@ assert "vision_check/vision_check_" in RES["record_ok"] and "① 只用主相机
 assert RES["labels_ok"] == [], RES["labels_ok"]
 assert type(RES["grip_seen"]).__name__ == "FakeGrip", RES["grip_seen"]
 assert "夹爪没有连接" in RES["grip_off"], RES["grip_off"]
-assert RES["cam_log_h"] >= 33, RES["cam_log_h"]                  # V4.6.3: 33 px; V4.6.4 first build: 1 px          # every row / text line complete and inside the window
+assert RES["refresh_kw"] is True, RES["refresh_kw"]           # V4.6.8: recognize again before the hover (default)
+assert RES["cam_log_h"] >= 33, RES["cam_log_h"]                  # V4.6.3: 33 px; V4.6.4 first build: 1 px
+assert RES["cam_canvas"] is not None, "V4.6.8: the Camera tab must sit in a scrolling canvas"
+assert RES["scroll_before"][1] < 1.0, RES["scroll_before"]           # page taller than the window -> it scrolls          # every row / text line complete and inside the window
 print("[G1] 视觉定位 -> 视觉精度验证: all controls inside the 1420x1000 window; no camera -> refused with the reason; "
       "dx / dy recorded to NERO_CALIB_DIR/vision_check + per-mode summary")
 print("ALL V4.6.4 GUI TESTS PASSED")

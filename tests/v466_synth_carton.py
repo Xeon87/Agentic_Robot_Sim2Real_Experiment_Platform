@@ -37,7 +37,10 @@ def carton_height(u, v, pc=46.0, pr=47.0, R=2, C=3, flange=12.0, top=30.0, cup_r
     return h
 
 
-def scene(centre=(-0.380, 0.060), yaw_deg=20.0, cam=(-0.10, -0.05, 0.78), spill_px=3, pc=46.0, pr=47.0, extra_mm=0.0):
+def scene(centre=(-0.380, 0.060), yaw_deg=20.0, cam=(-0.10, -0.05, 0.78), spill_px=3, pc=46.0, pr=47.0, extra_mm=0.0,
+          eggs_in=()):
+    """eggs_in: template slot indices (0..5, row-major, carton frame) with an egg standing in the cup (V4.6.8); the
+    egg pixels are NOT part of the carton mask (as YOLO often does)"""
     import cv2
     T = look_at(cam, [centre[0], centre[1], 0.0])
     yaw = math.radians(yaw_deg)
@@ -48,7 +51,17 @@ def scene(centre=(-0.380, 0.060), yaw_deg=20.0, cam=(-0.10, -0.05, 0.78), spill_
     v = (-dx * math.sin(yaw) + dy * math.cos(yaw)) * 1000.0
     h = carton_height(u, v, pc, pr, extra_mm=extra_mm)
     is_c = ~np.isnan(h)
-    Z = np.where(is_c, h / 1000.0, 0.0)
+    is_egg = np.zeros(h.shape, bool)
+    for k in eggs_in:
+        r_, c_ = divmod(int(k), 3)
+        cu, cv = (c_ + 0.5 - 1.5) * pc, (r_ + 0.5 - 1.0) * pr
+        rr = np.hypot(u - cu, v - cv)
+        on = rr < 21.0
+        top = 5.0 + 27.5 + 27.5 * np.sqrt(np.clip(1.0 - (rr / 21.0) ** 2, 0.0, 1.0))
+        h = np.where(on, np.maximum(np.nan_to_num(h, nan=0.0), top), h)
+        is_egg |= on
+    is_c = is_c & ~is_egg
+    Z = np.where(is_c | is_egg, np.nan_to_num(h) / 1000.0, 0.0)
     P = np.stack([X.ravel(), Y.ravel(), Z.ravel()], 1)
     Ti = np.linalg.inv(T)
     pc_ = P @ Ti[:3, :3].T + Ti[:3, 3]

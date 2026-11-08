@@ -2265,6 +2265,26 @@ def fit_carton_template(s_mm, t_mm, h_mm, R, C, pc_mm, pr_mm, phi0_rad, centre0_
             "per_slot": [round(v, 1) for v in per], "n_cavities": int(sum(v >= cav_mm for v in per)), "bowl": bw}
 
 
+SLOT_EGG_RISE_MM = 8.0          # V4.6.8: cup middle this much ABOVE the rim ring = an egg stands in the cup
+
+
+def slot_rise(pts, centre_uv_mm, pitch_mm, min_core=12):
+    """V4.6.8: (u, v, h) points in carton coordinates (mm) -> {core_top_mm: 90th percentile height of the cup middle
+    (r <= 0.30 x pitch), rim_mm: median height of the rim ring (0.36-0.52 x pitch), rise_mm: core_top - rim, n_core}.
+    Empty cup: rise strongly negative (bowl); an egg standing in it: its top is well above the rim (rise > 0)."""
+    import numpy as np
+    u, v, h = pts
+    r = np.hypot(u - centre_uv_mm[0], v - centre_uv_mm[1])
+    core = r <= 0.30 * pitch_mm
+    ring = (r >= 0.36 * pitch_mm) & (r <= 0.52 * pitch_mm)
+    n_core = int(core.sum())
+    if n_core < min_core or int(ring.sum()) < min_core:
+        return {"core_top_mm": None, "rim_mm": None, "rise_mm": None, "n_core": n_core}
+    ct = float(np.percentile(h[core], 90))
+    rm = float(np.median(h[ring]))
+    return {"core_top_mm": round(ct, 1), "rim_mm": round(rm, 1), "rise_mm": round(ct - rm, 1), "n_core": n_core}
+
+
 def save_carton_diag(rgb_crop, mask_crop, mask_inner, slot_px, slot_scores, bowl, slot_st_mm, rect_st_mm, title,
                      folder=None, keep=CARTON_DIAG_KEEP):
     """V4.6.6: one PNG per carton fit (left: colour crop + YOLO mask outline (green) + eroded mask used (cyan) +
@@ -2626,6 +2646,19 @@ def locate_egg_holder(dets2d, rgb, depth_m, K, T_base_cam, table_z=None, fence_p
         "slot_refine": refine_info,
     }
 
+    # V4.6.8 SLOT OCCUPANCY BY RISE: all valid depth pixels of the crop (not only the carton mask - an egg
+    # standing in a cup is often NOT part of the YOLO carton mask) -> per slot: top of the cup middle vs the rim ring
+    crop_pts = None
+    if tmpl_info is not None:
+        try:
+            vv_c, uu_c = np.nonzero(dc > 0)
+            zz_c = dc[vv_c, uu_c]
+            if len(zz_c) >= 60:
+                P_c = YP._pix_to_base((uu_c + cx0).astype(float), (vv_c + cy0).astype(float), zz_c.astype(float), K, T)
+                rel_c = P_c - centre_pl
+                crop_pts = ((rel_c @ u_long) * 1000.0, (rel_c @ v_short) * 1000.0, (P_c @ n_vec - d_pl) * 1000.0)
+        except Exception:
+            crop_pts = None
     slots = []
     occ_override = set(grid_info.get("occupied_slots") or [])
     egg_pts = [e["xyz_m"][:2] for e in (existing_eggs or []) if e.get("xyz_m") and e.get("status") in ("egg", "untrusted")]
@@ -2643,6 +2676,9 @@ def locate_egg_holder(dets2d, rgb, depth_m, K, T_base_cam, table_z=None, fence_p
             cell_h_mm = float(np.percentile(hs[in_cell], 85) * 1000.0) if (cov >= 0.35 and in_cell.sum() >= 8) else (h_top_m * 600.0)
             has_egg_near = any(math.hypot(s_xyz[0] - ex_, s_xyz[1] - ey_) < 0.42 * min(pl_m, pw_m) for ex_, ey_ in egg_pts)
             occ = (slot_idx in occ_override) or (sid in occ_override) or has_egg_near or (cell_h_mm > h_top_m * 1000.0 + 9.0)
+            rise = slot_rise(crop_pts, slot_uv_mm[slot_idx - 1], min(pl_m, pw_m) * 1000.0) if crop_pts is not None else None
+            if rise is not None and rise["rise_mm"] is not None and rise["rise_mm"] >= SLOT_EGG_RISE_MM:
+                occ = True
             uv = CAM.project(CAM.T_apply(CAM.T_inv(T.tolist()), s_xyz.tolist()), K)
             bx = [round(uv[0] - 14), round(uv[1] - 14), round(uv[0] + 14), round(uv[1] + 14)] if uv else [round(v) for v in d["box"]]
             slots.append({
@@ -2656,6 +2692,7 @@ def locate_egg_holder(dets2d, rgb, depth_m, K, T_base_cam, table_z=None, fence_p
                 "confidence": holder_row["confidence"],
                 "xyz_m": [round(float(v), 5) for v in s_xyz],
                 "height_mm": round(cell_h_mm, 1),
+                "rise": rise if crop_pts is not None else None,
                 "yolo": {"conf": round(float(d["conf"]), 3), "box": bx, "cls": 0, "name": sid},
                 "reasons": list(warn),
                 "notes": [f"第 {r_i + 1} 行第 {c_i + 1} 列 · {'有蛋' if occ else '空槽'}"],

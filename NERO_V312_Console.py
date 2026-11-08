@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.6.6"
+VERSION = "V4.6.8"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -337,6 +337,7 @@ def install_crash_log(log_dir, root=None):
 #     printed right before such an abort (Tcl / Xlib / glibc) was so far only on the terminal.
 MARKER_V463 = "V4.6.3 NATIVE CRASH GUARD"
 MARKER_V466 = "V4.6.6 NATIVE CRASH TRACE + TK INPUT METHOD OFF"
+MARKER_V468 = "V4.6.8 CAMERA TAB SCROLL"
 
 
 def v463_xinitthreads():
@@ -907,13 +908,31 @@ def run_console(initial_tab="sim"):
 
     # ---- V3.25 CAMERA TAB (D435i: live view, depth check, hand-eye calibration, visual locating)
     import NERO_V325_Camera as CAM
-    cam_outer = ttk.Frame(nb, padding=6)
+    # V4.6.8 CAMERA TAB SCROLL (like 实机NERO调试): the whole Camera tab scrolls (scroll bar + mouse wheel); the
+    # camera monitors (777 px) + the tallest sub-page + the log no longer have to fit the window
+    cam_outer = ttk.Frame(nb)
     nb.add(cam_outer, text="Camera调试")
-    cam_main = ttk.Frame(cam_outer)
+    cam_canvas = tk.Canvas(cam_outer, highlightthickness=0)
+    cam_sb = ttk.Scrollbar(cam_outer, orient="vertical", command=cam_canvas.yview)
+    cam_canvas.configure(yscrollcommand=cam_sb.set)
+    cam_sb.pack(side="right", fill="y")
+    cam_canvas.pack(side="left", fill="both", expand=True)
+    cam_page = ttk.Frame(cam_canvas, padding=6)
+    cam_win = cam_canvas.create_window(0, 0, window=cam_page, anchor="nw")
+    cam_page.bind("<Configure>", lambda _e: cam_canvas.configure(scrollregion=cam_canvas.bbox("all")))
+    cam_canvas.bind("<Configure>", lambda e: cam_canvas.itemconfigure(cam_win, width=e.width))
+
+    def _cam_wheel(e):
+        if e.widget.winfo_class() in ("Scale", "Text", "TCombobox", "Treeview", "Listbox"):
+            return                                   # these scroll themselves
+        cam_canvas.yview_scroll(-1 if (getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0) else 1, "units")
+    for seq in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
+        cam_canvas.bind_all(seq, lambda e: _cam_wheel(e) if str(e.widget).startswith(str(cam_outer)) else None, add="+")
+    cam_main = ttk.Frame(cam_page)
     cam_main.pack(fill="both", expand=True)
-    cam_bar = ttk.Frame(cam_outer)
+    cam_bar = ttk.Frame(cam_page)
     cam_bar.pack(fill="x")
-    cam_log = make_log(cam_outer)
+    cam_log = make_log(cam_page)
     cam_log.configure(height=8)
     ttk.Button(cam_bar, text="Copy Log", command=lambda: copy_text(cam_log)).pack(side="right")
 
