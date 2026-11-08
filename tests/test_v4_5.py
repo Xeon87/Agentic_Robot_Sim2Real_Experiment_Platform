@@ -286,7 +286,7 @@ class TestV45Egg(unittest.TestCase):
 
     def test_t9_markers_and_crash_hardening(self):
         with open(os.path.join(HERE, "VERSION")) as f:
-            self.assertEqual(f.read().strip(), "V4.5")
+            self.assertTrue(f.read().strip().startswith("V4.5"))
         self.assertEqual(RT.MARKER_V45, "V4.5 EGG PLACE ACCURACY + FINGERTIP Z SAFETY")
         tab = open(os.path.join(HERE, "NERO_V4_Console_Tab.py"), encoding="utf-8").read()
         self.assertIn('self.q.put(("apply_env", st["layout"]))', tab)
@@ -303,6 +303,25 @@ class TestV45Egg(unittest.TestCase):
             self.assertEqual(ST.apply_to_process_env(L), [])     # second call writes nothing
         finally:
             os.environ.pop("NERO_DRIVE_ROOT", None)
+
+
+    def test_t10_v451_startup_crash_hotfix(self):
+        """V4.5.1: the console crashed (segfault in Tk) while the VLA tab built its widgets at start-up."""
+        con = open(os.path.join(HERE, "NERO_V312_Console.py"), encoding="utf-8").read()
+        self.assertIn("V4.5.1 LAZY VLA TAB", con)
+        self.assertIn('os.environ.get("NERO_NO_VLA_TAB", "0") != "1"', con)
+        start = con.index("V4.5.1 LAZY VLA TAB")
+        block = con[start:con.index("def start_job(name, fn, force=False):")]
+        self.assertIn("def _build_vla_tab", block)           # built on first open, not at start-up
+        self.assertIn("<<NotebookTabChanged>>", block)
+        sh = open(os.path.join(HERE, "start_nero.sh"), encoding="utf-8").read()
+        self.assertIn("--no-vla) export NERO_NO_VLA_TAB=1", sh)
+        tab = open(os.path.join(HERE, "NERO_V4_Console_Tab.py"), encoding="utf-8").read()
+        emoji = [c for c in tab if ord(c) > 0xFFFF or 0x2600 <= ord(c) <= 0x27BF and c not in "✓✗⚠"
+                 or 0x2B00 <= ord(c) <= 0x2BFF or 0x23E9 <= ord(c) <= 0x23FA or ord(c) == 0x23CF]
+        self.assertEqual(emoji, [])                          # no colour-emoji glyphs (old libXft on Ubuntu 22.04)
+        init = tab[tab.index("def __init__"):tab.index("def _log(")]
+        self.assertNotIn("ST.apply_to_process_env()", init)  # os.environ only from _tick, after the widgets exist
 
 
 if __name__ == "__main__":

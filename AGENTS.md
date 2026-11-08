@@ -1,7 +1,7 @@
 # NERO 项目开发与交接文档（V3.82 · Sim2Real 与自动寻优路线版）
 
 > 放在仓库根目录，命名为 `AGENTS.md`（Codex / 后续开发 Agent 会自动读取）。
-> 更新时间：2026-11-05。当前已交付最新版本：**V4.5**（仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`）。
+> 更新时间：2026-11-05。当前已交付最新版本：**V4.5.1**（仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`）。
 > 接手者请在做任何修改前通读本文件。本文件里“用户”指项目所有者 Jimmy。
 
 ## 0. 一句话现状
@@ -42,6 +42,8 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 - **V4.4（2026-11-08）**：用户本机磁盘不够，**LeRobot + SmolVLA 的一切（venv、uv 的 Python 3.12、HF 缓存、smolvla_base、示教数据、导出的 LeRobotDataset、lerobot-train 训练输出、日志）都放在卷标 `EMBODIED_AI` 的移动硬盘 `<盘>/nero_lerobot/`**（`NERO_V44_Storage.py`）。控制台进程（/usr/bin/python3 3.10）**不导入** lerobot / 硬盘上的 torch；SmolVLA 推理在 `NERO_V44_SmolVLA_Worker.py` 子进程（硬盘 venv 的 Python，`-I`，去掉 ROS PYTHONPATH）。硬盘不在时大文件操作一律拒绝，不许写到本机磁盘。LeRobot ≥ 0.5 需要 Python ≥ 3.12（默认用 uv 把 3.12 装到硬盘；失败退回系统 3.10 → LeRobot 0.4.4）。
 
 - **V4.5（2026-11-08）**：实机鸡蛋任务（`RealEggSkills`）修正：夹蛋时测量蛋心在夹爪系的位置并在放蛋时复用（旧常数 `EGG_HELD_CENTER_Y_M=8.5 mm` 是错的，实际 ~20 mm），鸡蛋**下端**对准槽心，先试 ±90° 立蛋，转腕前腕部相机俯视复测槽位；蛋托槽位由深度凹坑拟合（`refine_slot_grid`，可选 `config/egg_carton.json` 实测槽距）。**安全区 z 检查的工具点是 SO-101 最低指尖**（不是胶垫中心）：规划 ≥ 桌面 + 5 mm，执行 ≥ 3 mm；桌面取相机 / 安全区较高者，差 > 15 mm 拒绝。V4.4 闪退加固：SmolVLA 加载不在 Tk 主线程，`os.environ` 只在主线程写。
+
+- **V4.5.1（2026-11-08）**：用户的 V4.5 控制台启动即段错误（Tk 内部，VLA 页第 0 区创建控件时）。VLA 页改为第一次打开才创建，`./start_nero.sh --no-vla` 可完全跳过；该页去掉全部 emoji（Ubuntu 22.04 libXft 2.3.4 + 彩色 emoji 是最可疑原因，未证实）。**GUI 文字不要再用 emoji。**
 
 ## 1. 用户的沟通规则（必须遵守，原话优先）
 

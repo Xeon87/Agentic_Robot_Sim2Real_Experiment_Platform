@@ -93,10 +93,8 @@ class VLALeRobotTabUI:
 
         self.q: queue.Queue = queue.Queue()
         # V4.4: point HF / LeRobot / dataset / checkpoint paths at the EMBODIED_AI drive before anything else
-        try:
-            ST.apply_to_process_env()
-        except Exception:
-            pass
+        # V4.5.1: os.environ is changed only from _tick (Tk main thread, after the widgets exist)
+        self.q.put(("apply_env", ST.layout()))
         self.job = ST.BackgroundJob(ST.layout(), log=self._log)
         self._job_seen_running = False
         self._venv_st: Dict[str, Any] = {}
@@ -172,16 +170,16 @@ class VLALeRobotTabUI:
         )
         d1 = ttk.Frame(drv_f)
         d1.pack(fill="x", padx=6, pady=1)
-        ttk.Button(d1, text="🔄 检测硬盘", command=self.on_drive_refresh).pack(side="left", padx=(0, 2))
+        ttk.Button(d1, text="检测硬盘", command=self.on_drive_refresh).pack(side="left", padx=(0, 2))
         ttk.Button(d1, text=f"挂载 {ST.DRIVE_LABEL}", command=self.on_drive_mount).pack(side="left", padx=2)
-        ttk.Button(d1, text="📁 初始化目录", command=self.on_drive_init).pack(side="left", padx=2)
-        self.btn_install = ttk.Button(d1, text="🛠 安装 LeRobot+SmolVLA 到移动硬盘", command=self.on_install_env)
+        ttk.Button(d1, text="初始化目录", command=self.on_drive_init).pack(side="left", padx=2)
+        self.btn_install = ttk.Button(d1, text="安装 LeRobot+SmolVLA 到移动硬盘", command=self.on_install_env)
         self.btn_install.pack(side="left", padx=2)
-        ttk.Button(d1, text="🧪 验证环境", command=self.on_verify_env).pack(side="left", padx=2)
-        ttk.Button(d1, text="⏹ 停止后台任务", command=self.on_stop_job).pack(side="left", padx=2)
-        ttk.Button(d1, text="📂 打开存储目录", command=self.on_open_storage).pack(side="left", padx=2)
-        ttk.Button(d1, text="🧹 本机旧文件→硬盘", command=self.on_migrate_legacy).pack(side="left", padx=2)
-        ttk.Button(d1, text="⏏ 安全移除硬盘", command=self.on_eject_drive).pack(side="right", padx=2)
+        ttk.Button(d1, text="验证环境", command=self.on_verify_env).pack(side="left", padx=2)
+        ttk.Button(d1, text="停止后台任务", command=self.on_stop_job).pack(side="left", padx=2)
+        ttk.Button(d1, text="打开存储目录", command=self.on_open_storage).pack(side="left", padx=2)
+        ttk.Button(d1, text="本机旧文件→硬盘", command=self.on_migrate_legacy).pack(side="left", padx=2)
+        ttk.Button(d1, text="安全移除硬盘", command=self.on_eject_drive).pack(side="right", padx=2)
         d2 = ttk.Frame(drv_f)
         d2.pack(fill="x", padx=6, pady=(1, 3))
         ttk.Label(d2, text="Python:").pack(side="left")
@@ -189,15 +187,15 @@ class VLALeRobotTabUI:
         self.v_py_mode = tk.StringVar(value=self._py_mode_labels.get(ST.DEFAULT_PY_MODE, self._py_mode_labels["uv312"]))
         ttk.Combobox(d2, textvariable=self.v_py_mode, values=list(self._py_mode_labels.values()), width=30,
                      state="readonly").pack(side="left", padx=2)
-        ttk.Label(d2, text=" 基础 Python:").pack(side="left")
+        ttk.Label(d2, text="基础 Python:").pack(side="left")
         self.v_base_py = tk.StringVar(value=os.environ.get("NERO_V44_BASE_PYTHON", "/usr/bin/python3"))
         ttk.Entry(d2, textvariable=self.v_base_py, width=16).pack(side="left", padx=2)
-        ttk.Label(d2, text=" pip 包:").pack(side="left")
+        ttk.Label(d2, text="pip 包:").pack(side="left")
         self.v_pip_spec = tk.StringVar(value=ST.DEFAULT_PIP_SPEC)
         ttk.Entry(d2, textvariable=self.v_pip_spec, width=22).pack(side="left", padx=2)
         self.v_dl_after = tk.BooleanVar(value=True)
         ttk.Checkbutton(d2, text="装完自动下载 smolvla_base", variable=self.v_dl_after).pack(side="left", padx=4)
-        ttk.Label(d2, text=" 后台任务:").pack(side="left", padx=(6, 1))
+        ttk.Label(d2, text="后台任务:").pack(side="left", padx=(6, 1))
         self.v_job = tk.StringVar(value="无")
         ttk.Label(d2, textvariable=self.v_job, width=60).pack(side="left", padx=2)
 
@@ -212,12 +210,12 @@ class VLALeRobotTabUI:
         for val, lab in (("mock", "仿真替身 (Twin/Mock)"), ("mujoco", "MuJoCo 双相机"), ("real", "实机 NERO + D435i/OV4688")):
             ttk.Radiobutton(r0, text=lab, value=val, variable=self.v_backend, command=self.on_backend_change).pack(side="left", padx=3)
 
-        ttk.Label(r0, text="  操作策略:").pack(side="left", padx=(8, 2))
+        ttk.Label(r0, text="操作策略:").pack(side="left", padx=(8, 2))
         self.v_policy = tk.StringVar(value="smolvla")
         for p_val, p_lab in (("smolvla", "路径 B: SmolVLA"), ("traditional", "路径 A: Traditional Skills")):
             ttk.Radiobutton(r0, text=p_lab, value=p_val, variable=self.v_policy).pack(side="left", padx=3)
 
-        ttk.Label(r0, text="  控制权模式:").pack(side="left", padx=(8, 2))
+        ttk.Label(r0, text="控制权模式:").pack(side="left", padx=(8, 2))
         self.v_mode = tk.StringVar(value="monitor")
         self.cb_mode = ttk.Combobox(r0, textvariable=self.v_mode, values=list(CONTROL_MODES), width=11, state="readonly")
         self.cb_mode.pack(side="left", padx=2)
@@ -231,9 +229,9 @@ class VLALeRobotTabUI:
         ttk.Label(r1, text="SmolVLA 权重:").pack(side="left", padx=(6, 2))
         self.v_ckpt = tk.StringVar(value="lerobot/smolvla_base")
         ttk.Entry(r1, textvariable=self.v_ckpt, width=24).pack(side="left", padx=2)
-        self.btn_dl_model = ttk.Button(r1, text="⬇ 下载 SmolVLA 模型", command=self.on_download_smolvla)
+        self.btn_dl_model = ttk.Button(r1, text="下载 SmolVLA 模型", command=self.on_download_smolvla)
         self.btn_dl_model.pack(side="left", padx=2)
-        self.btn_chk_status = ttk.Button(r1, text="🔎 查询 LeRobot/模型状态", command=self.on_check_lerobot_status)
+        self.btn_chk_status = ttk.Button(r1, text="查询 LeRobot/模型状态", command=self.on_check_lerobot_status)
         self.btn_chk_status.pack(side="left", padx=2)
         ttk.Label(r1, text="高层任务指令:").pack(side="left", padx=(6, 2))
         self.v_task = tk.StringVar(value="Put the red block into the left box, then put the blue block into the right box")
@@ -245,7 +243,7 @@ class VLALeRobotTabUI:
         cb = ttk.Frame(ctrl_f)
         cb.pack(fill="x", padx=6, pady=3)
 
-        ttk.Button(cb, text="🔍 Phase 0 审查", command=self.on_phase0_audit).pack(side="left", padx=(0, 4))
+        ttk.Button(cb, text="Phase 0 审查", command=self.on_phase0_audit).pack(side="left", padx=(0, 4))
         self.btn_connect = ttk.Button(cb, text="① 加载 SmolVLA & 连接 Adapter", command=self.on_connect_and_load)
         self.btn_connect.pack(side="left", padx=3)
         self.btn_ipc = ttk.Button(cb, text="IPC 服务", command=self.on_toggle_ipc)
@@ -278,33 +276,33 @@ class VLALeRobotTabUI:
         self.btn_rec.pack(side="left", padx=2)
         ttk.Button(rb, text="夹爪示教: 张开", command=lambda: self.recorder.set_teach_gripper_norm(1.0)).pack(side="left", padx=2)
         ttk.Button(rb, text="夹爪示教: 夹紧", command=lambda: self.recorder.set_teach_gripper_norm(0.0)).pack(side="left", padx=2)
-        ttk.Label(rb, text=" Episode#:").pack(side="left", padx=(6, 1))
+        ttk.Label(rb, text="Episode#:").pack(side="left", padx=(6, 1))
         self.v_ep_idx = tk.StringVar(value="0")
         ttk.Spinbox(rb, from_=0, to=999, textvariable=self.v_ep_idx, width=4).pack(side="left")
         ttk.Button(rb, text="回放 Episode", command=self.on_replay_episode).pack(side="left", padx=2)
         ttk.Button(rb, text="删除 Episode", command=self.on_delete_episode).pack(side="left", padx=2)
-        ttk.Button(rb, text="⚡ 快速微调 (内置 NERO VLA)", command=self.on_finetune).pack(side="left", padx=(8, 2))
-        ttk.Button(rb, text="🛡 Sim-to-Real 6级验证", command=self.on_sim2real_ladder).pack(side="left", padx=4)
-        ttk.Button(rb, text="📊 运行 A/B/C 对比 Benchmark", command=self.on_run_benchmark).pack(side="left", padx=2)
+        ttk.Button(rb, text="快速微调 (内置 NERO VLA)", command=self.on_finetune).pack(side="left", padx=(8, 2))
+        ttk.Button(rb, text="Sim-to-Real 6级验证", command=self.on_sim2real_ladder).pack(side="left", padx=4)
+        ttk.Button(rb, text="运行 A/B/C 对比 Benchmark", command=self.on_run_benchmark).pack(side="left", padx=2)
 
         # V4.4: real LeRobot fine-tuning of SmolVLA on the EMBODIED_AI drive (export -> lerobot-train -> use result)
         rb2 = ttk.Frame(rec_f)
         rb2.pack(fill="x", padx=6, pady=(0, 3))
         ttk.Label(rb2, text="LeRobot 真实微调 (移动硬盘):").pack(side="left")
-        ttk.Button(rb2, text="📦 导出为 LeRobot 数据集", command=self.on_export_lerobot).pack(side="left", padx=2)
+        ttk.Button(rb2, text="导出为 LeRobot 数据集", command=self.on_export_lerobot).pack(side="left", padx=2)
         self.v_export_overwrite = tk.BooleanVar(value=True)
         ttk.Checkbutton(rb2, text="覆盖", variable=self.v_export_overwrite).pack(side="left")
-        ttk.Label(rb2, text=" 步数:").pack(side="left")
+        ttk.Label(rb2, text="步数:").pack(side="left")
         self.v_train_steps = tk.StringVar(value="20000")
         ttk.Entry(rb2, textvariable=self.v_train_steps, width=7).pack(side="left")
-        ttk.Label(rb2, text=" batch:").pack(side="left")
+        ttk.Label(rb2, text="batch:").pack(side="left")
         self.v_train_bs = tk.StringVar(value="8")
         ttk.Entry(rb2, textvariable=self.v_train_bs, width=4).pack(side="left")
-        ttk.Label(rb2, text=" 额外参数:").pack(side="left")
+        ttk.Label(rb2, text="额外参数:").pack(side="left")
         self.v_train_extra = tk.StringVar(value="")
         ttk.Entry(rb2, textvariable=self.v_train_extra, width=26).pack(side="left", padx=2)
-        ttk.Button(rb2, text="🚀 开始 SmolVLA 微调 (GPU)", command=self.on_train_lerobot).pack(side="left", padx=2)
-        ttk.Button(rb2, text="↩ 使用最新训练结果", command=self.on_use_latest_ckpt).pack(side="left", padx=2)
+        ttk.Button(rb2, text="开始 SmolVLA 微调 (GPU)", command=self.on_train_lerobot).pack(side="left", padx=2)
+        ttk.Button(rb2, text="使用最新训练结果", command=self.on_use_latest_ckpt).pack(side="left", padx=2)
 
         # Section 11.2: Live Status
         st_f = ttk.LabelFrame(parent, text="4. 实时状态（8维本体状态 + 双相机同步 + 数据集/模型状态 + 安全监督器）")
@@ -393,7 +391,7 @@ class VLALeRobotTabUI:
                                          "--local-dir", L["smolvla_base_dir"] if target == "lerobot/smolvla_base"
                                          else os.path.join(L["models"], target.replace("/", "--"))])
             return
-        self.btn_dl_model.configure(text="⬇ 下载中...")
+        self.btn_dl_model.configure(text="下载中...")
 
         def _dl_job():
             res = self.vla_policy.download_model_weights(repo_id=target)
@@ -401,7 +399,7 @@ class VLALeRobotTabUI:
                 self.q.put(("set_ckpt", str(res["local_dir"])))
                 self.q.put(("btn_dl", "✓ 模型已下载"))
             else:
-                self.q.put(("btn_dl", "⬇ 下载 SmolVLA 模型"))
+                self.q.put(("btn_dl", " 下载 SmolVLA 模型"))
 
         threading.Thread(target=_dl_job, daemon=True).start()
 
@@ -491,7 +489,7 @@ class VLALeRobotTabUI:
         if L is None:
             return False
         if self.job.running():
-            self._log(f"[WARN] [V4.4 JOB] 已有后台任务在运行: {self.job.kind}（先等它结束或点「⏹ 停止后台任务」）")
+            self._log(f"[WARN] [V4.4 JOB] 已有后台任务在运行: {self.job.kind}（先等它结束或点「 停止后台任务」）")
             return False
         self.job.L = L
         r = self.job.start(kind, list(cmd), env=ST.child_env(L, for_heavy_job=True), meta=meta)
@@ -610,7 +608,7 @@ class VLALeRobotTabUI:
     def on_export_lerobot(self) -> None:
         L = ST.layout()
         if not os.path.isfile(L["venv_python"]):
-            self._log("[FAIL] [V4.4 EXPORT] 移动硬盘上还没有 LeRobot 环境，请先「🛠 安装 LeRobot+SmolVLA」")
+            self._log("[FAIL] [V4.4 EXPORT] 移动硬盘上还没有 LeRobot 环境，请先「 安装 LeRobot+SmolVLA」")
             return
         n_train = len(self.dataset.list_episodes(split="train", valid_only=True))
         if n_train == 0:
@@ -631,7 +629,7 @@ class VLALeRobotTabUI:
             L = ST.layout()
             out = self._lerobot_export_root(L)
             if not os.path.isfile(os.path.join(out, "meta", "info.json")):
-                self._log(f"[FAIL] [V4.4 TRAIN] 还没有导出的 LeRobot 数据集 {out}，请先点「📦 导出为 LeRobot 数据集」")
+                self._log(f"[FAIL] [V4.4 TRAIN] 还没有导出的 LeRobot 数据集 {out}，请先点「 导出为 LeRobot 数据集」")
                 return
             try:
                 steps, bs = int(steps_txt), int(bs_txt)

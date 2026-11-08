@@ -345,7 +345,7 @@ class TestV44DriveStorage(unittest.TestCase):
 
     def test_t8_markers(self):
         with open(os.path.join(HERE, "VERSION")) as f:
-            self.assertEqual(f.read().strip(), "V4.5")
+            self.assertTrue(f.read().strip().startswith("V4.5"))
         self.assertEqual(ST.MARKER, "V4.4 EMBODIED_AI DRIVE STORAGE")
         self.assertEqual(WK.MARKER, "V4.4 SMOLVLA DRIVE WORKER")
         with open(os.path.join(HERE, "NERO_V4_Console_Tab.py"), encoding="utf-8") as f:

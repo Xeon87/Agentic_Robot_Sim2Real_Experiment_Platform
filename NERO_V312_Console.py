@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.5"
+VERSION = "V4.5.1"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -767,17 +767,44 @@ def run_console(initial_tab="sim"):
         log_append(real_log, f"[FAIL] [V3.65 REAL CUP TASK] NERO实机任务 tab not available: {exc}")
 
     # ---- V4.1 VLA / LeRobot TAB: Dual-Path Control Arbiter, Observation Bridge, LeRobot Adapter & Action Executor
-    vla_tab = None
-    try:
-        import NERO_V4_Console_Tab as V4T
-        vla_outer = ttk.Frame(nb, padding=6)
-        nb.add(vla_outer, text="VLA / LeRobot (V4)")
-        vla_tab = V4T.VLALeRobotTabUI(
-            tk, ttk, vla_outer, pipe=pipe, jpanel=jpanel, cam_tab=cam_tab, rct_tab=rct_tab,
-            log=pipe.log, ask=confirm_from_worker, visible_fn=lambda: nb.select() == str(vla_outer)
-        )
-    except Exception as exc:
-        log_append(real_log, f"[FAIL] [V4.1 VLA TAB] VLA / LeRobot tab not available: {exc}")
+    # V4.5.1 LAZY VLA TAB: the tab is built the first time it is OPENED, not at console start. A V4.5 console crashed
+    # (segfault inside Tk while this tab created its widgets at start-up); now the console always starts like V4.3,
+    # and a problem in this tab can no longer stop the cup / egg tabs. NERO_NO_VLA_TAB=1 (./start_nero.sh --no-vla)
+    # leaves the tab out completely.
+    vla_holder = {"tab": None, "building": False}
+    if os.environ.get("NERO_NO_VLA_TAB", "0") != "1":
+        try:
+            vla_outer = ttk.Frame(nb, padding=6)
+            nb.add(vla_outer, text="VLA / LeRobot (V4)")
+            vla_hint = ttk.Label(vla_outer, text="正在加载 VLA / LeRobot 页 ...（第一次打开这一页时才加载）")
+            vla_hint.pack(anchor="w", pady=8)
+
+            def _build_vla_tab():
+                if vla_holder["tab"] is not None or vla_holder["building"]:
+                    return
+                vla_holder["building"] = True
+                log_append(real_log, "[INFO] [V4.5.1 VLA TAB] 正在创建 VLA / LeRobot 页 ...")
+                try:
+                    import NERO_V4_Console_Tab as V4T
+                    vla_hint.destroy()
+                    vla_holder["tab"] = V4T.VLALeRobotTabUI(
+                        tk, ttk, vla_outer, pipe=pipe, jpanel=jpanel, cam_tab=cam_tab, rct_tab=rct_tab,
+                        log=pipe.log, ask=confirm_from_worker, visible_fn=lambda: nb.select() == str(vla_outer)
+                    )
+                    log_append(real_log, "[OK] [V4.5.1 VLA TAB] VLA / LeRobot 页已创建")
+                except Exception as exc:
+                    log_append(real_log, f"[FAIL] [V4.1 VLA TAB] VLA / LeRobot tab not available: {exc}")
+                    try:
+                        ttk.Label(vla_outer, text=f"VLA / LeRobot 页加载失败：{exc}").pack(anchor="w", pady=8)
+                    except Exception:
+                        pass
+
+            nb.bind("<<NotebookTabChanged>>",
+                    lambda _e: root.after(50, _build_vla_tab) if nb.select() == str(vla_outer) else None, add="+")
+        except Exception as exc:
+            log_append(real_log, f"[FAIL] [V4.1 VLA TAB] VLA / LeRobot tab not available: {exc}")
+    else:
+        log_append(real_log, "[INFO] [V4.5.1 VLA TAB] NERO_NO_VLA_TAB=1：不加载 VLA / LeRobot 页")
 
     def start_job(name, fn, force=False):
         if not force and real_job["t"] is not None and real_job["t"].is_alive():
@@ -1052,8 +1079,8 @@ def run_console(initial_tab="sim"):
         except Exception:
             pass
         try:
-            if vla_tab is not None:
-                vla_tab.shutdown()              # V4.1: stop IPC server, adapter & shared memory
+            if vla_holder["tab"] is not None:
+                vla_holder["tab"].shutdown()    # V4.1: stop IPC server, adapter & shared memory
         except Exception:
             pass
         if pipe.active():

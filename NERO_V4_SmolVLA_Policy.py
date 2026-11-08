@@ -410,7 +410,7 @@ class SmolVLAPolicy:
         dl_txt = (
             f"✓ 已在本地 ({info['local_model_dir']}, 共 {info['local_total_size_mb']} MB, 文件: {', '.join(info['local_weight_files'])})"
             if info["model_downloaded_locally"]
-            else "✗ 本地尚未下载模型权重本体 (可点击 GUI「⬇ 下载 SmolVLA 模型」按钮直接下载)"
+            else "✗ 本地尚未下载模型权重本体 (可点击 GUI「下载 SmolVLA 模型」按钮直接下载)"
         )
         act_txt = (
             f"已加载 (backend={info['policy_backend']}, device={info['policy_device']}, chunk={info['chunk_size']})"

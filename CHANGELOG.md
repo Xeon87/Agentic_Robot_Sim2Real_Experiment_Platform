@@ -1,3 +1,9 @@
+## V4.5.1 (2026-11-08) — 热修复：控制台启动时在 VLA 页创建控件处段错误
+- `NERO_V312_Console.py`（`V4.5.1 LAZY VLA TAB`）：「VLA / LeRobot (V4)」页在第一次打开时才 import 和创建；`NERO_NO_VLA_TAB=1` 完全不加载。
+- `start_nero.sh`：新参数 `--no-vla`。
+- `NERO_V4_Console_Tab.py`：去掉所有 emoji / 彩色符号（Ubuntu 22.04 libXft 2.3.4 + 彩色 emoji 字体是最可疑的原因，未证实）；`os.environ` 改到界面建好后由 `_tick` 设置。
+- 验证：Ubuntu 22.04 的 Python 3.10 + Tk 8.6.12（虚拟显示器）下控制台 4 s 启动、打开 VLA 页正常创建（87 个控件）、正常退出、`crash.log` 无记录；`--no-vla` 正常；V4.1/V4.2/V4.4/V4.5 测试通过（`test_v4_5.py` 新增 T10）。**原始崩溃在这里没有复现**。
+
 ## V4.5 (2026-11-08) — 鸡蛋放进蛋托的精度 + 指尖 z 安全 + V4.4 闪退加固
 - **`NERO_V365_Real_Cup_Task.py`（`V4.5 EGG PLACE ACCURACY + FINGERTIP Z SAFETY`）**：夹蛋时测量蛋心在夹爪坐标系的位置（`plan["egg_in_G_m"]`），放蛋用同一个量并把鸡蛋**下端**对准槽心（`egg_place_grasp_origin`）；俯仰角先试 ±90°（`EGG_PITCH_ORDER`）；转腕前腕部相机俯视复测槽位（`_wrist_look_slot`，可信偏差 1.5–15 mm 时重新规划）；夹持胶垫中心在鸡蛋赤道、最低指尖 ≥ 桌面 + 5 mm（`so101_tip_drop_m` 含动爪摆动）；安全区 z 检查改用最低指尖（规划 5 mm、执行 3 mm，`so101_tip_tool_T`）；桌面取相机 / 安全区的较高者，相差 > 15 mm 拒绝（`TABLE_HEIGHT_DISAGREE`）；下探最后 15 mm 以 10 mm/s；规划按执行同样的直线插值检查关节余量（多 1° 余量）；`_check_path_fence` 的 z 下限不再被第一次的桌面高度缓存住。
 - **`NERO_V349_Real_Wrist_Camera.py`**：`refine_slot_grid`（空槽凹陷 → 拟合槽距 + 整体偏移 → 再检测，最多 5 轮）+ `egg_carton_config`（`config/egg_carton.json` 或 `NERO_EGG_SLOT_PITCH_MM`）；蛋托日志显示槽距来源和修正量；外框比 槽距×列数 大 40 mm 以上时提示“盖子或边沿被算进外框”。

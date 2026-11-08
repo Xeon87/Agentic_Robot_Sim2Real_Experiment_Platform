@@ -8,6 +8,7 @@
 #   ./start_nero.sh --sim    -> old behaviour: run the full simulation chain
 #                               directly (start_nero_sim.sh), no console
 #   ./start_nero.sh --real   -> console with the 实机NERO调试 tab selected
+#   ./start_nero.sh --no-vla -> V4.5.1: console without the VLA / LeRobot (V4) tab (emergency switch)
 #
 # Every NERO file used comes from THIS folder.
 # ============================================================
@@ -91,6 +92,11 @@ fi
 "$PY" "$STORE44" --brief || true
 
 ARGS=()
-[[ "${1:-}" == "--real" ]] && ARGS+=(--real)
+for a in "$@"; do
+  case "$a" in
+    --real) ARGS+=(--real) ;;
+    --no-vla) export NERO_NO_VLA_TAB=1; echo "[INFO] V4.5.1: --no-vla -> console without the VLA / LeRobot (V4) tab" ;;
+  esac
+done
 cd "$HERE"
 exec "$PY" "$CONSOLE" "${ARGS[@]}"
