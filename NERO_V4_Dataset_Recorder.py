@@ -38,7 +38,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-VERSION = "V4.4"
+VERSION = "V4.5"
 MARKER = "V4.2 LEROBOT DATASET RECORDER & EPISODE REPLAYER"
 HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:

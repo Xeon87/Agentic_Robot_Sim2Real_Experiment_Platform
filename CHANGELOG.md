@@ -1,3 +1,11 @@
+## V4.5 (2026-11-08) — 鸡蛋放进蛋托的精度 + 指尖 z 安全 + V4.4 闪退加固
+- **`NERO_V365_Real_Cup_Task.py`（`V4.5 EGG PLACE ACCURACY + FINGERTIP Z SAFETY`）**：夹蛋时测量蛋心在夹爪坐标系的位置（`plan["egg_in_G_m"]`），放蛋用同一个量并把鸡蛋**下端**对准槽心（`egg_place_grasp_origin`）；俯仰角先试 ±90°（`EGG_PITCH_ORDER`）；转腕前腕部相机俯视复测槽位（`_wrist_look_slot`，可信偏差 1.5–15 mm 时重新规划）；夹持胶垫中心在鸡蛋赤道、最低指尖 ≥ 桌面 + 5 mm（`so101_tip_drop_m` 含动爪摆动）；安全区 z 检查改用最低指尖（规划 5 mm、执行 3 mm，`so101_tip_tool_T`）；桌面取相机 / 安全区的较高者，相差 > 15 mm 拒绝（`TABLE_HEIGHT_DISAGREE`）；下探最后 15 mm 以 10 mm/s；规划按执行同样的直线插值检查关节余量（多 1° 余量）；`_check_path_fence` 的 z 下限不再被第一次的桌面高度缓存住。
+- **`NERO_V349_Real_Wrist_Camera.py`**：`refine_slot_grid`（空槽凹陷 → 拟合槽距 + 整体偏移 → 再检测，最多 5 轮）+ `egg_carton_config`（`config/egg_carton.json` 或 `NERO_EGG_SLOT_PITCH_MM`）；蛋托日志显示槽距来源和修正量；外框比 槽距×列数 大 40 mm 以上时提示“盖子或边沿被算进外框”。
+- **闪退加固**：`NERO_V4_Console_Tab.py` 的 SmolVLA 加载全部移出 Tk 主线程；`os.environ` 只在主线程且值变化时写；拔盘时关闭 worker 改到后台线程；`NERO_V4_SmolVLA_Policy.py` 加载加锁；`NERO_V312_Console.py` 启动时保留 `logs/console.prev.log`。
+- **测试**：新 `tests/test_v4_5.py`（9 项）；`test_v4_1.py` / `test_v4_2.py` 的夹持高度断言改为 21.0 / 11.0 mm（有意的改动）。
+- **实机第一次怎么试**：① 量蛋托相邻两槽中心距离，填到 `config/egg_carton.json`（可选）；② 「NERO实机任务」选鸡蛋场景，先用计划预览 / 悬停档：日志 `plan_egg_place` 一行应有 `lowest_tip_z_mm` ≥ 5、`egg_in_G_mm` ≈ [0, 20, 0]、`place_pitch_deg` 尽量 ±90；③ 执行时注意 `[V4.5 WRIST SLOT]` 一行（腕部相机修正了多少，或为什么没用）；④ 如果出现 `TABLE_HEIGHT_DISAGREE`，先在 Camera调试页复核手眼标定和安全区桌面高度。
+- **没有在真实硬件上运行过**。
+
 ## V4.4 (2026-11-08) — LeRobot + SmolVLA 环境、模型、数据集、训练文件全部放到移动硬盘 EMBODIED_AI
 - **新模块 `NERO_V44_Storage.py`**（`V4.4 EMBODIED_AI DRIVE STORAGE`，只用标准库）：按卷标找硬盘（`/proc/self/mounts` + `/dev/disk/by-label`，必须是真实挂载点）；`<盘>/nero_lerobot/` 目录布局；文件系统检查（剩余空间、符号链接、`noexec`、FAT32/exFAT/NTFS 提示）；`udisksctl` 挂载 / 卸载 + 断电；把 `HF_HOME`、`HF_HUB_CACHE`、`HF_LEROBOT_HOME`、`TORCH_HOME`、`PIP_CACHE_DIR`、`UV_*`、`TMPDIR`、`XDG_CACHE_HOME` 都指向硬盘；生成安装脚本（可重复运行，中断后续装）；`lerobot-train` 命令；后台任务 `BackgroundJob`（与控制台分离的进程组，日志写硬盘，控制台重启后自动接上仍在运行的任务）；旧文件迁移。
 - **新模块 `NERO_V44_SmolVLA_Worker.py`**（`V4.4 SMOLVLA DRIVE WORKER`，在硬盘 venv 里运行）：`serve`（标准输入输出协议，JSON + 原始图像字节；LeRobot ≥ 0.4 自动加载 pre/post processor，≤ 0.3 直接调用策略）、`download`（smolvla_base + 配置里的 VLM 主干）、`export`（NERO 示教 npz → 真实 LeRobotDataset，兼容 `add_frame(frame, task)` / `frame["task"]` 两种 API，视频编码失败自动改存 PNG）、`env`。

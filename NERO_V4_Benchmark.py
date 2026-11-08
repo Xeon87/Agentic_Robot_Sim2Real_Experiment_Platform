@@ -35,7 +35,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
-VERSION = "V4.4"
+VERSION = "V4.5"
 MARKER = "V4.2 SIM-TO-REAL LADDER & DUAL-PATH BENCHMARK"
 HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:

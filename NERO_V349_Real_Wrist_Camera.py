@@ -2087,6 +2087,118 @@ def agent_judge_holder(rgb_crop, geom_info, agent_fn=None):
     return out
 
 
+# --------------------------------------------------------------------------- V4.5 SLOT CAVITY REFINEMENT
+EGG_CARTON_CFG = os.path.join(os.path.dirname(os.path.realpath(__file__)), "config", "egg_carton.json")
+
+
+def egg_carton_config(path=None):
+    """V4.5: optional measured carton geometry (config/egg_carton.json): {"slot_pitch_mm": [along, across] or null}.
+    Env NERO_EGG_SLOT_PITCH_MM="47,47" overrides the file."""
+    env = os.environ.get("NERO_EGG_SLOT_PITCH_MM", "").strip()
+    if env:
+        try:
+            a, b = [float(x) for x in env.replace(" ", "").split(",")[:2]]
+            return {"slot_pitch_mm": [a, b], "source": "NERO_EGG_SLOT_PITCH_MM"}
+        except Exception:
+            pass
+    try:
+        with open(path or EGG_CARTON_CFG, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        pm = cfg.get("slot_pitch_mm")
+        if pm and len(pm) >= 2 and all(isinstance(v, (int, float)) and 20.0 <= float(v) <= 90.0 for v in pm[:2]):
+            return {"slot_pitch_mm": [float(pm[0]), float(pm[1])], "source": os.path.basename(path or EGG_CARTON_CFG)}
+    except Exception:
+        pass
+    return {"slot_pitch_mm": None, "source": None}
+
+
+def refine_slot_grid(u_mm, v_mm, h_mm, R, C, pl_mm, pw_mm, h_top_mm=None, min_pts=8):
+    """V4.5 SLOT CAVITY REFINEMENT: the nominal grid (outer box / columns) puts the slot centres wherever the outer box
+    says; real cartons have flanges and sometimes a lid inside that box. Each EMPTY slot is a depression in the
+    carton's top-surface depth -> its lowest points give the true slot centre. Pass 1 finds cavities near the nominal
+    grid, then the grid (offset, and the pitch when >= 2 columns / rows were seen) is fitted to them; pass 2 repeats
+    the search on the fitted grid. Occupied slots (egg higher than the top) follow the fitted grid.
+    u_mm / v_mm / h_mm: carton points in holder coordinates (mm, height above the table).
+    -> (centres [(u, v) mm per slot, row-major], info dict)"""
+    import numpy as np
+    u = np.asarray(u_mm, float)
+    v = np.asarray(v_mm, float)
+    hh = np.asarray(h_mm, float)
+
+    def grid(a_u, b_u, a_v, b_v):
+        return [(a_u + (c_i + 0.5 - 0.5 * C) * b_u, a_v + (r_i + 0.5 - 0.5 * R) * b_v) for r_i in range(R) for c_i in range(C)]
+
+    def find(nominal, b_u, b_v, accept_frac):
+        own = {}
+        for k, (uc, vc) in enumerate(nominal):
+            win = (np.abs(u - uc) <= 0.45 * b_u) & (np.abs(v - vc) <= 0.45 * b_v)
+            if int(win.sum()) < 3 * min_pts:
+                continue
+            hw = hh[win]
+            top = float(np.percentile(hw, 85))
+            if h_top_mm is not None and top > float(h_top_mm) + 9.0:
+                continue                                         # an egg sits here: no cavity to see
+            hmin = float(np.percentile(hw, 2))
+            if top - hmin < 6.0:
+                continue                                         # no clear depression (flat / no depth)
+            low = hw <= hmin + 0.4 * (top - hmin)                # bottom of the bowl only (not neighbouring rims)
+            if int(low.sum()) < min_pts:
+                continue                                         # no clear depression (flat / no depth)
+            cu, cv = float(np.mean(u[win][low])), float(np.mean(v[win][low]))
+            if math.hypot(cu - uc, cv - vc) <= accept_frac * min(b_u, b_v):
+                own[k] = (cu, cv)
+        return own
+
+    def fit(own, b_u, b_v):
+        cols = np.array([k % C for k in own], float)
+        rows = np.array([k // C for k in own], float)
+        cu = np.array([own[k][0] for k in own])
+        cv = np.array([own[k][1] for k in own])
+        xc, xr = cols + 0.5 - 0.5 * C, rows + 0.5 - 0.5 * R
+        out = []
+        for x, c, n, b0, nominal_b in ((xc, cu, len(set(cols.tolist())), b_u, pl_mm), (xr, cv, len(set(rows.tolist())), b_v, pw_mm)):
+            a, b = float(np.median(c - x * b0)), b0
+            if n >= 2:
+                b_fit, a_fit = np.polyfit(x, c, 1)
+                if 0.6 * nominal_b <= b_fit <= 1.4 * nominal_b and 30.0 <= b_fit <= 75.0:   # egg-carton pitch range
+                    a, b = float(a_fit), float(b_fit)
+            out += [a, b]
+        a_u, b_u, a_v, b_v = out
+        if len(own) == 1:
+            a_u, a_v = float(np.clip(a_u, -8.0, 8.0)), float(np.clip(a_v, -8.0, 8.0))
+        return a_u, b_u, a_v, b_v
+
+    a_u, b_u, a_v, b_v = 0.0, float(pl_mm), 0.0, float(pw_mm)
+    nominal0 = grid(a_u, b_u, a_v, b_v)
+    own = find(nominal0, b_u, b_v, 0.45)
+    info = {"n_cavities": len(own), "global_shift_mm": [0.0, 0.0], "pitch_mm": [round(b_u, 1), round(b_v, 1)],
+            "per_slot_shift_mm": {}}
+    if not own:
+        info["note"] = "未找到槽穴凹陷，槽位按外框等分"
+        return nominal0, info
+    for _pass in range(5):                                       # fit -> re-detect until the grid settles
+        a_u, b_u, a_v, b_v = fit(own, b_u, b_v)
+        own2 = find(grid(a_u, b_u, a_v, b_v), b_u, b_v, 0.30)
+        if not own2:
+            break
+        moved = max(math.hypot(own2[k][0] - own.get(k, own2[k])[0], own2[k][1] - own.get(k, own2[k])[1]) for k in own2)
+        own = own2
+        if moved < 0.2 and _pass >= 1:
+            break
+    a_u, b_u, a_v, b_v = fit(own, b_u, b_v)
+    fitted = grid(a_u, b_u, a_v, b_v)
+    out = []
+    for k, (uc, vc) in enumerate(fitted):
+        if k in own:
+            uc += float(np.clip(own[k][0] - uc, -4.0, 4.0))
+            vc += float(np.clip(own[k][1] - vc, -4.0, 4.0))
+        out.append((uc, vc))
+        info["per_slot_shift_mm"][k + 1] = [round(uc - nominal0[k][0], 1), round(vc - nominal0[k][1], 1)]
+    info.update(n_cavities=len(own), global_shift_mm=[round(a_u, 1), round(a_v, 1)], pitch_mm=[round(b_u, 1), round(b_v, 1)])
+    info["note"] = (f"槽位按 {len(own)} 个槽穴凹陷拟合：整体偏移 ({a_u:+.1f}, {a_v:+.1f}) mm，槽距 {b_u:.1f}×{b_v:.1f} mm")
+    return out, info
+
+
 def locate_egg_holder(dets2d, rgb, depth_m, K, T_base_cam, table_z=None, fence_poly=None, calib_note=None,
                       existing_eggs=None, agent_fn=None):
     """V3.49 ZERO-PRIOR HOLDER + SLOTS: given 2D YOLOE holder detections + RGB-D + T_base_cam:
@@ -2195,6 +2307,23 @@ def locate_egg_holder(dets2d, rgb, depth_m, K, T_base_cam, table_z=None, fence_p
     R, C = int(grid_info["rows"]), int(grid_info["cols"])
     pl_m = (L_mm / 1000.0) / C
     pw_m = (W_mm / 1000.0) / R
+    # V4.5: measured slot pitch (config/egg_carton.json) replaces "outer box / columns" (flanges, lid)
+    ccfg = egg_carton_config()
+    pitch_src = "外框等分"
+    lid_warn = None
+    if ccfg.get("slot_pitch_mm"):
+        pl_m, pw_m = ccfg["slot_pitch_mm"][0] / 1000.0, ccfg["slot_pitch_mm"][1] / 1000.0
+        pitch_src = f"实测槽距({ccfg['source']})"
+        extra = L_mm - C * pl_m * 1000.0
+        if extra > 40.0:
+            lid_warn = f"外框比 槽距×列数 大 {extra:.0f} mm（盖子或边沿被算进外框？槽位改由槽穴凹陷定位）"
+    if cov >= 0.35 and (dz_m > 0).sum() >= 60:
+        slot_uv_mm, refine_info = refine_slot_grid(u_all_mm, v_all_mm, hs * 1000.0, R, C, pl_m * 1000.0, pw_m * 1000.0,
+                                                   h_top_mm=h_top_m * 1000.0)
+    else:
+        slot_uv_mm = [((c_i + 0.5 - 0.5 * C) * pl_m * 1000.0, (r_i + 0.5 - 0.5 * R) * pw_m * 1000.0)
+                      for r_i in range(R) for c_i in range(C)]
+        refine_info = {"n_cavities": 0, "note": "蛋托深度覆盖不足，槽位按外框等分"}
 
     edge = x0 <= YP.EDGE_PX or y0 <= YP.EDGE_PX or x1 >= w - 1 - YP.EDGE_PX or y1 >= h - 1 - YP.EDGE_PX
     warn = []
@@ -2227,7 +2356,9 @@ def locate_egg_holder(dets2d, rgb, depth_m, K, T_base_cam, table_z=None, fence_p
         "yolo": {"conf": round(float(d["conf"]), 3), "box": [round(v) for v in d["box"]], "cls": 0, "name": "holder"},
         "reasons": list(warn),
         "notes": [f"{jsrc_label}：{R}×{C}（{R * C} 槽），实测外框 {L_mm:.0f}×{W_mm:.0f}×{h_top_m * 1000:.0f} mm，"
-                  f"槽距 {pl_m * 1000:.0f}×{pw_m * 1000:.0f} mm，偏航 {math.degrees(yaw_rad):+.0f}°"],
+                  f"槽距 {pl_m * 1000:.0f}×{pw_m * 1000:.0f} mm（{pitch_src}），偏航 {math.degrees(yaw_rad):+.0f}°；"
+                  f"{refine_info.get('note')}" + (f"；⚠ {lid_warn}" if lid_warn else "")],
+        "slot_refine": refine_info,
     }
 
     slots = []
@@ -2238,8 +2369,8 @@ def locate_egg_holder(dets2d, rgb, depth_m, K, T_base_cam, table_z=None, fence_p
         for c_i in range(C):
             slot_idx += 1
             sid = f"slot_{slot_idx}"
-            uc_m = (c_i + 0.5 - 0.5 * C) * pl_m
-            vr_m = (r_i + 0.5 - 0.5 * R) * pw_m
+            uc_m = slot_uv_mm[slot_idx - 1][0] / 1000.0   # V4.5: cavity-refined slot centre
+            vr_m = slot_uv_mm[slot_idx - 1][1] / 1000.0
             s_xyz = centre_pl + uc_m * u_long + vr_m * v_short + (0.60 * h_top_m) * n_vec
             # Determine occupied vs empty from height profile or known eggs or Agent override
             in_cell = (np.abs(u_all_mm - uc_m * 1000.0) <= 0.32 * pl_m * 1000.0) & \

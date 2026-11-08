@@ -83,6 +83,7 @@ grep -qF 'V3.78 D435I BENCH' NERO_V378_D435i_Bench.py && grep -qF 'NERO_V378_D43
 grep -qF 'V3.79 CAMERA LAB' NERO_V379_Camera_Lab.py && grep -qF 'V3.79 CAMERA LAB HOOKS' NERO_V325_Camera.py && grep -qF 'NERO_V379_Camera_Lab.py' start_nero.sh || { echo "[FAIL] V3.79 camera lab marker missing"; exit 1; }
 grep -qF 'V3.80 CAMERA LAB UPGRADE' NERO_V379_Camera_Lab.py && grep -qF 'V3.80 light check' NERO_V325_Camera.py || { echo "[FAIL] V3.80 camera lab upgrade marker missing"; exit 1; }
 grep -qF 'V4.4 EMBODIED_AI DRIVE STORAGE' NERO_V44_Storage.py && grep -qF 'V4.4 SMOLVLA DRIVE WORKER' NERO_V44_SmolVLA_Worker.py && grep -qF 'V4.4 EMBODIED_AI DRIVE PANEL' NERO_V4_Console_Tab.py && grep -qF 'V4.4 EMBODIED_AI DRIVE BACKEND' NERO_V4_SmolVLA_Policy.py && grep -qF 'V4.4 EMBODIED_AI DRIVE' start_nero.sh && grep -qF 'NERO_V44_Storage.py' start_nero.sh || { echo "[FAIL] V4.4 EMBODIED_AI drive markers missing"; exit 1; }
+grep -qF 'V4.5 EGG PLACE ACCURACY + FINGERTIP Z SAFETY' NERO_V365_Real_Cup_Task.py && grep -qF 'V4.5 SLOT CAVITY REFINEMENT' NERO_V349_Real_Wrist_Camera.py && grep -qF 'console.prev.log' NERO_V312_Console.py && [ -f config/egg_carton.json ] || { echo "[FAIL] V4.5 egg accuracy / fingertip z / crash hardening markers missing"; exit 1; }
 grep -qF 'V3.81 YOLOE TRAIN' NERO_V381_Yolo_Train.py && grep -qF 'V3.81 PROFILE FILES + TRAIN PAGE' NERO_V379_Camera_Lab.py && grep -qF 'NERO_V381_Yolo_Train.py' start_nero.sh || { echo "[FAIL] V3.81 train marker missing"; exit 1; }
 grep -qF 'V3.82 FINE-TUNED MODELS' NERO_V347_Yolo_Perception.py && grep -qF 'V3.82 HIGHLIGHTS + GAMMA + LABEL ASSIST' NERO_V379_Camera_Lab.py && grep -qF 'V3.82 APPLY FINE-TUNED + 1280 TRAINING' NERO_V381_Yolo_Train.py || { echo "[FAIL] V3.82 marker missing"; exit 1; }
 grep -qF 'V3.83 MULTI-MODEL DISTRIBUTION' NERO_V347_Yolo_Perception.py && grep -qF 'V3.83 GPU PREFLIGHT' start_nero.sh && grep -qF 'NERO_V383_Gpu_Check.py' start_nero.sh || { echo "[FAIL] V3.83 marker missing"; exit 1; }
@@ -149,3 +150,4 @@ python3 tests/test_v3_67_gui.py | tail -1   # skips without tkinter / DISPLAY
 python3 tests/test_v3_68_gui.py | tail -1   # skips without tkinter / DISPLAY
 python3 tests/test_v3_69_gui.py | tail -1   # skips without tkinter / DISPLAY
 python3 tests/test_v4_4.py 2>&1 | tail -1   # V4.4 EMBODIED_AI drive storage / SmolVLA worker (offline)
+python3 tests/test_v4_5.py 2>&1 | tail -1   # V4.5 egg place accuracy + fingertip z safety (offline)

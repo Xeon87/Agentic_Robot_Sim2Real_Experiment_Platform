@@ -47,7 +47,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-VERSION = "V4.4"
+VERSION = "V4.5"
 MARKER = "V4.2 SMOLVLA POLICY & CLOSED-LOOP CONTROLLER"
 HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
@@ -237,6 +237,7 @@ class SmolVLAPolicy:
         self.backend_type: str = "unloaded"  # "hf_smolvla" | "hf_smolvla_ext" (V4.4 drive) | "nero_vla_finetuned" | "nero_vla_pretrained"
         self._hf_policy = None
         self._worker: Optional[SmolVLAWorkerClient] = None  # V4.4 drive-venv backend
+        self._load_lock = threading.RLock()                   # V4.5: ① and ③ clicked together must not start 2 workers
         self.ext_info: Dict[str, Any] = {}
 
         # Normalization statistics (from dataset meta/stats.json or default NERO joint range)
@@ -509,7 +510,11 @@ class SmolVLAPolicy:
 
     def load(self, path_or_id: Optional[str] = None) -> Dict[str, Any]:
         """Load either a saved NERO V4 fine-tuned checkpoint directory, a Hugging Face SmolVLA checkpoint,
-        or initialize the base NERO SmolVLA policy."""
+        or initialize the base NERO SmolVLA policy.  V4.5: serialised (one load at a time)."""
+        with self._load_lock:
+            return self._load_locked(path_or_id)
+
+    def _load_locked(self, path_or_id: Optional[str] = None) -> Dict[str, Any]:
         target = str(path_or_id or self.model_id_or_path).strip()
         self.model_id_or_path = target
         t0 = time.perf_counter()

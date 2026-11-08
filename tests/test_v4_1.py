@@ -47,7 +47,7 @@ class TestV41Phase0AndPhase1(unittest.TestCase):
     def test_t1_phase0_architecture_and_sync_audit(self):
         rep = AUD.run_phase0_audit(HERE)
         self.assertTrue(rep["ok"], f"Phase 0 audit failed: {rep}")
-        self.assertIn(rep["version"], ("V4.1", "V4.2", "V4.3", "V4.4"))
+        self.assertIn(rep["version"], ("V4.1", "V4.2", "V4.3", "V4.4", "V4.5"))
         self.assertEqual(len(rep["baseline"]["missing_baseline"]), 0)
         self.assertEqual(len(rep["baseline"]["missing_v4"]), 0)
         self.assertLessEqual(rep["sync_benchmark"]["max_skew_ms"], 25.0)
@@ -345,8 +345,10 @@ class TestV41RealEggFixesRegression(unittest.TestCase):
         sk = res_exec["skills"]
         self.assertEqual(sk.plan["target_slot"], "slot_12")
         # Verify planned SO-101 grasp pad z is at the egg equator (18.5 mm) and fingertip is 8.5 mm above table
-        self.assertAlmostEqual(float(sk.plan["grasp_pad_z_mm"]), 18.5, places=1)
-        self.assertAlmostEqual(float(sk.plan["fingertip_z_mm"]), 8.5, places=1)
+        # V4.5: pad centre at the egg equator (21 mm for a 42 mm egg), lowest fingertip >= 5 mm (was 18.5 / 8.5)
+        self.assertAlmostEqual(float(sk.plan["grasp_pad_z_mm"]), 21.0, places=1)
+        self.assertGreaterEqual(float(sk.plan["lowest_tip_z_mm"]), 5.0)
+        self.assertAlmostEqual(float(sk.plan["fingertip_z_mm"]), 11.0, places=1)
         # Verify egg long axis is rotated vertical (perpendicular to table) for slot insertion
         self.assertLessEqual(float(sk.plan["egg_long_axis_vertical_err_deg"]), 25.0)
 

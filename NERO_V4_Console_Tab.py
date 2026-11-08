@@ -44,7 +44,7 @@ from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 
-VERSION = "V4.4"
+VERSION = "V4.5"
 MARKER = "V4.2 VLA LEROBOT CONSOLE TAB"
 HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
@@ -367,10 +367,13 @@ class VLALeRobotTabUI:
         ckpt_target = self.v_ckpt.get().strip()
 
         def _job():
-            self.vla_policy.load(ckpt_target)
-            if not self.adapter.is_connected:
-                self.adapter.connect()
-            self.q.put(("btn_connect", "① 已加载 & 已连接"))
+            try:
+                self.vla_policy.load(ckpt_target)
+                if not self.adapter.is_connected:
+                    self.adapter.connect()
+                self.q.put(("btn_connect", "① 已加载 & 已连接"))
+            except Exception as exc:
+                self._log(f"[FAIL] [V4.5 VLA] 加载失败: {exc}")
 
         threading.Thread(target=_job, daemon=True).start()
 
@@ -423,7 +426,7 @@ class VLALeRobotTabUI:
         elif self._venv_st and st["venv_exists"]:
             st["venv"] = self._venv_st
         self._drive_found_last = bool(st["drive"].get("found"))
-        ST.apply_to_process_env(st["layout"])
+        self.q.put(("apply_env", st["layout"]))   # V4.5 CRASH FIX: os.environ is changed on the Tk main thread only
         if not self.job.running():
             self.job.L = st["layout"]
         self.q.put(("drive", ST.format_status(st)))
@@ -712,27 +715,36 @@ class VLALeRobotTabUI:
         ).start()
 
     def on_run_vla_loop(self) -> None:
-        if not self.vla_policy.is_loaded:
-            self.vla_policy.load(self.v_ckpt.get().strip())
-        if not self.adapter.is_connected:
-            self.adapter.connect()
+        # V4.5 CRASH / FREEZE FIX: loading SmolVLA from the drive takes 10-60 s -> never on the Tk main thread
+        ckpt = self.v_ckpt.get().strip()
         task = self.v_task.get().strip()
-        threading.Thread(
-            target=lambda: self.vla_policy.run_vla_closed_loop(self.adapter, task, max_chunks=3),
-            daemon=True,
-        ).start()
+
+        def _job():
+            try:
+                if not self.vla_policy.is_loaded:
+                    self.vla_policy.load(ckpt)
+                if not self.adapter.is_connected:
+                    self.adapter.connect()
+                self.vla_policy.run_vla_closed_loop(self.adapter, task, max_chunks=3)
+            except Exception as exc:
+                self._log(f"[FAIL] [V4.5 VLA] SmolVLA 闭环出错: {exc}")
+        threading.Thread(target=_job, daemon=True).start()
 
     def on_run_agent_task(self) -> None:
-        if not self.vla_policy.is_loaded:
-            self.vla_policy.load(self.v_ckpt.get().strip())
-        if not self.adapter.is_connected:
-            self.adapter.connect()
+        ckpt = self.v_ckpt.get().strip()   # V4.5: Tk variables read here, slow loading in the worker thread
         task = self.v_task.get().strip()
         pol = self.v_policy.get() or "smolvla"
-        threading.Thread(
-            target=lambda: self.orchestrator.run_task(task, policy=pol, max_vla_chunks=3),
-            daemon=True,
-        ).start()
+
+        def _job():
+            try:
+                if not self.vla_policy.is_loaded:
+                    self.vla_policy.load(ckpt)
+                if not self.adapter.is_connected:
+                    self.adapter.connect()
+                self.orchestrator.run_task(task, policy=pol, max_vla_chunks=3)
+            except Exception as exc:
+                self._log(f"[FAIL] [V4.5 AGENT] 顶层任务出错: {exc}")
+        threading.Thread(target=_job, daemon=True).start()
 
     def on_toggle_record(self) -> None:
         ds_name = self.v_ds_name.get().strip() or "nero_v4_demo"
@@ -826,6 +838,11 @@ class VLALeRobotTabUI:
                 self.v_drive.set(str(val))
             elif kind == "repoint_dataset":
                 self._repoint_dataset()
+            elif kind == "apply_env":
+                try:
+                    ST.apply_to_process_env(val)
+                except Exception:
+                    pass
         self._tick_n += 1
         try:
             self._poll_job()
@@ -836,8 +853,8 @@ class VLALeRobotTabUI:
             if self._drive_found_last is not None and found != self._drive_found_last:
                 self._drive_found_last = found
                 self._log(f"[INFO] [V4.4 DRIVE] 移动硬盘 {ST.DRIVE_LABEL} {'已插入' if found else '已拔出'}")
-                if not found:
-                    self.vla_policy.close_worker()
+                if not found:   # V4.5: closing the worker can wait up to 6 s -> not on the Tk main thread
+                    threading.Thread(target=self.vla_policy.close_worker, daemon=True).start()
                 threading.Thread(target=lambda: self._drive_refresh_job(probe=False), daemon=True).start()
         if self.visible_fn():
             self._refresh_status()

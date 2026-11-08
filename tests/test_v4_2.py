@@ -401,8 +401,10 @@ class TestV42FullClosedLoopPhases2To6(unittest.TestCase):
             ["observe_scene", "plan_egg_place", "pick_egg", "orient_for_slot", "place_egg_into_slot", "verify_egg_in_slot", "return_to_safe_pose"],
         )
         sk_held = res_held["skills"]
-        self.assertAlmostEqual(float(sk_held.plan["grasp_pad_z_mm"]), 18.5, places=1)
-        self.assertAlmostEqual(float(sk_held.plan["fingertip_z_mm"]), 8.5, places=1)
+        # V4.5: pad centre at the egg equator (21 mm for a 42 mm egg), lowest fingertip >= 5 mm (was 18.5 / 8.5)
+        self.assertAlmostEqual(float(sk_held.plan["grasp_pad_z_mm"]), 21.0, places=1)
+        self.assertGreaterEqual(float(sk_held.plan["lowest_tip_z_mm"]), 5.0)
+        self.assertAlmostEqual(float(sk_held.plan["fingertip_z_mm"]), 11.0, places=1)
         self.assertGreaterEqual(abs(float(sk_held.plan["place_pitch_deg"])), 65.0)
         self.assertLessEqual(float(sk_held.plan["egg_long_axis_vertical_err_deg"]), 25.0)
         # Verify the planned orient/above_target posture stays in the elbow-up branch (J2 > 0) and passes the 70 mm M1-M2 wall fence

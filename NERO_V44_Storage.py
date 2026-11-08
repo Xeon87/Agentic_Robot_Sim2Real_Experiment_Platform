@@ -41,7 +41,7 @@ import tempfile
 import time
 from typing import Any, Dict, List, Optional
 
-VERSION = "V4.4"
+VERSION = "V4.5"
 MARKER = "V4.4 EMBODIED_AI DRIVE STORAGE"
 
 DRIVE_LABEL = os.environ.get("NERO_DRIVE_LABEL", "EMBODIED_AI")
@@ -290,7 +290,11 @@ def apply_to_process_env(L: Optional[Dict[str, Any]] = None) -> List[str]:
     if not L["on_drive"]:
         return []
     changed = []
+    # V4.5: setenv() is not thread-safe against getenv() in C libraries (Tk / X11 / CUDA / librealsense threads):
+    # write only when a value really changes (normally once per drive mount), and only from the Tk main thread.
     for k, v in storage_env(L, for_heavy_job=False).items():
+        if os.environ.get(k) == v:
+            continue
         if k in ("NERO_LEROBOT_PYTHON",) or not os.environ.get(k) or os.environ.get(k) == os.environ.get("_NERO_V44_SET_" + k):
             os.environ[k] = v
             os.environ["_NERO_V44_SET_" + k] = v

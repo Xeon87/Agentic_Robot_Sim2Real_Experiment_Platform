@@ -1,0 +1,4 @@
+{
+  "_comment": "V4.5: measured egg-carton slot pitch in mm [along the long side, across]. Measure centre-to-centre of two neighbouring slots with a ruler and fill in, e.g. [47.0, 47.0]. null = derive from the outer box and correct by the slot cavities seen in depth.",
+  "slot_pitch_mm": null
+}

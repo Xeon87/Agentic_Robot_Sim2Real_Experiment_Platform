@@ -23,7 +23,7 @@ import sys
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-VERSION = "V4.4"
+VERSION = "V4.5"
 MARKER = "V4.2 TOP-LEVEL AGENT ORCHESTRATOR"
 
 from NERO_V4_Policy_Router import PolicyRouter

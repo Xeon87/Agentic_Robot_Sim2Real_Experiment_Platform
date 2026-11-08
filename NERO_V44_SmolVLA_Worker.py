@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-VERSION = "V4.4"
+VERSION = "V4.5"
 MARKER = "V4.4 SMOLVLA DRIVE WORKER"
 JOINT_NAMES_8D = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "gripper"]
 

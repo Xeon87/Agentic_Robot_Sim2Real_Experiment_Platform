@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.4"
+VERSION = "V4.5"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -337,6 +337,11 @@ def run_console(initial_tab="sim"):
     log_dir = os.path.join(HERE, "logs")
     os.makedirs(log_dir, exist_ok=True)
     console_log = os.path.join(log_dir, "console.log")
+    try:  # V4.5: keep the log of the previous run (after a crash the restart used to wipe it)
+        if os.path.isfile(console_log) and os.path.getsize(console_log) > 0:
+            os.replace(console_log, os.path.join(log_dir, "console.prev.log"))
+    except OSError:
+        pass
     open(console_log, "w").close()
 
     root = tk.Tk()
