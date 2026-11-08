@@ -406,40 +406,34 @@ class VisionCheckPanel:
         ttk.Label(r1, text=" 悬停高度").pack(side="left")
         self.v_hover = tk.StringVar(value=f"{HOVER_DEFAULT_MM:.0f}")
         ttk.Entry(r1, textvariable=self.v_hover, width=4).pack(side="left")
-        ttk.Label(r1, text="mm（爪尖 − 目标顶端）").pack(side="left")
+        ttk.Label(r1, text="mm").pack(side="left")
+        # V4.6.4 (fix): two rows + one status line only.  The left camera monitors (777 px) set the Camera page height;
+        # a taller 视觉定位 page squeezed the Camera log below the page to nothing.  Details go to the Camera log.
         r2 = ttk.Frame(fr)
         r2.pack(fill="x", padx=4, pady=1)
         self.btn_obs = ttk.Button(r2, text="识别目标", command=self.on_observe)
         self.btn_obs.pack(side="left")
-        ttk.Label(r2, text=" 目标").pack(side="left")
         self.v_target = tk.StringVar(value="")
-        self.cb_target = ttk.Combobox(r2, textvariable=self.v_target, values=[], width=10, state="readonly")
+        self.cb_target = ttk.Combobox(r2, textvariable=self.v_target, values=[], width=8, state="readonly")
         self.cb_target.pack(side="left", padx=2)
         self.btn_go = ttk.Button(r2, text="▶ 合爪并悬停", command=self.on_go)
-        self.btn_go.pack(side="left", padx=(6, 2))
+        self.btn_go.pack(side="left", padx=(4, 2))
         ttk.Button(r2, text="↑ 抬起", command=self.on_lift).pack(side="left", padx=2)
         ttk.Button(r2, text="■ 停止", command=self.on_stop).pack(side="left", padx=2)
-        r3 = ttk.Frame(fr)
-        r3.pack(fill="x", padx=4, pady=1)
-        ttk.Label(r3, text="爪尖 − 目标中心：dx").pack(side="left")
+        ttk.Label(r2, text="  爪尖−目标 dx").pack(side="left")
         self.v_dx = tk.StringVar(value="")
-        ttk.Entry(r3, textvariable=self.v_dx, width=6).pack(side="left")
-        ttk.Label(r3, text=" dy").pack(side="left")
+        ttk.Entry(r2, textvariable=self.v_dx, width=5).pack(side="left")
+        ttk.Label(r2, text="dy").pack(side="left")
         self.v_dy = tk.StringVar(value="")
-        ttk.Entry(r3, textvariable=self.v_dy, width=6).pack(side="left")
-        ttk.Label(r3, text=" mm（基座坐标） 备注").pack(side="left")
+        ttk.Entry(r2, textvariable=self.v_dy, width=5).pack(side="left")
+        ttk.Label(r2, text="mm").pack(side="left")
         self.v_note = tk.StringVar(value="")
-        ttk.Entry(r3, textvariable=self.v_note, width=18).pack(side="left")
-        self.btn_rec = ttk.Button(r3, text="记录偏差", command=self.on_record)
+        self.btn_rec = ttk.Button(r2, text="记录偏差", command=self.on_record)
         self.btn_rec.pack(side="left", padx=4)
-        self.v_status = tk.StringVar(value="dx / dy = 爪尖减目标中心，机械臂基座坐标（mm）；悬停后这里会提示 +X / +Y 在主相机画面里的方向。")
-        lab = JC.fixed_label(tk, fr, 2, textvariable=self.v_status, font=("TkDefaultFont", 9), wraplength=780,
+        self.v_status = tk.StringVar(value="悬停高度 = 爪尖 − 目标顶端；dx / dy = 爪尖 − 目标中心（基座坐标，悬停后提示 +X / +Y 在主相机画面里的方向）")
+        lab = JC.fixed_label(tk, fr, 1, textvariable=self.v_status, font=("TkDefaultFont", 9), wraplength=2000,
                              pack={"fill": "x", "padx": 4})
         self.v_sum = tk.StringVar(value=self._summary_text())
-        lab2 = JC.fixed_label(tk, fr, 1, textvariable=self.v_sum, font=("TkFixedFont", 9), wraplength=780,
-                              pack={"fill": "x", "padx": 4})
-        for l_ in (lab, lab2):                        # wrap at the width the window really gives
-            l_.holder.bind("<Configure>", lambda e, w=l_: w.configure(wraplength=max(300, e.width - 8)), add="+")
         self._poll()
 
     # ------------------------------------------------------------ plumbing
@@ -451,6 +445,11 @@ class VisionCheckPanel:
 
     def _ui(self, fn):
         self.q.put(fn)
+
+    def _say(self, text):
+        """status line (one line) + the same text into the Camera log (Tk thread)"""
+        self.v_status.set(text)
+        self.log(f"[INFO] [V4.6.4 VISION CHECK] {text}")
 
     def _poll(self):
         try:
@@ -516,7 +515,7 @@ class VisionCheckPanel:
                 fn()
             except Exception as exc:
                 self.log(f"[FAIL] [V4.6.4 VISION CHECK] {name}: {exc}")
-                self._ui(lambda e=exc: self.v_status.set(f"[失败] {name}：{e}"))
+                self._ui(lambda e=exc: self._say(f"[失败] {name}：{e}"))
         self.worker = threading.Thread(target=wrap, daemon=True, name=f"v464_{name}")
         self.worker.start()
 
@@ -524,15 +523,15 @@ class VisionCheckPanel:
     def on_observe(self):
         why = self._blocked(motion=False)
         if why:
-            self.v_status.set(f"[不能识别] {why}")
+            self._say(f"[不能识别] {why}")
             return
         try:
             vc = self._make()
         except Exception as exc:
-            self.v_status.set(f"[不能识别] {exc}")
+            self._say(f"[不能识别] {exc}")
             return
         self.vc = vc
-        self.v_status.set("识别中 ...（鸡蛋任务同一套识别）")
+        self._say("识别中 ...（鸡蛋任务同一套识别）")
 
         def job():
             tg = vc.observe()
@@ -544,29 +543,35 @@ class VisionCheckPanel:
                 self.cb_target.configure(values=ids)
                 if ids and self.v_target.get() not in ids:
                     self.v_target.set(ids[0])
-                self.v_status.set(f"识别到 {len(ids)} 个目标（鸡蛋 + 空槽）。选一个目标和测量方式，点「合爪并悬停」。")
+                self._say(f"识别到 {len(ids)} 个目标（鸡蛋 + 空槽）。选一个目标和测量方式，点「合爪并悬停」。")
             self._ui(ui)
         self._start("识别目标", job)
 
     def on_go(self):
         why = self._blocked(motion=True)
         if why:
-            self.v_status.set(f"[不能运动] {why}")
+            self._say(f"[不能运动] {why}")
             return
         if self.vc is None or not self.vc.targets:
-            self.v_status.set("先点「识别目标」")
+            self._say("先点「识别目标」")
             return
         tid, mode = self.v_target.get(), self.v_mode.get()
         try:
             hover = float(self.v_hover.get())
         except ValueError:
-            self.v_status.set("悬停高度请填数字（mm）")
+            self._say("悬停高度请填数字（mm）")
             return
         if not (HOVER_RANGE_MM[0] <= hover <= HOVER_RANGE_MM[1]):
-            self.v_status.set(f"悬停高度 {HOVER_RANGE_MM[0]:.0f}–{HOVER_RANGE_MM[1]:.0f} mm")
+            self._say(f"悬停高度 {HOVER_RANGE_MM[0]:.0f}–{HOVER_RANGE_MM[1]:.0f} mm")
             return
         if tid not in self.vc.targets:
-            self.v_status.set("选一个目标")
+            self._say("选一个目标")
+            return
+        # V4.6.4 (fix): the gripper is taken from the Agentic tab NOW (it may have been connected after 识别目标)
+        g = getattr(self.rct, "grip", None)
+        self.vc.io.grip = g if (g is not None and g.connected) else None
+        if self.vc.io.grip is None:
+            self._say("[不能运动] SO-101 夹爪没有连接（Agentic实机任务 页 → 夹爪「连接」）")
             return
         from tkinter import messagebox
         if not messagebox.askyesno("视觉精度验证", f"{MODE_LABEL[mode]}：夹爪会合拢，机械臂慢速移到 {tid} 上方，"
@@ -577,7 +582,7 @@ class VisionCheckPanel:
         self._save_pending("未填（开始了下一次）")
         vc = self.vc
         vc.io.stop_ev.clear()
-        self.v_status.set(f"{MODE_LABEL[mode]} · {tid}：运行中 ...")
+        self._say(f"{MODE_LABEL[mode]} · {tid}：运行中 ...")
 
         def job():
             res = vc.run(mode, tid, hover)
@@ -588,11 +593,11 @@ class VisionCheckPanel:
                     self.v_dx.set("")
                     self.v_dy.set("")
                     self.v_note.set("")
-                    self.v_status.set(f"{MODE_LABEL[mode]} · {tid}：{res['row']['decision']} · 到位误差 "
+                    self._say(f"{MODE_LABEL[mode]} · {tid}：{res['row']['decision']} · 到位误差 "
                                       f"{res['row'].get('arrive_err_mm')} mm。看爪尖偏离目标中心多少，填 dx / dy → "
                                       f"「记录偏差」。{res.get('hint', '')}")
                 else:
-                    self.v_status.set(f"{MODE_LABEL[mode]} · {tid}：没有完成 —— {res.get('error')}")
+                    self._say(f"{MODE_LABEL[mode]} · {tid}：没有完成 —— {res.get('error')}")
                     self._save_pending(res.get("error") or "没有完成")
             self._ui(ui)
         self._start("合爪并悬停", job)
@@ -627,24 +632,24 @@ class VisionCheckPanel:
 
     def on_record(self):
         if self.pending is None:
-            self.v_status.set("还没有可记录的悬停结果（先「合爪并悬停」）")
+            self._say("还没有可记录的悬停结果（先「合爪并悬停」）")
             return
         try:
             dx, dy = float(self.v_dx.get()), float(self.v_dy.get())
         except ValueError:
-            self.v_status.set("dx / dy 请填数字（mm，对准了就填 0）")
+            self._say("dx / dy 请填数字（mm，对准了就填 0）")
             return
         row = dict(self.pending, user_dx_mm=round(dx, 1), user_dy_mm=round(dy, 1), user_note=self.v_note.get().strip())
         self.pending = None
         try:
             path = self.book.append(row)
         except Exception as exc:
-            self.v_status.set(f"[没有记录] {exc}")
+            self._say(f"[没有记录] {exc}")
             return
         self.log(f"[OK] [V4.6.4 VISION CHECK] 记录：{MODE_LABEL[row['mode']]} {row['target']} 偏差 dx {dx:+.1f} / dy {dy:+.1f} mm "
                  f"（使用 {row.get('used_from')}；{row.get('decision')}）→ {path}")
-        self.v_status.set(f"已记录 {row['target']}：dx {dx:+.1f} / dy {dy:+.1f} mm。可以「抬起」再测下一个。")
         self.v_sum.set(self._summary_text())
+        self._say(f"已记录 {row['target']}：dx {dx:+.1f} / dy {dy:+.1f} mm。可以「抬起」再测下一个。汇总：{self.v_sum.get()}")
 
 
 def _walk(w):
@@ -665,13 +670,13 @@ def attach(tk, ttk, cam_tab, rct_tab, pipe, jpanel, log=None):
             break
     if page is None:
         raise RuntimeError("找不到「视觉定位」页")
-    # room for the panel in the default 1420x1000 window: the page's recognition table (tv_eggs, 6 rows) shows 4 rows
+    # room for the panel in the default 1420x1000 window: the page's recognition table (tv_eggs, 6 rows) shows 3 rows
     # (it still scrolls); only the widget option is changed at run time - NERO_V325_Camera.py stays as it is (frozen)
     tv = getattr(cam_tab, "tv_eggs", None)
     if tv is not None:
         try:
-            if int(tv.cget("height")) > 4:
-                tv.configure(height=4)
+            if int(tv.cget("height")) > 3:
+                tv.configure(height=3)
         except Exception:
             pass
     return VisionCheckPanel(tk, ttk, page, rct_tab, cam_tab, pipe, jpanel, log=log)

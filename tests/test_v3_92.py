@@ -26,8 +26,8 @@ import NERO_V386_Real_Wrist_Camera as RWC
 
 class TestV392Part1CleanPhysicsFixes(unittest.TestCase):
     def test_version_is_v392(self):
-        self.assertIn(RT.VERSION, ("V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4"))
-        self.assertIn(RWC.VERSION, ("V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4"))
+        self.assertIn(RT.VERSION, ("V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4", "V4.6.5"))
+        self.assertIn(RWC.VERSION, ("V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4", "V4.6.5"))
 
     def test_vision_review_rows_text_includes_depth_height_and_parse_truncated_json(self):
         dets = [

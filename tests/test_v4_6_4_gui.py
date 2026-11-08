@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """V4.6.4 GUI test (needs tkinter + DISPLAY; skips otherwise): the whole console is started; Camera调试 -> 视觉定位
 carries the 视觉精度验证 panel (3 modes, hover height 10 mm, 识别目标 / 合爪并悬停 / 抬起 / 停止, dx / dy / 备注,
-记录偏差), every control is inside the default 1420x1000 window; without a camera the buttons refuse with the
+记录偏差), the gripper is taken from the Agentic tab at click time, the Camera log keeps its V4.6.3 height,
+every control is inside the default 1420x1000 window; without a camera the buttons refuse with the
 reason (nothing moves); 记录偏差 without a hover result asks for one first; dx / dy must be numbers."""
 import gc
 import os
@@ -86,7 +87,34 @@ def loop(self, n=0):
         p.v_dy.set("-3")
         p.on_record()
         RES["record_ok"] = p.v_status.get()
-        RES["sum"] = p.v_sum.get()
+        RES["record_ok"] = p.v_sum.get()
+        # gripper connected AFTER 识别目标 (the user's case): 合爪并悬停 takes it from the Agentic tab at click time
+        import types
+        from tkinter import messagebox
+        messagebox.askyesno = lambda *a, **k: True
+        seen = {}
+
+        class FakeGrip:
+            connected = True
+        fake_io = types.SimpleNamespace(grip=None, stop_ev=types.SimpleNamespace(clear=lambda: None))
+        p.vc = types.SimpleNamespace(io=fake_io, targets={"egg_1": {}},
+                                     run=lambda mode, tid, h: seen.update(grip=fake_io.grip) or
+                                     {"ok": False, "row": {"mode": mode, "target": tid}, "error": "test"})
+        p._blocked = lambda motion=True: ""
+        p.v_target.set("egg_1")
+        real_grip = p.rct.grip
+        p.rct.grip = FakeGrip()
+        p.on_go()
+        p.worker.join(5)
+        RES["grip_seen"] = seen.get("grip")
+        p.rct.grip = types.SimpleNamespace(connected=False)
+        p.on_go()
+        RES["grip_off"] = p.v_status.get()
+        p.rct.grip = real_grip
+        # the Camera tab's log below the page keeps (at least) its V4.6.3 height
+        cam_texts = [w for w in walk(p.cam_tab.nb.master.master.master) if w.winfo_class() == "Text"]
+        RES["cam_log_h"] = max((w.winfo_height() for w in walk(self) if w.winfo_class() == "Text"
+                                and w.winfo_ismapped() and w.winfo_reqheight() >= 140), default=0)
         if os.environ.get("NERO_V464_SHOT"):
             self.update()
             os.system(f"import -window root {os.environ['NERO_V464_SHOT']}")
@@ -109,8 +137,11 @@ assert RES["go"].startswith("[不能运动]"), RES["go"]
 assert "先「合爪并悬停」" in RES["record"], RES["record"]
 assert "请填数字" in RES["record_bad"], RES["record_bad"]
 assert "dx +12.0 / dy -3.0" in RES["record_ok"], RES["record_ok"]
-assert "vision_check/vision_check_" in RES["sum"] and "① 只用主相机：1 点" in RES["sum"], RES["sum"]
-assert RES["labels_ok"] == [], RES["labels_ok"]          # every row / text line complete and inside the window
+assert "vision_check/vision_check_" in RES["record_ok"] and "① 只用主相机：1 点" in RES["record_ok"], RES["record_ok"]
+assert RES["labels_ok"] == [], RES["labels_ok"]
+assert type(RES["grip_seen"]).__name__ == "FakeGrip", RES["grip_seen"]
+assert "夹爪没有连接" in RES["grip_off"], RES["grip_off"]
+assert RES["cam_log_h"] >= 33, RES["cam_log_h"]                  # V4.6.3: 33 px; V4.6.4 first build: 1 px          # every row / text line complete and inside the window
 print("[G1] 视觉定位 -> 视觉精度验证: all controls inside the 1420x1000 window; no camera -> refused with the reason; "
       "dx / dy recorded to NERO_CALIB_DIR/vision_check + per-mode summary")
 print("ALL V4.6.4 GUI TESTS PASSED")
