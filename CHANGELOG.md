@@ -1,3 +1,25 @@
+## V4.6.4 (2026-11-08) — 视觉精度验证（合爪对准，三种测量方式）
+- 新模块 `NERO_V464_Vision_Check.py`（`V4.6.4 VISION ACCURACY CHECK`），由控制台挂到 Camera调试 →「视觉定位」页底部（`VC.attach`，不改冻结的 `NERO_V325_Camera.py`）。
+  - 识别：`RealEggSkills.observe_scene`（与鸡蛋任务同一套识别，Agentic 页 YOLOE 设置）。
+  - 夹爪合拢：`open_deg(0)`，即空夹标定的碰合点；未做空夹标定时拒绝。
+  - 合拢爪尖：在抓取坐标系 G 中位于 (0, −WALL_HALF, +TIP_BEYOND_GRASP_M)，即固定指胶垫内表面末端，加上 Agentic 页的指尖修正。
+  - 运动：IK 在 15° 一档的偏航里找可达姿态（爪尖朝下），关节运动到顶端上方 60 mm，再直线 20 mm/s 严格到位降到顶端 + 悬停高度（默认 10 mm）。
+  - 三种方式：① 主相机；② 腕部（`SLOT_LOOK_POSES` 观察位，两次可信读数相差 ≤ 4 mm）；③ 主相机 + 腕部（修正 ≤ 15 mm 才采用）。
+  - 记录：CSV + 照片存到 `NERO_CALIB_DIR/vision_check/`；按方式汇总；主相机画面里 +X / +Y 方向提示。
+- 「视觉定位」页识别表 `tv_eggs` 运行时显示 4 行（原 6 行），为面板腾出位置。
+- 控制台 / 实机模块版本 V4.6.4。
+- 测试：
+  - 新 `tests/test_v4_6_4.py`（6 项）：
+    - 合拢爪尖模型与 `real_mount` 一致，`tcp_for_tip` 与 `tip_from_tcp_T` 互逆；
+    - 三种方式在假机械臂上爪尖最终位置正确；
+    - 不可达目标和未做空夹标定都拒绝且不运动；
+    - CSV、汇总和方向提示正确。
+  - 新 `tests/test_v4_6_4_gui.py`：启动整个控制台，在 1420×1000 窗口内所有控件和文字行完整可见；无相机时按钮拒绝并给原因；记录偏差流程正常。
+  - 版本白名单补 V4.6.4。
+- **回归**（和 V4.6.3 用同一套测试对比）：非 GUI 104 个文件、GUI 41 个，只有原有失败。第一次跑出 `test_v3_57 / test_v3_58` 两个回归：这两个测试用模拟的 tkinter 启动控制台，面板挂载失败后写失败日志时碰了模拟的文本框。已改成通过实机管线的日志队列写，复测通过。`test_v4_6_4_gui` 把窗口固定为 1420×1000，在 1600×1000 和 1920×1080 的虚拟屏幕上都通过。
+- 已知限制：屏幕高度小于 1080 时，控制台窗口会小于 1000 像素，面板底部可能被截掉，请最大化窗口。
+- **没有在真实硬件上运行过。**
+
 ## V4.6.3 (2026-11-08) — 热修复：V4.6.2 鸡蛋任务中控制台 abort（Tk 主线程 C 层）
 - 现象：`Fatal Python error: Aborted`，主线程在 `NERO_V316._status → lbl_now.configure`；任务线程在 `_send_move` 等待，其余线程（相机采集、子进程 reader / watcher、CAN、pump）不碰 Tk。C 层原因只打印在终端，未记录。
 - 跨线程 Tk 探针（包装 tkapp，记录非主线程的 Tk 调用，跑全部 GUI 测试）：`real_cfg()` 在工作线程（`_fw_cfg / _run_mode_helper / set_teach_mode / 关节任务 / 一致性测试`）里读 Tk 变量。V4.6.3：`NERO_V312.real_cfg` 在非主线程返回主线程快照（`real_poll` 和 `start_job` 刷新）；重跑探针后只剩冻结的 `NERO_V325._marker_from_ui`（手眼标定）。

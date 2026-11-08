@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.6.3"
+VERSION = "V4.6.4"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -917,6 +917,19 @@ def run_console(initial_tab="sim"):
                 lambda _e: rct_tab.refresh_skill() if nb.select() == str(rct_outer) else None, add="+")
     except Exception as exc:
         log_append(real_log, f"[FAIL] [V3.65 REAL CUP TASK] {TAB_AGENTIC} tab not available: {exc}")
+
+    # ---- V4.6.4 VISION ACCURACY CHECK: panel at the bottom of Camera调试 -> 视觉定位 (closed SO-101 fingertip above
+    #      the target; main camera only / wrist camera only / main + wrist assist; the person writes dx / dy)
+    vision_check = None
+    if rct_tab is not None:
+        try:
+            import NERO_V464_Vision_Check as VC
+            vision_check = VC.attach(tk, ttk, cam_tab, rct_tab, pipe, jpanel, log=cam_log_line)
+        except Exception as exc:
+            try:
+                pipe.log(f"[FAIL] [V4.6.4 VISION CHECK] 视觉精度验证面板不可用：{exc}")
+            except Exception:
+                pass
 
     # ---- V4.1 VLA / LeRobot TAB: Dual-Path Control Arbiter, Observation Bridge, LeRobot Adapter & Action Executor
     # V4.5.1 LAZY VLA TAB: the tab is built the first time it is OPENED, not at console start. A V4.5 console crashed

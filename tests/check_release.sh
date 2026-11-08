@@ -89,6 +89,7 @@ grep -qF 'V4.6 EGG CAMERA AGREEMENT + STRICT ARRIVAL' NERO_V365_Real_Cup_Task.py
 grep -qF 'V4.6.1 MEASURED HELD GAP + WRIST LOG ONLY' NERO_V365_Real_Cup_Task.py && grep -qF 'V4.6.1 WRIST VIEW GATE' NERO_V386_Real_Wrist_Camera.py && grep -qF 'class CameraMonitorMirror' NERO_V365_Real_Cup_Task.py && grep -qF 'TAB_SMOLVLA = "Smol VLA实机任务"' NERO_V312_Console.py && grep -qF '"held_gap_mm": 26.5' config/egg_carton.json || { echo "[FAIL] V4.6.1 markers missing"; exit 1; }
 grep -qF 'V4.6.2 TEACH BAR + GRAVITY COMP' NERO_V462_Teach_Gravity.py && grep -qF 'V4.6.2 TEACH BAR + GRAVITY COMP + FULL-WIDTH LOG' NERO_V365_Real_Cup_Task.py && grep -qF 'def cmd_probe' NERO_V313_Real_Robot.py && grep -qF 'TG.payload_arg(TG.load())' NERO_V312_Console.py && grep -qF 'logbar.pack(side="bottom"' NERO_V4_Console_Tab.py || { echo "[FAIL] V4.6.2 markers missing"; exit 1; }
 grep -qF 'V4.6.3 NATIVE CRASH GUARD' NERO_V312_Console.py && grep -qF 'def v463_x_error_handlers' NERO_V312_Console.py && grep -qF 'LIBC_FATAL_STDERR_=1' start_nero.sh && grep -qF 'logs/stderr.log' start_nero.sh || { echo "[FAIL] V4.6.3 markers missing"; exit 1; }
+grep -qF 'V4.6.4 VISION ACCURACY CHECK' NERO_V464_Vision_Check.py && grep -qF 'VC.attach(tk, ttk, cam_tab, rct_tab, pipe, jpanel' NERO_V312_Console.py || { echo "[FAIL] V4.6.4 markers missing"; exit 1; }
 grep -qF 'V3.81 YOLOE TRAIN' NERO_V381_Yolo_Train.py && grep -qF 'V3.81 PROFILE FILES + TRAIN PAGE' NERO_V379_Camera_Lab.py && grep -qF 'NERO_V381_Yolo_Train.py' start_nero.sh || { echo "[FAIL] V3.81 train marker missing"; exit 1; }
 grep -qF 'V3.82 FINE-TUNED MODELS' NERO_V347_Yolo_Perception.py && grep -qF 'V3.82 HIGHLIGHTS + GAMMA + LABEL ASSIST' NERO_V379_Camera_Lab.py && grep -qF 'V3.82 APPLY FINE-TUNED + 1280 TRAINING' NERO_V381_Yolo_Train.py || { echo "[FAIL] V3.82 marker missing"; exit 1; }
 grep -qF 'V3.83 MULTI-MODEL DISTRIBUTION' NERO_V347_Yolo_Perception.py && grep -qF 'V3.83 GPU PREFLIGHT' start_nero.sh && grep -qF 'NERO_V383_Gpu_Check.py' start_nero.sh || { echo "[FAIL] V3.83 marker missing"; exit 1; }
@@ -160,4 +161,5 @@ python3 tests/test_v4_6.py 2>&1 | tail -1   # V4.6 SmolVLA gate / honest results
 python3 tests/test_v4_6_1.py 2>&1 | tail -1   # V4.6.1 measured held gap / wrist log only / view gate / tabs
 python3 tests/test_v4_6_2.py 2>&1 | tail -1   # V4.6.2 teach bar / gravity compensation / probe / log layout
 python3 tests/test_v4_6_3.py 2>&1 | tail -1   # V4.6.3 native crash guard (XInitThreads, stderr.log, cfg snapshot)
+python3 tests/test_v4_6_4.py 2>&1 | tail -1   # V4.6.4 vision accuracy check (closed fingertip, 3 modes)
 python3 tests/test_v4_6_1_gui.py | tail -1   # skips without tkinter / DISPLAY
