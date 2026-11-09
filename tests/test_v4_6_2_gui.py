@@ -217,6 +217,8 @@ def shot(name):
 
 
 # ---- G1 / G2 layout
+if hasattr(vt, "sub_nb"):                     # V4.6.9: the teach bar is on the 「② 示教采集」 sub-page
+    vt.sub_nb.select(vt.pages["teach"])
 for frame, name in ((fr, "Agentic"), (fr3, "SmolVLA")):
     nb.select(frame)
     pump(1.0)
@@ -235,6 +237,8 @@ assert vt.txt.winfo_height() >= 80, vt.txt.winfo_height()
 assert on_screen(vt.txt)
 # the drive details fold (default folded, lamps stay); the default console window 1420x1000 still leaves the log room
 assert not vt.drv_detail.winfo_manager() and vt.lamp_drive is not None
+if hasattr(vt, "sub_nb"):                     # V4.6.9: the drive section is on 「① 准备」
+    vt.sub_nb.select(vt.pages["prep"])
 vt.toggle_drive_detail()
 pump(0.3)
 assert vt.drv_detail.winfo_ismapped() and "▴" in vt.btn_drv_fold.cget("text")

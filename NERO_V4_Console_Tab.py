@@ -56,6 +56,7 @@ from NERO_V4_Agent_Orchestrator import AgentOrchestrator
 from NERO_V4_Benchmark import DualPathBenchmark, SimToRealVerifier
 from NERO_V4_Control_Arbiter import CONTROL_MODES, ControlArbiter
 from NERO_V4_Dataset_Recorder import DemonstrationRecorder, NEROLeRobotDataset
+from NERO_V4_Dataset_Recorder import replay_episode_real, REPLAY_OPEN_GAP_MM, REPLAY_CLAMP_PCT  # V4.6.9
 from NERO_V4_LeRobot_Adapter import NEROIPCServer, NEROLeRobotAdapter
 from NERO_V4_Observation_Bridge import ObservationBridge
 from NERO_V4_Policy_Router import PolicyRouter
@@ -191,9 +192,45 @@ class VLALeRobotTabUI:
             font=("TkDefaultFont", 9, "bold"), wraplength=1170, pack={"fill": "x", "pady": (0, 3)}
         )
 
-        # V4.4 Section 0: EMBODIED_AI removable drive (LeRobot venv, models, datasets, training runs)
-        drv_f = ttk.LabelFrame(
-            parent, text=f"0. 移动硬盘 {ST.DRIVE_LABEL}：LeRobot + SmolVLA 环境 / 模型 / 数据集 / 训练文件")
+        # V4.6.9 LAYOUT (user: "混乱、拥挤"): one fixed top bar (back end, policy, control authority, E-STOP always
+        # visible) + 5 sub-pages in working order ① 准备 ② 示教采集 ③ 训练 ④ 执行 ⑤ 评估 / 高级; status, monitors
+        # and the log below are shared by all pages
+        top = ttk.Frame(parent)
+        top.pack(fill="x", pady=(0, 2))
+        es = ttk.Frame(top)                                     # packed FIRST on the right: never pushed off screen
+        es.pack(side="right", padx=(6, 0))
+        self.btn_estop = tk.Button(
+            es, text="■ 紧急急停 (E-STOP)", bg="#c62828", fg="white",
+            font=("TkDefaultFont", 10, "bold"), command=self.on_estop, height=1
+        )
+        self.btn_estop.pack(side="left")
+        ttk.Button(es, text="解除急停", command=self.on_clear_estop).pack(side="left", padx=(4, 0))
+        self.lamp_4 = StatusLamp(tk, ttk, es, "④急停", 10)
+        tb = ttk.Frame(top)
+        tb.pack(side="left", fill="x", expand=True)
+        ttk.Label(tb, text="后端:", font=("TkDefaultFont", 9, "bold")).pack(side="left")
+        self.v_backend = tk.StringVar(value="mock")
+        for val, lab in (("mock", "仿真替身"), ("mujoco", "MuJoCo"), ("real", "实机 NERO")):
+            ttk.Radiobutton(tb, text=lab, value=val, variable=self.v_backend, command=self.on_backend_change).pack(side="left", padx=2)
+        ttk.Label(tb, text="  策略:", font=("TkDefaultFont", 9, "bold")).pack(side="left")
+        self.v_policy = tk.StringVar(value="smolvla")
+        for p_val, p_lab in (("smolvla", "SmolVLA"), ("traditional", "传统技能")):
+            ttk.Radiobutton(tb, text=p_lab, value=p_val, variable=self.v_policy).pack(side="left", padx=2)
+        self.v_arb_text = tk.StringVar(value="控制权: monitor · 只读")
+        ttk.Label(tb, textvariable=self.v_arb_text, foreground="#37474f").pack(side="left", padx=(10, 0))
+
+        self.sub_nb = ttk.Notebook(parent)
+        self.sub_nb.pack(fill="x", pady=(0, 2))
+        pg = {}
+        for key, title in (("prep", "① 准备"), ("teach", "② 示教采集"), ("train", "③ 训练"), ("run", "④ 执行"),
+                           ("adv", "⑤ 评估 / 高级")):
+            f_ = ttk.Frame(self.sub_nb, padding=4)
+            self.sub_nb.add(f_, text=title)
+            pg[key] = f_
+        self.pages = pg
+
+        # ---------------------------------------------------------------- ① 准备
+        drv_f = ttk.LabelFrame(pg["prep"], text=f"移动硬盘 {ST.DRIVE_LABEL}：LeRobot + SmolVLA 环境 / 模型 / 数据集 / 训练文件")
         drv_f.pack(fill="x", pady=2)
         d0 = ttk.Frame(drv_f)                                   # V4.6 STATUS LAMPS
         d0.pack(fill="x", padx=6, pady=(2, 0))
@@ -202,8 +239,6 @@ class VLALeRobotTabUI:
         self.lamp_model = StatusLamp(tk, ttk, d0, "模型", 34)
         self.lamp_job = StatusLamp(tk, ttk, d0, "后台任务", 26)
         self.lamp_drive.set("busy", "检测中")
-        # V4.6.2: the drive details (text + 2 button rows) fold away (default folded) so the log below the monitors
-        # keeps its height in the default 1420x1000 console window; the four lamps above always stay visible.
         self.drv_detail = ttk.Frame(drv_f)
         self.btn_drv_fold = ttk.Button(d0, text="硬盘详情 ▾", command=self.toggle_drive_detail)
         self.btn_drv_fold.pack(side="right")
@@ -244,111 +279,64 @@ class VLALeRobotTabUI:
         ttk.Label(d2, text="后台任务:").pack(side="left", padx=(6, 1))
         self.v_job = tk.StringVar(value="无")
         ttk.Label(d2, textvariable=self.v_job, width=60).pack(side="left", padx=2)
-
-        # Section 11.1: System Configuration
-        cfg_f = ttk.LabelFrame(parent, text="1. 系统配置、策略路径与控制权仲裁 (System Config & Control Arbiter)")
-        cfg_f.pack(fill="x", pady=2)
-
-        r0 = ttk.Frame(cfg_f)
-        r0.pack(fill="x", padx=6, pady=2)
-        ttk.Label(r0, text="后端环境:").pack(side="left")
-        self.v_backend = tk.StringVar(value="mock")
-        for val, lab in (("mock", "仿真替身 (Twin/Mock)"), ("mujoco", "MuJoCo 双相机"), ("real", "实机 NERO + D435i/OV4688")):
-            ttk.Radiobutton(r0, text=lab, value=val, variable=self.v_backend, command=self.on_backend_change).pack(side="left", padx=3)
-
-        ttk.Label(r0, text="操作策略:").pack(side="left", padx=(8, 2))
-        self.v_policy = tk.StringVar(value="smolvla")
-        for p_val, p_lab in (("smolvla", "路径 B: SmolVLA"), ("traditional", "路径 A: Traditional Skills")):
-            ttk.Radiobutton(r0, text=p_lab, value=p_val, variable=self.v_policy).pack(side="left", padx=3)
-
-        ttk.Label(r0, text="控制权模式:").pack(side="left", padx=(8, 2))
-        self.v_mode = tk.StringVar(value="monitor")
-        self.cb_mode = ttk.Combobox(r0, textvariable=self.v_mode, values=list(CONTROL_MODES), width=11, state="readonly")
-        self.cb_mode.pack(side="left", padx=2)
-        self.cb_mode.bind("<<ComboboxSelected>>", lambda _e: self.on_mode_select())
-
-        r1 = ttk.Frame(cfg_f)
-        r1.pack(fill="x", padx=6, pady=2)
-        ttk.Label(r1, text="数据集名:").pack(side="left")
-        self.v_ds_name = tk.StringVar(value="nero_v4_demo")
-        ttk.Entry(r1, textvariable=self.v_ds_name, width=16).pack(side="left", padx=2)
-        ttk.Label(r1, text="SmolVLA 权重:").pack(side="left", padx=(6, 2))
+        mrow = ttk.Frame(pg["prep"])
+        mrow.pack(fill="x", padx=2, pady=2)
+        ttk.Label(mrow, text="SmolVLA 权重:").pack(side="left")
         self.v_ckpt = tk.StringVar(value="lerobot/smolvla_base")
-        ttk.Entry(r1, textvariable=self.v_ckpt, width=24).pack(side="left", padx=2)
-        self.btn_dl_model = ttk.Button(r1, text="下载 SmolVLA 模型", command=self.on_download_smolvla)
+        ttk.Entry(mrow, textvariable=self.v_ckpt, width=24).pack(side="left", padx=2)
+        self.btn_dl_model = ttk.Button(mrow, text="下载 SmolVLA 模型", command=self.on_download_smolvla)
         self.btn_dl_model.pack(side="left", padx=2)
-        self.btn_chk_status = ttk.Button(r1, text="查询 LeRobot/模型状态", command=self.on_check_lerobot_status)
+        self.btn_chk_status = ttk.Button(mrow, text="查询 LeRobot/模型状态", command=self.on_check_lerobot_status)
         self.btn_chk_status.pack(side="left", padx=2)
-        ttk.Label(r1, text="高层任务指令:").pack(side="left", padx=(6, 2))
+        self.btn_connect = ttk.Button(mrow, text="① 加载 SmolVLA & 连接 Adapter", command=self.on_connect_and_load)
+        self.btn_connect.pack(side="left", padx=(10, 2))
+        self.lamp_1 = StatusLamp(tk, ttk, mrow, "①", 10)
+        trow = ttk.Frame(pg["prep"])
+        trow.pack(fill="x", padx=2, pady=2)
+        ttk.Label(trow, text="数据集名:").pack(side="left")
+        self.v_ds_name = tk.StringVar(value="nero_v4_demo")
+        ttk.Entry(trow, textvariable=self.v_ds_name, width=16).pack(side="left", padx=2)
+        ttk.Label(trow, text="任务指令:").pack(side="left", padx=(8, 2))
         self.v_task = tk.StringVar(value="Put the red block into the left box, then put the blue block into the right box")
-        ttk.Entry(r1, textvariable=self.v_task, width=42).pack(side="left", padx=2, fill="x", expand=True)
+        ttk.Entry(trow, textvariable=self.v_task, width=42).pack(side="left", padx=2, fill="x", expand=True)
 
-        # Section 11.3A: Explicit 4-Stage Control Separation Bar
-        ctrl_f = ttk.LabelFrame(parent, text="2. 四级安全分离控制栏（① 加载模型/连接 → ② 允许控制 → ③ 开始执行 → ④ 停止/急停）")
-        ctrl_f.pack(fill="x", pady=2)
-        # V4.6: E-STOP group packed FIRST on the right of the whole section, so a long row can never push it off screen
-        es = ttk.Frame(ctrl_f)
-        es.pack(side="right", fill="y", padx=(4, 6), pady=3)
-        self.btn_estop = tk.Button(
-            es, text="■ 紧急急停 (E-STOP)", bg="#c62828", fg="white",
-            font=("TkDefaultFont", 10, "bold"), command=self.on_estop, height=2
-        )
-        self.btn_estop.pack(side="top", fill="x")
-        es2 = ttk.Frame(es)
-        es2.pack(side="top", fill="x", pady=(2, 0))
-        ttk.Button(es2, text="解除急停", command=self.on_clear_estop).pack(side="left")
-        self.lamp_4 = StatusLamp(tk, ttk, es2, "④急停", 10)
-        cb = ttk.Frame(ctrl_f)                                  # row 1: ① load / connect, ② allow control
-        cb.pack(fill="x", padx=6, pady=(3, 1))
-        ttk.Button(cb, text="Phase 0 审查", command=self.on_phase0_audit).pack(side="left", padx=(0, 4))
-        self.btn_connect = ttk.Button(cb, text="① 加载 SmolVLA & 连接 Adapter", command=self.on_connect_and_load)
-        self.btn_connect.pack(side="left", padx=3)
-        self.lamp_1 = StatusLamp(tk, ttk, cb, "①", 10)
-        self.btn_ipc = ttk.Button(cb, text="IPC 服务", command=self.on_toggle_ipc)
-        self.btn_ipc.pack(side="left", padx=3)
-        self.v_allow = tk.BooleanVar(value=False)
-        self.chk_allow = ttk.Checkbutton(
-            cb, text="② 允许机器人控制 (Allow Control)", variable=self.v_allow, command=self.on_toggle_allow
-        )
-        self.chk_allow.pack(side="left", padx=(8, 0))
-        self.lamp_2 = StatusLamp(tk, ttk, cb, "②", 8)
-        cb2 = ttk.Frame(ctrl_f)                                 # row 2: ③ run, ④ stop
-        cb2.pack(fill="x", padx=6, pady=(1, 3))
-        ttk.Button(cb2, text="③ 执行 SmolVLA 闭环", command=self.on_run_vla_loop).pack(side="left", padx=(0, 3))
-        ttk.Button(cb2, text="③ 执行顶层 Agent 双路径任务", command=self.on_run_agent_task).pack(side="left", padx=3)
-        self.lamp_3 = StatusLamp(tk, ttk, cb2, "③", 16)
-        ttk.Button(cb2, text="④ 停止执行", command=self.on_stop_queue).pack(side="left", padx=3)
-        # V4.6.2 TEACH BAR: 「进入示教模式」 「退出示教模式」 「高级」(gravity compensation) - same bar as 「Agentic实机任务」
+        # ---------------------------------------------------------------- ② 示教采集
         self.teach_bar = None
         if self.pipe is not None and hasattr(self.pipe, "set_teach_mode"):
             import NERO_V462_Teach_Gravity as TG
             self.teach_bar = TG.TeachBar(
-                tk, ttk, cb2, self.pipe, jpanel=self.jpanel, log=self._log, cam_tab=self.cam_tab,
+                tk, ttk, pg["teach"], self.pipe, jpanel=self.jpanel, log=self._log, cam_tab=self.cam_tab,
                 busy_fn=lambda: (f"「{self._run_kind}」正在执行" if self._run_busy.locked() else ""),
-                safe_tab_fn=lambda: self.safe_tab, pack={"side": "left", "padx": (16, 0)})
-
-        # Section 11.3B: Dataset Recording, Fine-Tuning, Sim-to-Real Ladder & Benchmark
-        rec_f = ttk.LabelFrame(parent, text="3. 示教采集与回放 (Phase 2) · 微调训练 (Phase 3) · Sim-to-Real 阶梯与三模式 Benchmark (Phase 5/6)")
-        rec_f.pack(fill="x", pady=2)
-        rb = ttk.Frame(rec_f)
-        rb.pack(fill="x", padx=6, pady=3)
-
+                safe_tab_fn=lambda: self.safe_tab, pack={"fill": "x", "padx": 2, "pady": (0, 2)})
+        rb = ttk.Frame(pg["teach"])
+        rb.pack(fill="x", padx=2, pady=2)
         self.btn_rec = ttk.Button(rb, text="● 开始示教录制", command=self.on_toggle_record)
-        self.btn_rec.pack(side="left", padx=2)
-        ttk.Button(rb, text="夹爪示教: 张开", command=lambda: self.recorder.set_teach_gripper_norm(1.0)).pack(side="left", padx=2)
-        ttk.Button(rb, text="夹爪示教: 夹紧", command=lambda: self.recorder.set_teach_gripper_norm(0.0)).pack(side="left", padx=2)
-        ttk.Label(rb, text="Episode#:").pack(side="left", padx=(6, 1))
+        self.btn_rec.pack(side="left", padx=(0, 6))
+        ttk.Button(rb, text="夹爪示教: 张开", command=lambda: self.on_teach_gripper(True)).pack(side="left", padx=2)
+        ttk.Button(rb, text="夹爪示教: 夹紧", command=lambda: self.on_teach_gripper(False)).pack(side="left", padx=2)
+        self.v_grip_teach = tk.StringVar(value="空格键 = 张开 / 夹紧 切换（录制时双手扶臂也能操作）")
+        ttk.Label(rb, textvariable=self.v_grip_teach, foreground="#1565c0").pack(side="left", padx=6)
+        rb3 = ttk.Frame(pg["teach"])
+        rb3.pack(fill="x", padx=2, pady=2)
+        ttk.Label(rb3, text="Episode#:").pack(side="left")
         self.v_ep_idx = tk.StringVar(value="0")
-        ttk.Spinbox(rb, from_=0, to=999, textvariable=self.v_ep_idx, width=4).pack(side="left")
-        ttk.Button(rb, text="回放 Episode", command=self.on_replay_episode).pack(side="left", padx=2)
-        ttk.Button(rb, text="删除 Episode", command=self.on_delete_episode).pack(side="left", padx=2)
-        ttk.Button(rb, text="快速微调 (内置 NERO VLA)", command=self.on_finetune).pack(side="left", padx=(8, 2))
-        ttk.Button(rb, text="Sim-to-Real 6级验证", command=self.on_sim2real_ladder).pack(side="left", padx=4)
-        ttk.Button(rb, text="运行 A/B/C 对比 Benchmark", command=self.on_run_benchmark).pack(side="left", padx=2)
+        ttk.Spinbox(rb3, from_=0, to=999, textvariable=self.v_ep_idx, width=4,
+                    command=self._update_ep_info).pack(side="left")
+        ttk.Label(rb3, text=" 回放速度").pack(side="left")
+        self.v_replay_speed = tk.StringVar(value="0.5×")
+        ttk.Combobox(rb3, textvariable=self.v_replay_speed, values=("0.25×", "0.5×", "1×"), width=6,
+                     state="readonly").pack(side="left", padx=2)
+        ttk.Button(rb3, text="回放 Episode", command=self.on_replay_episode).pack(side="left", padx=2)
+        ttk.Button(rb3, text="删除 Episode", command=self.on_delete_episode).pack(side="left", padx=2)
+        self.v_ep_info = tk.StringVar(value="")
+        ttk.Label(rb3, textvariable=self.v_ep_info, foreground="#37474f").pack(side="left", padx=8)
+        self.v_rec_status = tk.StringVar(value="录制 / 回放真机：先在上方选「实机 NERO」后端；「仿真替身」只录 / 回放虚拟机械臂")
+        JC.fixed_label(tk, pg["teach"], 1, textvariable=self.v_rec_status, font=("TkDefaultFont", 9),
+                       wraplength=1150, pack={"fill": "x", "padx": 4})
 
-        # V4.4: real LeRobot fine-tuning of SmolVLA on the EMBODIED_AI drive (export -> lerobot-train -> use result)
-        rb2 = ttk.Frame(rec_f)
-        rb2.pack(fill="x", padx=6, pady=(0, 3))
+        # ---------------------------------------------------------------- ③ 训练
+        rb2 = ttk.Frame(pg["train"])
+        rb2.pack(fill="x", padx=2, pady=2)
         ttk.Label(rb2, text="LeRobot 真实微调 (移动硬盘):").pack(side="left")
         ttk.Button(rb2, text="导出为 LeRobot 数据集", command=self.on_export_lerobot).pack(side="left", padx=2)
         self.v_export_overwrite = tk.BooleanVar(value=True)
@@ -364,7 +352,52 @@ class VLALeRobotTabUI:
         ttk.Entry(rb2, textvariable=self.v_train_extra, width=26).pack(side="left", padx=2)
         ttk.Button(rb2, text="开始 SmolVLA 微调 (GPU)", command=self.on_train_lerobot).pack(side="left", padx=2)
         ttk.Button(rb2, text="使用最新训练结果", command=self.on_use_latest_ckpt).pack(side="left", padx=2)
+        rb4 = ttk.Frame(pg["train"])
+        rb4.pack(fill="x", padx=2, pady=2)
+        ttk.Label(rb4, text="高级（不是真 SmolVLA，只用于接口测试）:", foreground="#757575").pack(side="left")
+        ttk.Button(rb4, text="快速微调 (内置 NERO VLA)", command=self.on_finetune).pack(side="left", padx=2)
 
+        # ---------------------------------------------------------------- ④ 执行
+        cb = ttk.Frame(pg["run"])
+        cb.pack(fill="x", padx=2, pady=2)
+        self.v_allow = tk.BooleanVar(value=False)
+        self.chk_allow = ttk.Checkbutton(
+            cb, text="② 允许机器人控制 (Allow Control)", variable=self.v_allow, command=self.on_toggle_allow
+        )
+        self.chk_allow.pack(side="left")
+        self.lamp_2 = StatusLamp(tk, ttk, cb, "②", 8)
+        cb2 = ttk.Frame(pg["run"])
+        cb2.pack(fill="x", padx=2, pady=2)
+        ttk.Button(cb2, text="③ 执行 SmolVLA 闭环", command=self.on_run_vla_loop).pack(side="left", padx=(0, 3))
+        ttk.Button(cb2, text="③ 执行顶层 Agent 双路径任务", command=self.on_run_agent_task).pack(side="left", padx=3)
+        self.lamp_3 = StatusLamp(tk, ttk, cb2, "③", 16)
+        ttk.Button(cb2, text="④ 停止执行", command=self.on_stop_queue).pack(side="left", padx=3)
+        ttk.Label(pg["run"], text="顺序：① 准备页加载模型 → ② 勾选允许控制 → ③ 执行 → ④ 停止；急停按钮在最上方，任何时候都能按。",
+                  foreground="#607d8b").pack(anchor="w", padx=2)
+
+        # ---------------------------------------------------------------- ⑤ 评估 / 高级
+        ab = ttk.Frame(pg["adv"])
+        ab.pack(fill="x", padx=2, pady=2)
+        ttk.Button(ab, text="Sim-to-Real 6级验证", command=self.on_sim2real_ladder).pack(side="left", padx=2)
+        ttk.Button(ab, text="运行 A/B/C 对比 Benchmark", command=self.on_run_benchmark).pack(side="left", padx=2)
+        ttk.Button(ab, text="Phase 0 审查", command=self.on_phase0_audit).pack(side="left", padx=(10, 2))
+        self.btn_ipc = ttk.Button(ab, text="IPC 服务", command=self.on_toggle_ipc)
+        self.btn_ipc.pack(side="left", padx=2)
+        ab2 = ttk.Frame(pg["adv"])
+        ab2.pack(fill="x", padx=2, pady=2)
+        ttk.Label(ab2, text="控制权模式（手动切换，一般不需要）:").pack(side="left")
+        self.v_mode = tk.StringVar(value="monitor")
+        self.cb_mode = ttk.Combobox(ab2, textvariable=self.v_mode, values=list(CONTROL_MODES), width=11, state="readonly")
+        self.cb_mode.pack(side="left", padx=2)
+        self.cb_mode.bind("<<ComboboxSelected>>", lambda _e: self.on_mode_select())
+
+        # V4.6.9: space bar toggles the teach gripper (both hands are on the arm while recording)
+        self._grip_teach_open = True
+        try:
+            parent.winfo_toplevel().bind_all("<KeyPress-space>", self._on_space, add="+")
+        except Exception:
+            pass
+        self._update_ep_info()
 
         # V4.6.2: monitors (side by side) in one row, the log below them over the full width with 「Copy Log」
         bottom = ttk.Frame(parent)
@@ -941,7 +974,65 @@ class VLALeRobotTabUI:
             return dict(r, reason=r.get("reason") or fr.get("reason"))
         self._start_run(f"顶层 Agent 任务（{pol}）", _fn)
 
+    # ------------------------------------------------------------------ V4.6.9 teach gripper / replay
+    def _real_gripper(self):
+        g = getattr(self.rct_tab, "grip", None) if self.rct_tab is not None else None
+        return g if (g is not None and getattr(g, "connected", False)) else None
+
+    def on_teach_gripper(self, open_: bool) -> None:
+        """V4.6.9: the teach gripper buttons / space bar DRIVE the real SO-101 on the real back end (before: only a
+        number in the recording); the recorded gripper action follows; on the simulated back ends only the number."""
+        v = 1.0 if open_ else 0.0
+        self._grip_teach_open = bool(open_)
+        word = "张开" if open_ else "夹紧"
+        g = self._real_gripper() if self.v_backend.get() == "real" else None
+        self.v_grip_teach.set(f"夹爪示教：{word}（空格键切换）")
+        if g is None:
+            self.recorder.set_teach_gripper_norm(v)
+            why = ("后端不是「实机 NERO」" if self.v_backend.get() != "real" else
+                   "SO-101 夹爪没有连接（Agentic实机任务 页 → 连接）")
+            self._log(f"[WARN] [V4.6.9 TEACH GRIPPER] {word}：只记录数值，真夹爪不动（{why}）")
+            return
+
+        def _drive(_v):
+            r = g.open_gap(REPLAY_OPEN_GAP_MM) if open_ else g.clamp(REPLAY_CLAMP_PCT)
+            self._log(f"[OK] [V4.6.9 TEACH GRIPPER] SO-101 {word}：{r}")
+        threading.Thread(target=lambda: self.recorder.set_teach_gripper_norm(v, drive_gripper_fn=_drive),
+                         daemon=True, name="v469_teach_gripper").start()
+
+    def _on_space(self, e=None):
+        """V4.6.9: space bar = toggle the teach gripper while this tab is shown and no text field has the focus"""
+        try:
+            if not self.visible_fn():
+                return None
+            w = getattr(e, "widget", None) or self.parent.winfo_toplevel().focus_get()
+            if isinstance(w, str):
+                w = self.parent.nametowidget(w)
+            if w is not None and w.winfo_class() in ("Entry", "TEntry", "Text", "TCombobox", "Spinbox", "TSpinbox"):
+                return None
+        except Exception:
+            return None
+        self.on_teach_gripper(not self._grip_teach_open)
+        return "break"
+
+    def _update_ep_info(self) -> None:
+        try:
+            idx = int(self.v_ep_idx.get())
+            ep = next((e for e in self.dataset.list_episodes() if int(e.get("episode_index", -1)) == idx), None)
+        except Exception:
+            ep = None
+        if ep is None:
+            self.v_ep_info.set("（没有这个 Episode）")
+            return
+        fps = float(ep.get("fps") or 20.0)
+        self.v_ep_info.set(f"{ep.get('length')} 帧 · {float(ep.get('length') or 0) / fps:.1f} s · "
+                           f"{'有效' if ep.get('valid') else '无效'} · {ep.get('saved_at', '')} · "
+                           f"{(ep.get('tasks') or [''])[0][:40]}")
+
     def on_toggle_record(self) -> None:
+        if not self.recorder.is_recording and self.v_backend.get() != "real":
+            self._log("[WARN] [V4.6.9 RECORDER] 后端是「" + {"mock": "仿真替身", "mujoco": "MuJoCo"}.get(self.v_backend.get(), "?")
+                      + "」：录到的是虚拟机械臂，不是真机。要录真机示教：先在最上方选「实机 NERO」后端，再进入示教模式")
         ds_name = self.v_ds_name.get().strip() or "nero_v4_demo"
         if self.dataset.dataset_name != ds_name:
             self.dataset = NEROLeRobotDataset(dataset_name=ds_name)
@@ -954,17 +1045,52 @@ class VLALeRobotTabUI:
             self.btn_rec.configure(text="● 开始示教录制")
             if res.get("ok"):
                 self.v_ep_idx.set(str(res["episode"]["episode_index"]))
+                self._update_ep_info()
 
     def on_replay_episode(self) -> None:
+        """V4.6.9: real back end -> the real NERO replays the recording (one timed joint path per segment, gripper
+        between segments, measured errors); simulated back ends -> the old executor replay, now with every failure
+        in the log (before: a failed replay printed nothing)."""
         try:
             idx = int(self.v_ep_idx.get())
         except ValueError:
             return
+        try:
+            speed = float(self.v_replay_speed.get().rstrip("×x"))
+        except ValueError:
+            speed = 0.5
+        if self.v_backend.get() == "real":
+            model = getattr(self.jpanel, "model", None)
+            if not self.ask("回放 Episode（实机）",
+                            f"真实的 NERO 将回放 Episode #{idx}：先以 10% 速度移到录制起点，再按 {speed:g}× 速度走录下的轨迹，"
+                            "夹爪按录制张开 / 夹紧。\n请确认周围无人、急停在手边。继续？"):
+                return
+            self._log(f"[INFO] [V4.6.9 REPLAY] 实机回放 Episode #{idx}（{speed:g}×）：控制权切到 teleop、允许控制")
+            self.arbiter.request_mode("teleop", owner_tag="ui_replay")
+            self.arbiter.set_allow_control(True, reason="Episode Replay (real)")
+            self.v_mode.set(self.arbiter.mode)
+            self.v_allow.set(True)
+            g = self._real_gripper()
+            threading.Thread(target=lambda: replay_episode_real(self.dataset, idx, self.pipe, model, gripper=g,
+                                                                speed=speed, log=self._log,
+                                                                stop_fn=lambda: self.arbiter.mode == "estop"),
+                             daemon=True, name="v469_replay").start()
+            return
+        self._log(f"[INFO] [V4.6.9 REPLAY] 后端「{self.v_backend.get()}」：只在仿真里回放 Episode #{idx}，真机不会动"
+                  "（要真机回放：最上方选「实机 NERO」）")
         self.arbiter.request_mode("teleop", owner_tag="ui_replay")
         self.arbiter.set_allow_control(True, reason="Episode Replay")
         self.v_mode.set(self.arbiter.mode)
         self.v_allow.set(True)
-        threading.Thread(target=lambda: self.recorder.replay_episode(idx, caller_mode="teleop"), daemon=True).start()
+
+        def _job():
+            try:
+                r = self.recorder.replay_episode(idx, caller_mode="teleop")
+            except Exception as exc:
+                r = {"ok": False, "error": str(exc)}
+            if not r.get("ok") and r.get("error"):
+                self._log(f"[FAIL] [V4.6.9 REPLAY] 回放 Episode #{idx} 失败：{r.get('error')}")
+        threading.Thread(target=_job, daemon=True).start()
 
     def on_delete_episode(self) -> None:
         try:
@@ -1109,6 +1235,13 @@ class VLALeRobotTabUI:
         """V4.6: lamps that follow live state (② control authority, ④ e-stop, model, background job)."""
         self.lamp_2.set("ok" if arb["allow_control"] else "off", "允许" if arb["allow_control"] else "只读")
         self.lamp_4.set("bad" if arb["mode"] == "estop" else "off", "急停中" if arb["mode"] == "estop" else "正常")
+        if hasattr(self, "v_arb_text"):                         # V4.6.9 top bar
+            self.v_arb_text.set(f"控制权: {arb['mode']} · {'允许控制' if arb['allow_control'] else '只读'}")
+            if hasattr(self, "recorder") and self.recorder.is_recording:
+                n = len(getattr(self.recorder, "_frames", []) or [])
+                self.v_rec_status.set(f"录制中：{n} 帧（{n / max(1.0, self.recorder.fps):.1f} s）· 后端 "
+                                      f"{self.v_backend.get()}" + ("" if self.v_backend.get() == "real" else
+                                                                   " —— 不是实机：录的是虚拟机械臂"))
         if not self._loading:
             prof = self.vla_policy.model_profile()
             if not prof["loaded"]:

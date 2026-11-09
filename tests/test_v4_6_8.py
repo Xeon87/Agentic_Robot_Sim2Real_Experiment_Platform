@@ -237,8 +237,8 @@ class TestV468(unittest.TestCase):
         import NERO_V362_Cup_Skills as CK
         seen = {}
 
-        def fake_run(agent, sk, task, model, key, effort, steps, emit=None, dry_run=False):
-            seen.update(task=task, steps=steps)
+        def fake_run(agent, sk, task, model, key, effort, steps, emit=None, dry_run=False, try_harder=False):
+            seen.update(task=task, steps=steps, try_harder=try_harder)
             return {}
         orig = CK.run_cup_task
         CK.run_cup_task = fake_run
@@ -248,7 +248,7 @@ class TestV468(unittest.TestCase):
                                                                          "max_tool_steps": 30}, try_harder=True)
         finally:
             CK.run_cup_task = orig
-        self.assertIn("TRY HARDER", seen["task"])
+        self.assertTrue(seen["try_harder"])                       # V4.6.9: passed as a flag, not appended to the task
         self.assertEqual(seen["steps"], 60)
         scene = Scene()
         sk, io = make(scene)
@@ -289,7 +289,8 @@ class TestV468(unittest.TestCase):
         import NERO_V312_Console as C
         import NERO_V313_Real_Robot as RR
         v = open(os.path.join(HERE, "VERSION")).read().strip()
-        self.assertEqual((v, C.VERSION, RR.VERSION), ("V4.6.8", "V4.6.8", "V4.6.8"))
+        self.assertEqual((C.VERSION, RR.VERSION), (v, v))
+        self.assertIn(v, ("V4.6.8", "V4.6.9"))
         self.assertEqual(RT.MARKER_V468, "V4.6.8 FILL CARTON + VERIFY BY RISE + TRY HARDER")
 
 

@@ -2145,6 +2145,9 @@ def egg_task_config(path=None):
 
 MARKER_V466_TEMPLATE = "V4.6.6 FIXED CARTON TEMPLATE"
 CARTON_DIAG_KEEP = 30
+TEMPLATE_MIN_PTS = 150            # V4.6.9: depth points inside the (eroded) carton mask needed for the template fit
+BOWL_MIN_CORE_FRAC = 0.04         # V4.6.9: bowl score needs this share of the cup-middle cells with depth (was 0.10)
+BOWL_MIN_RING_FRAC = 0.10         # V4.6.9: ... and of the rim-ring cells (was 0.30) - sparse High Accuracy depth
 
 
 def carton_template_config(path=None):
@@ -2216,7 +2219,7 @@ def bowl_score_map(s_mm, t_mm, h_mm, pitch_mm, res_mm=1.0, margin_mm=35.0):
     n_c = cv2.filter2D(valid, -1, kc, borderType=b)
     s_a = cv2.filter2D(hmap * valid, -1, ka, borderType=b)
     n_a = cv2.filter2D(valid, -1, ka, borderType=b)
-    ok = (n_c >= 0.10 * kc.sum()) & (n_a >= 0.30 * ka.sum())
+    ok = (n_c >= BOWL_MIN_CORE_FRAC * kc.sum()) & (n_a >= BOWL_MIN_RING_FRAC * ka.sum())
     S = np.where(ok, np.clip(s_a / np.maximum(n_a, 1e-6) - s_c / np.maximum(n_c, 1e-6), -5.0, 25.0), -2.0)
     return {"S": S.astype(np.float32), "hmap": hmap, "valid": valid, "x0": x0, "y0": y0, "res": res_mm,
             "radii": radii}
@@ -2286,7 +2289,7 @@ def slot_rise(pts, centre_uv_mm, pitch_mm, min_core=12):
 
 
 def save_carton_diag(rgb_crop, mask_crop, mask_inner, slot_px, slot_scores, bowl, slot_st_mm, rect_st_mm, title,
-                     folder=None, keep=CARTON_DIAG_KEEP):
+                     folder=None, keep=CARTON_DIAG_KEEP, depth_crop=None):
     """V4.6.6: one PNG per carton fit (left: colour crop + YOLO mask outline (green) + eroded mask used (cyan) +
     slots (red, number, bowl score); right: height map + bowl score circles + outer box).  -> path or None"""
     try:
@@ -2307,6 +2310,16 @@ def save_carton_diag(rgb_crop, mask_crop, mask_inner, slot_px, slot_scores, bowl
                     continue
                 cv2.circle(left, (int(px), int(py)), 5, (0, 0, 255), 2)
                 cv2.putText(left, f"{k + 1}", (int(px) + 6, int(py) - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1)
+        if bowl is None:                               # V4.6.9: no height map -> show where the depth exists
+            right = None
+            if depth_crop is not None:
+                dv = np.asarray(depth_crop) > 0
+                right = np.zeros(dv.shape + (3,), np.uint8)
+                right[dv] = (60, 200, 60)                      # green = depth, black = no depth
+                if mask_crop is not None:
+                    cs, _hh = cv2.findContours(mask_crop.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    cv2.drawContours(right, cs, -1, (255, 255, 255), 1)
+            return _save_diag_panels(left, right, title, root, keep)
         hm, val, res = bowl["hmap"], bowl["valid"], bowl["res"]
         top = float(np.percentile(hm[val > 0], 95)) if (val > 0).any() else 1.0
         hm8 = np.clip(hm / max(top, 1.0) * 255.0, 0, 255).astype(np.uint8)
@@ -2324,6 +2337,16 @@ def save_carton_diag(rgb_crop, mask_crop, mask_inner, slot_px, slot_scores, bowl
             cv2.putText(right, f"{k + 1}:{slot_scores[k]:+.0f}", (px(st)[0] - 12, px(st)[1] + 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
         right = cv2.flip(right, 0)                             # plane frame y up
+        return _save_diag_panels(left, right, title, root, keep)
+    except Exception:
+        return None
+
+
+def _save_diag_panels(left, right, title, root, keep):
+    try:
+        import numpy as np
+        import glob
+        cv2 = _cv2()
         H = 360
         panels = []
         for im in (left, right):
@@ -2545,12 +2568,18 @@ def locate_egg_holder(dets2d, rgb, depth_m, K, T_base_cam, table_z=None, fence_p
         pc_mm, pr_mm = tcfg["pitch_cols_mm"], tcfg["pitch_rows_mm"]
         grid_info = {"rows": R, "cols": C, "score": 0.9, "judgment_source": "template"}
         mc_er = cv2.erode(mc.astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
-        if cov >= 0.35 and (dz_m > 0).sum() >= 60:
-            inner = mc_er[vv_m[dz_m > 0] - cy0, uu_m[dz_m > 0] - cx0]
-            rel_t = P_all - o_pl
+        inner = np.zeros(0, bool)
+        ok_d = dz_m > 0
+        if int(ok_d.sum()) >= TEMPLATE_MIN_PTS:
+            # V4.6.9: the template uses every pixel that HAS depth (even when < 35 % of the mask has some - High
+            # Accuracy depth leaves holes; evenly spread points still show the cups)
+            P_d = YP._pix_to_base(uu_m[ok_d].astype(float), vv_m[ok_d].astype(float), dz_m[ok_d].astype(float), K, T)
+            hs_d = P_d @ n_vec - d_pl
+            inner = mc_er[vv_m[ok_d] - cy0, uu_m[ok_d] - cx0]
+            rel_t = P_d - o_pl
             s_pl, t_pl = (rel_t @ e1) * 1000.0, (rel_t @ e2) * 1000.0
-            if int(inner.sum()) >= 200:
-                tmpl = fit_carton_template(s_pl[inner], t_pl[inner], hs[inner] * 1000.0, R, C, pc_mm, pr_mm,
+            if int(inner.sum()) >= TEMPLATE_MIN_PTS:
+                tmpl = fit_carton_template(s_pl[inner], t_pl[inner], hs_d[inner] * 1000.0, R, C, pc_mm, pr_mm,
                                            yaw_rad, (float(sc_mm), float(tc_mm)))
         if tmpl is not None and tmpl["n_cavities"] >= 2:
             phi = tmpl["phi_rad"]
@@ -2558,8 +2587,9 @@ def locate_egg_holder(dets2d, rgb, depth_m, K, T_base_cam, table_z=None, fence_p
             how = f"槽穴拟合（{tmpl['n_cavities']}/{R * C} 个碗形槽穴，分数 {tmpl['score']:.0f}）"
         else:
             phi, s0, t0 = yaw_rad, float(sc_mm), float(tc_mm)
-            how = ("槽穴不清楚 → 模板按外框中心 / 长边放置" if tmpl is not None else
-                   "深度点不够 → 模板按外框中心 / 长边放置")
+            how = (f"槽穴不清楚（蛋托轮廓深度覆盖 {cov * 100:.0f}%）→ 模板按外框中心 / 长边放置" if tmpl is not None else
+                   f"深度点不够（蛋托轮廓里只有 {cov * 100:.0f}% 的像素有深度，内缩后 {int(inner.sum())} 点 < {TEMPLATE_MIN_PTS}）"
+                   " → 模板按外框中心 / 长边放置")
         u_long = math.cos(phi) * e1 + math.sin(phi) * e2
         v_short = -math.sin(phi) * e1 + math.cos(phi) * e2
         centre_pl = o_pl + (s0 / 1000.0) * e1 + (t0 / 1000.0) * e2
@@ -2573,6 +2603,8 @@ def locate_egg_holder(dets2d, rgb, depth_m, K, T_base_cam, table_z=None, fence_p
         v_all_mm = (rel_all @ v_short) * 1000.0
         pl_m, pw_m = pc_mm / 1000.0, pr_mm / 1000.0
         tmpl_info = {"rows": R, "cols": C, "pitch_mm": [pc_mm, pr_mm], "how": how,
+                     "depth_cov": round(float(cov), 3),                    # V4.6.9: mask pixels with depth
+                     "inner_pts": int(inner.sum()),
                      "n_cavities": None if tmpl is None else tmpl["n_cavities"],
                      "score": None if tmpl is None else tmpl["score"],
                      "bowl_per_slot_mm": None if tmpl is None else tmpl["per_slot"],
@@ -2710,10 +2742,12 @@ def locate_egg_holder(dets2d, rgb, depth_m, K, T_base_cam, table_z=None, fence_p
                 st_mm.append((float(p3 @ e1) * 1000.0, float(p3 @ e2) * 1000.0))
             box = cv2.boxPoints(rect)
             bowl = tmpl["bowl"] if tmpl is not None else None
-            if bowl is not None:
-                tmpl_info["diag_png"] = save_carton_diag(
-                    crop_rgb, mc, mc_er, slot_px, tmpl["per_slot"], bowl, st_mm, [tuple(q) for q in box],
-                    f"V4.6.6 carton {R}x{C} pitch {pl_m * 1000:.0f}x{pw_m * 1000:.0f} mm | {tmpl_info['how']}")
+            # V4.6.9: a picture also when the template fell back to the outer box (right panel = where depth exists)
+            tmpl_info["diag_png"] = save_carton_diag(
+                crop_rgb, mc, mc_er, slot_px, tmpl["per_slot"] if tmpl is not None else [0.0] * (R * C), bowl, st_mm,
+                [tuple(q) for q in box],
+                f"V4.6.9 carton {R}x{C} pitch {pl_m * 1000:.0f}x{pw_m * 1000:.0f} mm | depth {cov * 100:.0f}% | "
+                f"{tmpl_info['how']}", depth_crop=dc)
         except Exception as exc:
             tmpl_info["diag_error"] = str(exc)[:120]
         holder_row["template"] = tmpl_info

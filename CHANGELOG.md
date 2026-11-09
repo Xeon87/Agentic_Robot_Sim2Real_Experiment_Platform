@@ -1,3 +1,32 @@
+## V4.6.9 (2026-11-09) — Smol VLA 页 5 个子页 + 夹爪示教 / 空格键 + 实机回放；叠杯目标固定；LLM Try harder；深度覆盖率
+- `NERO_V4_Console_Tab.py`：
+  - 顶栏（后端 / 策略 / `v_arb_text` 控制权 / 急停）+ `self.sub_nb` 5 个子页（`self.pages`：prep / teach / train / run / adv）；原有控件名和按钮文字不变。
+  - `on_teach_gripper(open_)`：实机后端 + SO-101 已连接时，在线程里 `open_gap(45)` / `clamp(25)`，再记录数值；否则只记录并写 WARN。
+  - `_on_space`：`bind_all <KeyPress-space>`；页面可见且焦点不在输入框时切换。
+  - `on_replay_episode`：实机后端确认后调 `replay_episode_real`；其他后端照旧仿真回放，失败写日志。
+  - 回放速度下拉、Episode 信息、录制状态行；非实机录制写 WARN。
+- `NERO_V4_Dataset_Recorder.py`（`V4.6.9 REAL REPLAY`）：
+  - `plan_real_replay`：抽稀 + 计时 + 按夹爪切段。
+  - `replay_episode_real`：示教模式拒绝；10% 速度到起点；每段一条 `move_joint_path`（第一点用实测姿态）；段间夹爪动作；每段实测误差。
+  - 仿真回放失败写 `[FAIL] [V4.6.9 REPLAY]`。
+- `NERO_V362_Cup_Skills.py`：
+  - `TRY_HARDER_INSTRUCTIONS`、`try_harder_suggestions`。
+  - `run_cup_task(try_harder)`：失败结果去掉 `stop_and_report` 并加 `try_harder` 字段；提前结束时最多追问 `TRY_HARDER_PUSHES = 3` 次。
+  - `place_cup_into`：搬运前固定目标杯位置（`_pin_target`）；腕部同心修正不再覆盖目标位置，单次 ≤ 10 mm、总共 ≤ 12 mm。
+- `NERO_V365_Real_Cup_Task.py`（`V4.6.9 VERIFY BY EGG COUNT + LONG-AXIS WARNING + DEPTH COVERAGE`）：
+  - 验证新增"蛋托里鸡蛋数增加、且最近的槽是目标槽"。
+  - 夹紧读数 > 36 mm 时写 WARN。
+  - `run_execute` 把 `try_harder` 传给 `run_cup_task`（不再改任务文本）；日志写明 Try harder 的类型；蛋托日志行加深度覆盖率。
+- `NERO_V349_Real_Wrist_Camera.py`：
+  - 模板直接用全部深度像素（`TEMPLATE_MIN_PTS = 150`；碗形分数的覆盖门槛降到 4% / 10%）。
+  - `tmpl_info` 加 `depth_cov` / `inner_pts`；退回外框时的说明带覆盖率，也保存诊断图（右半边显示哪里有深度）。
+- `NERO_V366_Real_Cup_Yolo.py`：杯子 `depth_cov`，摘要里打印"深度覆盖 xx%"。
+- 测试：
+  - 新 `tests/test_v4_6_9.py`（9 项）。
+  - 新 `tests/test_v4_6_9_gui.py`：5 个子页在 1420×1000 下都完整可见；夹爪按钮和空格键；回放接线。
+  - `test_v4_6_8` f7 改为检查 `try_harder` 参数；版本白名单补 V4.6.9。
+- **没有在真实硬件上运行过。**
+
 ## V4.6.8 (2026-11-08) — 悬停前重新识别；按"槽心凸起"判定放蛋；连续放满蛋托；标签精简；Try harder；Camera 页可滚动
 - `NERO_V464_Vision_Check.py`（`V4.6.8 RECOGNIZE BEFORE EVERY HOVER`）：
   - `VisionCheck.run(..., refresh=True)`：先 `observe()`，记录目标相对上次识别移动了多少（超过 5 mm 写 WARN）。

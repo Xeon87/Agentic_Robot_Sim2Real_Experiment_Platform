@@ -539,6 +539,7 @@ class DemonstrationRecorder:
         for i in range(n):
             r = ex.send_action(rec_actions[i].tolist(), caller_mode=caller_mode, dt_s=dt)
             if not r.get("ok"):
+                self.log(f"[FAIL] [V4.6.9 REPLAY] 回放 Episode #{ep_idx} 在第 {i}/{n} 帧中止：{r.get('error')}")
                 return {
                     "ok": False,
                     "error": f"Replay aborted at frame {i}/{n}: {r.get('error')}",
@@ -567,3 +568,128 @@ class DemonstrationRecorder:
             "joint_max_err_deg": max_err_deg,
             "gripper_rmse": grip_rmse,
         }
+
+
+# ===================================================================== V4.6.9 REAL REPLAY (the real NERO really moves)
+MARKER_V469_REPLAY = "V4.6.9 REAL REPLAY"
+REPLAY_MIN_STEP_DEG = 0.5          # keep a recorded point when any joint moved at least this much since the last kept
+REPLAY_MAX_GAP_S = 0.5             # ... or this much time passed (smooth timing of slow parts)
+REPLAY_GRIP_THRESHOLD = 0.5        # gripper norm >= this = open, below = closed
+REPLAY_OPEN_GAP_MM = 45.0
+REPLAY_CLAMP_PCT = 25.0
+REPLAY_START_SPEED = 0.10          # move to the recorded start pose at 10 %
+
+
+def plan_real_replay(states, fps, speed=1.0, min_step_deg=REPLAY_MIN_STEP_DEG, max_gap_s=REPLAY_MAX_GAP_S):
+    """V4.6.9: recorded 8-D states (7 joints rad + gripper norm) -> joint path segments for RealPipeline.move_joint_path.
+    The trajectory is thinned (min_step_deg / max_gap_s), timed from the recording / speed, and cut where the gripper
+    switches open <-> closed: [{"path": [q..], "t": [s..] (from 0 at the segment start), "grip_after": "open" /
+    "close" / None}].  Each path starts at the end of the previous one (the first at the recorded start pose)."""
+    st = np.asarray(states, dtype=float)
+    if st.ndim != 2 or st.shape[0] < 2 or st.shape[1] < 8:
+        return []
+    dt = 1.0 / max(1.0, float(fps)) / max(0.1, float(speed))
+    grip = np.where(st[:, 7] >= REPLAY_GRIP_THRESHOLD, 1, 0)
+    segs, cur, t_cur, t_last = [], [0], [0.0], 0.0
+    last_q = st[0, :7]
+    for i in range(1, st.shape[0]):
+        t_i = i * dt
+        moved = float(np.max(np.abs(np.degrees(st[i, :7] - last_q))))
+        switch = grip[i] != grip[i - 1]
+        if moved >= min_step_deg or (t_i - t_last) >= max_gap_s or switch or i == st.shape[0] - 1:
+            if moved > 1e-6 or switch or i == st.shape[0] - 1:
+                cur.append(i)
+                t_cur.append(t_i)
+                last_q, t_last = st[i, :7], t_i
+        if switch:
+            segs.append((cur, t_cur, "open" if grip[i] == 1 else "close"))
+            cur, t_cur = [i], [t_i]
+    segs.append((cur, t_cur, None))
+    out = []
+    for idx, ts, g in segs:
+        if len(idx) < 2:
+            if g is not None:
+                out.append({"path": [st[idx[0], :7].tolist()], "t": [0.0], "grip_after": g})
+            continue
+        t0 = ts[0]
+        tt, last = [], -1.0
+        for t in ts:
+            v = round(t - t0, 4)
+            if v <= last:
+                v = round(last + 0.01, 4)
+            tt.append(v)
+            last = v
+        out.append({"path": [st[k, :7].tolist() for k in idx], "t": tt, "grip_after": g})
+    return out
+
+
+def replay_episode_real(dataset, ep_idx, pipe, model, gripper=None, speed=0.5, log=print, stop_fn=None):
+    """V4.6.9: replay a recorded episode on the REAL NERO (+ SO-101):  checks (not in teach mode, joint feedback) ->
+    10 % move to the recorded start -> each segment as ONE timed joint path (no per-frame MoveIt calls) -> gripper
+    open / close between segments -> measured joints after every segment vs the recording.  Every failure is logged.
+    -> {"ok", "segments", "max_end_err_deg", "error"}"""
+    import math as _m
+    stop_fn = stop_fn or (lambda: False)
+    if pipe is None or not model:
+        log("[FAIL] [V4.6.9 REPLAY] 实机没有就绪（实机NERO调试 步骤 5/6）")
+        return {"ok": False, "error": "real robot not ready"}
+    if getattr(pipe, "teach_mode", False):
+        log("[FAIL] [V4.6.9 REPLAY] NERO 还在示教模式：先「退出示教模式」再回放")
+        return {"ok": False, "error": "teach mode"}
+    ep = dataset.load_episode(int(ep_idx))
+    states = ep["observation_state"]
+    fps = float(ep["meta"].get("fps", 20.0))
+    segs = plan_real_replay(states, fps, speed=speed)
+    if not segs:
+        log(f"[FAIL] [V4.6.9 REPLAY] Episode #{ep_idx} 太短，没有可回放的轨迹")
+        return {"ok": False, "error": "empty"}
+    move = np.degrees(np.ptp(np.asarray(states)[:, :7], axis=0))
+    if float(np.max(move)) < 1.0:
+        log(f"[WARN] [V4.6.9 REPLAY] Episode #{ep_idx} 里机械臂几乎没动（最大关节变化 {float(np.max(move)):.2f}°）："
+            "很可能是在「仿真替身」后端录的，回放时真机也不会动")
+    dur = sum(sg["t"][-1] for sg in segs)
+    log(f"[INFO] [V4.6.9 REPLAY] Episode #{ep_idx}：{len(states)} 帧 → {len(segs)} 段 · "
+        f"{sum(len(sg['path']) for sg in segs)} 个路径点 · 速度 {speed:g}× · 约 {dur:.1f} s")
+    q0 = list(segs[0]["path"][0])
+    r = pipe.move_and_settle(model, q0, REPLAY_START_SPEED, label="V4.6.9 replay: go to the recorded start")
+    if not r.get("ok"):
+        log(f"[FAIL] [V4.6.9 REPLAY] 到录制起点失败：{r.get('error')}")
+        return {"ok": False, "error": f"start: {r.get('error')}"}
+    g0 = "open" if float(states[0][7]) >= REPLAY_GRIP_THRESHOLD else "close"
+    _grip(gripper, g0, log)
+    errs = []
+    for k, sg in enumerate(segs):
+        if stop_fn():
+            log("[WARN] [V4.6.9 REPLAY] 已停止")
+            return {"ok": False, "error": "stopped", "segments": k}
+        if len(sg["path"]) >= 2:
+            act = pipe.actual_arm_deg(model)
+            path = [list(sg["path"][0]) if act is None else [_m.radians(v) for v in act]] + [list(p) for p in sg["path"][1:]]
+            r = pipe.move_joint_path(model, path, sg["t"], label=f"V4.6.9 replay #{ep_idx} seg {k + 1}/{len(segs)}")
+            if not r.get("ok"):
+                log(f"[FAIL] [V4.6.9 REPLAY] 第 {k + 1}/{len(segs)} 段失败：{r.get('error')}")
+                return {"ok": False, "error": r.get("error"), "segments": k}
+            act = pipe.actual_arm_deg(model)
+            if act is not None:
+                e = max(abs(a - _m.degrees(b)) for a, b in zip(act, sg["path"][-1]))
+                errs.append(e)
+                log(f"[INFO] [V4.6.9 REPLAY] 第 {k + 1}/{len(segs)} 段完成：实测关节与录制位置最大差 {e:.2f}°")
+        if sg["grip_after"]:
+            _grip(gripper, sg["grip_after"], log)
+    mx = round(max(errs), 2) if errs else None
+    ok = mx is None or mx < 3.0
+    log(f"[{'OK' if ok else 'WARN'}] [V4.6.9 REPLAY] 回放 Episode #{ep_idx} 完成：{len(segs)} 段 · 每段终点实测误差最大 "
+        f"{'-' if mx is None else f'{mx:.2f}°'}")
+    return {"ok": ok, "segments": len(segs), "max_end_err_deg": mx}
+
+
+def _grip(gripper, what, log):
+    if gripper is None or not getattr(gripper, "connected", False):
+        log(f"[INFO] [V4.6.9 REPLAY] 夹爪{('张开' if what == 'open' else '夹紧')}（夹爪未连接，跳过）")
+        return
+    try:
+        r = gripper.open_gap(REPLAY_OPEN_GAP_MM) if what == "open" else gripper.clamp(REPLAY_CLAMP_PCT)
+        log(f"[INFO] [V4.6.9 REPLAY] 夹爪{('张开' if what == 'open' else '夹紧')}：{r}")
+    except Exception as exc:
+        log(f"[WARN] [V4.6.9 REPLAY] 夹爪动作失败：{exc}")
+

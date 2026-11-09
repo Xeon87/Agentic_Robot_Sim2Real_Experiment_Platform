@@ -918,8 +918,10 @@ class RealIO:
         tpl = (holder_row or {}).get("template")
         if tpl:                                       # V4.6.6 FIXED CARTON TEMPLATE: how the slots were found
             per = tpl.get("bowl_per_slot_mm")
+            cov = tpl.get("depth_cov")
             self.emit(f"[V4.6.6 CARTON] 固定模板 {tpl['rows']}×{tpl['cols']}，槽距 {tpl['pitch_mm'][0]:.0f}×{tpl['pitch_mm'][1]:.0f} mm · "
-                      f"{tpl['how']} · 每槽碗深 {per if per is not None else '-'} mm · 外框 {tpl['outer_box_mm'][0]:.0f}×"
+                      + (f"蛋托轮廓深度覆盖 {cov * 100:.0f}%（内缩后 {tpl.get('inner_pts', 0)} 点）· " if cov is not None else "")
+                      + f"{tpl['how']} · 每槽碗深 {per if per is not None else '-'} mm · 外框 {tpl['outer_box_mm'][0]:.0f}×"
                       f"{tpl['outer_box_mm'][1]:.0f} mm · 模板中心相对外框中心 {tpl['centre_vs_box_mm']} mm · "
                       f"诊断图 {tpl.get('diag_png') or '-'}")
         if self.on_perception is not None:
@@ -1063,12 +1065,14 @@ EGG_WRIST_SMALL_MM = 6.0          # wrist vs main camera <= this: shift the gras
 EGG_WRIST_CONFIRM_MM = 25.0       # 6..25 mm: look again from the corrected position; accept when both agree
 EGG_WRIST_AGREE_MM = 4.0
 MARKER_V468 = "V4.6.8 FILL CARTON + VERIFY BY RISE + TRY HARDER"
+MARKER_V469 = "V4.6.9 VERIFY BY EGG COUNT + LONG-AXIS WARNING + DEPTH COVERAGE"
 EGG_IN_CARTON_FRAC = 0.55         # an egg closer than this x pitch to a slot centre stands in the carton (not a source)
 VERIFY_EGG_NEAR_FRAC = 0.50       # verify: an egg within this x pitch of the slot centre = placed
 VERIFY_RISE_GAIN_MM = 15.0        # verify: cup middle this much higher than before the place = placed
 JAW_CLEAR_M = 0.006               # place: jaw tip >= egg radius + this from an egg already standing next to the slot
 JAW_REACH_M = 0.027               # jaw tip distance from the held egg's centre along the closing axis
 FILL_MAX_FAILS = 3                # fill the carton: stop after this many eggs that could not be placed
+EGG_LONG_AXIS_GAP_MM = 36.0       # V4.6.9: a clamp reading wider than this = the egg was gripped along its long axis
 EGG_OFFCENTRE_TOL_MM = 8.0        # clamped tip gap < egg width - this -> gripped off the equator (V4.5 run: 24 mm)
 SLOT_WRIST_MAX_MM = 30.0
 SLOT_LOOK_POSES = ((0.0, 0.0, 0.14), (0.0, 0.0, 0.18), (0.025, 0.0, 0.16), (-0.025, 0.0, 0.16),
@@ -2016,6 +2020,10 @@ class RealEggSkills:
                 self.io.emit(f"[INFO] [V4.6.1 EGG PICK] 夹紧读数 {float(gap_clamp):.1f} mm（基准 {base:.1f} mm，"
                              f"差 {float(gap_clamp) - base:+.1f} mm；判夹偏阈值 < {base - marg:.1f} mm）")
             offc = gap_clamp is not None and float(gap_clamp) < base - marg
+            if gap_clamp is not None and float(gap_clamp) > EGG_LONG_AXIS_GAP_MM:   # V4.6.9
+                self.io.emit(f"[WARN] [V4.6.9 EGG PICK] 夹紧读数 {float(gap_clamp):.1f} mm > {EGG_LONG_AXIS_GAP_MM:.0f} mm（正常夹住短轴时 "
+                             "约 26.5 mm）：很可能夹到了鸡蛋的长轴（鸡蛋朝向识别反了 90°）或空夹标定不对 → 放蛋时鸡蛋不会竖直；"
+                             "请看主相机画面里鸡蛋的方向，并重做「空夹标定」")
             if offc and not ecfg["offcentre_regrasp"]:
                 self.io.emit(f"[WARN] [V4.6.1 EGG PICK] 夹紧读数 {float(gap_clamp):.1f} mm 比基准小 {base - float(gap_clamp):.1f} mm，"
                              "可能夹偏 → 只记录，继续（config/egg_carton.json → offcentre_regrasp=false）")
@@ -2264,6 +2272,7 @@ class RealEggSkills:
         look 2: 100 mm higher.  Every look and its evidence is logged."""
         target_slot = target_slot or (self.plan or {}).get("target_slot") or "slot_1"
         before = ((self.cam.get(target_slot) or {}).get("raw") or {}).get("rise") or {}
+        n_before = len(getattr(self, "eggs_in_carton", []) or [])     # V4.6.9: eggs in the carton before the place
         sid_num = int(str(target_slot).split("_")[-1]) if "_" in str(target_slot) else 1
         ok, ev, res = False, [], {}
         for look in range(max(1, int(looks))):
@@ -2285,6 +2294,17 @@ class RealEggSkills:
                 d_egg = min(float(np.linalg.norm(np.asarray(e["center_base"][:2], float) - sc)) for e in res["eggs"])
             gain = (None if rise.get("core_top_mm") is None or before.get("core_top_mm") is None
                     else round(float(rise["core_top_mm"]) - float(before["core_top_mm"]), 1))
+            # V4.6.9: one more egg standing inside the carton than before (works even when the slot grid drifted)
+            slot_xy = [np.asarray(s_["center_base"][:2], float) for s_ in ((carton or {}).get("slots") or [])]
+            in_lim = EGG_IN_CARTON_FRAC * min(float(pm[0]), float(pm[1])) / 1000.0
+            n_after, n_at_target = 0, 0
+            for e in (res.get("eggs") or []) if slot_xy else []:
+                dd = [float(np.linalg.norm(np.asarray(e["center_base"][:2], float) - q)) for q in slot_xy]
+                if min(dd) < in_lim:
+                    n_after += 1
+                    if slot_info is not None and abs(dd[int(np.argmin(dd))] - float(np.linalg.norm(
+                            np.asarray(e["center_base"][:2], float) - np.asarray(slot_info["center_base"][:2], float)))) < 1e-9:
+                        n_at_target += 1                # the egg's nearest slot is the target (not a neighbour)
             why = []
             if slot_info is None:
                 why.append("蛋托 / 槽位没识别到")
@@ -2296,9 +2316,11 @@ class RealEggSkills:
                     why.append(f"槽旁 {d_egg * 1000:.0f} mm 有鸡蛋")
                 if gain is not None and gain >= VERIFY_RISE_GAIN_MM:
                     why.append(f"槽心比放蛋前高了 {gain:.0f} mm")
+                if n_after > n_before and n_at_target > 0:
+                    why.append(f"蛋托里的鸡蛋从 {n_before} 个变成 {n_after} 个")
             hit = slot_info is not None and len(why) > 0 and why[0] != "蛋托 / 槽位没识别到"
             ev.append({"look": look + 1, "slot_found": slot_info is not None, "occupied": bool((slot_info or {}).get("occupied")),
-                       "rise_mm": rise.get("rise_mm"), "rise_gain_mm": gain,
+                       "rise_mm": rise.get("rise_mm"), "rise_gain_mm": gain, "eggs_in_carton": n_after,
                        "nearest_egg_mm": None if d_egg is None else round(d_egg * 1000.0, 1)})
             self.io.emit(f"[{'OK' if hit else 'INFO'}] [V4.6.8 VERIFY] 第 {look + 1} 次看 {target_slot}："
                          + ("；".join(why) if hit else ("没有放好的证据（槽心-槽口 "
@@ -2715,14 +2737,11 @@ def run_execute(io, source, target, knobs=None, skill=None, agent=None, llm_cfg=
     c = dict(llm_cfg or {})
     task = c.get("task") or f"Stack {source} into {target}"
     steps = max(10, min(60, int(c.get("max_tool_steps", 30))))
-    if try_harder:                                   # V4.6.8 TRY HARDER for the LLM agent
-        task += ("\n\nTRY HARDER: do not report failure early. When a step fails, read its reason and try a different "
-                 "strategy (observe the scene again, re-plan with other angles / another target, move to a clearer "
-                 "view, retry the step) before giving up. Only give up when several different strategies failed.")
+    if try_harder:                                   # V4.6.8/V4.6.9 TRY HARDER for the LLM agent (rules in V362)
         steps = min(90, steps * 2)
     final = CK.run_cup_task(agent, sk, task, c.get("model"),
                             c.get("api_key", ""), c.get("reasoning_effort", "low"),
-                            steps, emit=io.emit, dry_run=False)
+                            steps, emit=io.emit, dry_run=False, try_harder=try_harder)
     return {"ok": sk.stage == "VERIFIED", "final": final, "skills": sk}
 
 
@@ -3872,9 +3891,10 @@ class RealCupTaskTabUI:
                         agent.provider = llm["provider"]
                         self.agent = agent
                     fill_all = scene == "fill_egg_holder" and is_fill_all_task(task)   # V4.6.8 FILL CARTON
-                    if try_harder or fill_all:
-                        self._log(f"[INFO] [V4.6.8] Try harder {'开' if try_harder else '关'} · "
-                                  f"{'连续放满蛋托（每轮重新识别）' if fill_all else '单个鸡蛋'}")
+                    if try_harder or fill_all:              # V4.6.9: the right words for every scene
+                        what = ("连续放满蛋托（每轮重新识别）" if fill_all else "单个鸡蛋") if scene == "fill_egg_holder" else \
+                            ("LLM Agent（失败时推它换策略）" if agent is not None else "固定流程")
+                        self._log(f"[INFO] [V4.6.9] Try harder {'开' if try_harder else '关'} · {what}")
                     out = run_execute(io, source, target, knobs, skill, agent=agent, llm_cfg=llm, recorder=rec, scene=scene,
                                       try_harder=try_harder, fill_all=fill_all)
             except Exception as exc:

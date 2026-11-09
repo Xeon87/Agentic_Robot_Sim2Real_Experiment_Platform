@@ -273,6 +273,10 @@ def cup_from_mask(mask, depth, K, T, z0, g, ndz_m, robot_boxes=None, fence_poly=
     cv2 = YP._cv2()
     T = np.asarray(T, float)
     out = {"kind": "unknown", "reason": None, "warnings": []}
+    try:                                       # V4.6.9 DEPTH COVERAGE: share of the cup's mask pixels with a depth value
+        out["depth_cov"] = round(float((np.asarray(depth)[mask] > 0).mean()), 3) if mask.any() else 0.0
+    except Exception:
+        out["depth_cov"] = None
     occ, top_hidden = 0.0, 0.0
     mask_full = mask
     if hull is not None and mask.any():
@@ -525,5 +529,7 @@ def summary(res):
         xy = e.get("base_xyz_m") or e.get("held_base_xyz_m")     # V3.71: the held cup's measured position too
         parts.append(f"{e['det_id']} {e['kind']}" + (f"@({xy[0]:+.3f},{xy[1]:+.3f})" if xy else "")
                      + (f" h={h:.0f}mm" if h is not None else "") + (f"(深度 {hd:.0f})" if hd is not None else "")
-                     + f" conf {e.get('conf', 0):.2f}" + (f" [{e['reason']}]" if e.get("reason") else ""))
+                     + f" conf {e.get('conf', 0):.2f}"
+                     + (f" 深度覆盖 {e['depth_cov'] * 100:.0f}%" if e.get("depth_cov") is not None else "")   # V4.6.9
+                     + (f" [{e['reason']}]" if e.get("reason") else ""))
     return " ".join(parts) or "no cup（YOLOE 没有找到杯子）"

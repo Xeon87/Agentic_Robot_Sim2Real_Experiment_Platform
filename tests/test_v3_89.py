@@ -28,8 +28,8 @@ import NERO_V325_Camera as CAM                  # noqa: E402
 import NERO_V349_Real_Wrist_Camera as W49       # noqa: E402
 import NERO_V386_Real_Wrist_Camera as W86       # noqa: E402
 
-assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4", "V4.6.5", "V4.6.6", "V4.6.8")
-assert W86.VERSION in ("V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4", "V4.6.5", "V4.6.6", "V4.6.8")
+assert (ROOT / "VERSION").read_text(encoding="utf-8").strip() in ("V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4", "V4.6.5", "V4.6.6", "V4.6.8", "V4.6.9")
+assert W86.VERSION in ("V3.89", "V3.90", "V3.91", "V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4", "V4.6.5", "V4.6.6", "V4.6.8", "V4.6.9")
 assert hasattr(W86, "MARKER_V389")
 
 # ------------------------------------------------------------------ A1: Garage 18-pose + Counter-Tilt Dome + IPPE Flips

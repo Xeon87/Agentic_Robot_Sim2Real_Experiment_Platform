@@ -2082,12 +2082,18 @@ class CupSkills:
                               free_fallback=True, q_hint=self.plan["_q"].get("above_target"))
             if self.prof.lift_settle_s > 0:                # V3.64 LIFT SETTLE: the carry swings the cup on the hold too
                 self.io.sleep(self.prof.lift_settle_s)
+            # V4.6.9 TARGET PINNED: the target cup was measured while nothing blocked it; from here the held cup hangs
+            # above it in the fixed camera's view - those views must not move the target (V4.6.8 run: the target was
+            # re-associated to another blob 98 mm away and the place was "corrected" by ~20 mm)
+            t_pin = {k_: np.asarray(self._cup(target_cup)[k_], float).copy() for k_ in ("base", "rim")}
             if self.camera and self.prof.recheck_held_before_place:
                 v["held_recheck"] = self._recheck_held(src, target_cup, R_p)
+                self._pin_target(target_cup, t_pin)
             if self.camera and hasattr(self.io, "wrist_snapshot"):
                 w_pl = self._wrist_recheck_place(src, target_cup, R_p)
                 if w_pl is not None:
                     v["wrist_place_check"] = w_pl
+                self._pin_target(target_cup, t_pin)
             # 3. lower to the release height; the remaining error (if >= 3 mm) is folded into the same move
             d, s, t = self._centre_error(src, target_cup)
             v["centre_error_high_mm"] = round(float(np.linalg.norm(d)) * 1000, 1)
@@ -2265,6 +2271,15 @@ class CupSkills:
                      f"夹爪旋转 {ang_err:+.1f}°（开合线垂直于杯壁 ✓）")
         return res
 
+    def _pin_target(self, dst, pin):
+        """V4.6.9: restore the target cup position measured before the carry (unoccluded)"""
+        c = self._cup(dst)
+        moved = float(np.linalg.norm(np.asarray(c["base"][:2], float) - pin["base"][:2])) * 1000.0
+        if moved > 0.5:
+            self.io.emit(f"[INFO] [V4.6.9 CUP] 目标 {dst} 在放置前的画面里被挡住，读数漂了 {moved:.0f} mm → 沿用搬运前测得的位置")
+        c["base"][:] = pin["base"]
+        c["rim"][:] = pin["rim"]
+
     def _wrist_recheck_place(self, src, dst, R_p, n_max=2):
         """V3.87 PHASE 3 PRE-PLACE WRIST CONCENTRICITY SERVOING: above the target cup, use the downward-looking wrist
         camera to measure the concentricity offset between the target cup rim and the held cup bottom, centring before
@@ -2302,11 +2317,8 @@ class CupSkills:
                 out["checks"].append(res)
                 self.io.emit(f"[WARN] [V3.87 WRIST] 叠杯前腕部同心度复查：偏差 {res['concentric_err_mm']:.1f} mm 超出阈值 → 不修正")
                 break
-            # Update target cup's perceived XY position from the close-up wrist measurement
-            tx, ty = res["target_xy_m"]
-            if dst in self.cam:
-                self.cam[dst]["base"][0], self.cam[dst]["base"][1] = tx, ty
-                self.cam[dst]["rim"][0], self.cam[dst]["rim"][1] = tx, ty
+            # V4.6.9: the target position is NOT overwritten by the wrist reading (V4.6.8: two wrist reads 22 mm apart
+            # moved the target back and forth); the reading only moves the TCP, within the caps below
             # If inner contour measured the held cup directly, fold difference into grip_offset
             if res.get("held_source") == "wrist_inner_contour" and self.grip_offset is not None:
                 hx, hy = res["held_xy_m"]
@@ -2317,6 +2329,14 @@ class CupSkills:
                 self.grip_offset = self.grip_offset + Rt.T @ dh
             dx_m, dy_m = res["delta_xy_m"]
             err_mm = res["concentric_err_mm"]
+            step_mm = float(math.hypot(dx_m, dy_m)) * 1000.0
+            applied_mm = sum(float(math.hypot(*c_["delta_xy_m"])) * 1000.0 for c_ in out["checks"] if c_.get("applied"))
+            if step_mm > WRIST_PLACE_STEP_MAX_MM or applied_mm + step_mm > WRIST_PLACE_TOTAL_MAX_MM:
+                res["applied"] = False
+                out["checks"].append(res)
+                self.io.emit(f"[WARN] [V4.6.9 WRIST] 叠杯前腕部同心度读数 {step_mm:.1f} mm（已修正 {applied_mm:.1f} mm）超过上限 "
+                             f"{WRIST_PLACE_STEP_MAX_MM:.0f} / {WRIST_PLACE_TOTAL_MAX_MM:.0f} mm → 不修正，按搬运前的目标位置下放")
+                break
             if err_mm < W86.WRIST_PLACE_TOL_M * 1000.0:
                 res["applied"] = False
                 out["checks"].append(res)
@@ -2565,8 +2585,57 @@ def _task_pair(task):
     return "cup_1", "cup_2"
 
 
+# V4.6.9 TRY HARDER (LLM): overrides the "retry once / stop and report" rules; every failed tool result carries concrete
+# alternatives; an early "I give up" is answered with a push (up to TRY_HARDER_PUSHES times) while steps remain
+TRY_HARDER_PUSHES = 3
+WRIST_PLACE_STEP_MAX_MM = 10.0     # V4.6.9: one wrist concentricity correction at most this
+WRIST_PLACE_TOTAL_MAX_MM = 12.0    # V4.6.9: all wrist concentricity corrections together at most this
+TRY_HARDER_INSTRUCTIONS = """
+TRY HARDER MODE (the user enabled it; it OVERRIDES rules 3, 4 and 6 and every 'stop_and_report' recommendation):
+- Do NOT give up after one failure. After a failed tool, read reason / physical_verification and the field
+  try_harder.suggestions, then choose a DIFFERENT strategy and call a tool. Never answer with a final text while
+  the task is not verified and tool steps remain, unless every suggestion has been tried.
+- Strategies you can use with the existing tools: observe_scene again (fresh camera frames; the perception retries
+  itself), return_to_safe_pose first when the arm may block the camera (only when no cup is held), plan_cup_stack
+  again (the planner searches other rim angles each time) or with source and target swapped, pick_cup again after a
+  new plan, place_cup_into again while the cup is held (it re-plans the place from the current pose).
+- Keep a short plan in your text: what failed, why, what you try next. Stop only when the cup is verified or
+  every strategy failed twice."""
+
+
+def try_harder_suggestions(name, args, res):
+    """V4.6.9: concrete next strategies for a failed cup tool (fed back to the LLM inside the tool result)"""
+    reason = str(res.get("reason") or res.get("error") or "")
+    held = bool((res.get("state_after") or {}).get("held_cup"))
+    src = args.get("source_cup") or "cup_1"
+    dst = args.get("target_cup") or "cup_2"
+    if name == "observe_scene":
+        out = ["observe_scene again (new frames)",
+               "return_to_safe_pose, then observe_scene (the arm may block the fixed camera)" if not held else
+               "observe_scene once more without moving (a cup is held)",
+               "if one cup has no depth, still try plan_cup_stack with that cup as the TARGET (its position is used only "
+               "for the place)"]
+    elif name == "plan_cup_stack":
+        out = [f"plan_cup_stack(source_cup='{dst}', target_cup='{src}') - the swapped order may be reachable",
+               "return_to_safe_pose, observe_scene, then plan_cup_stack again (cup positions are re-measured, other rim "
+               "angles are searched)"]
+    elif name == "pick_cup":
+        out = ["observe_scene, plan_cup_stack again, then pick_cup again",
+               f"plan_cup_stack(source_cup='{dst}', target_cup='{src}') if the same cup keeps failing"]
+    elif name == "place_cup_into":
+        out = (["observe_scene (the held cup stays in the gripper), then place_cup_into again - it re-plans from the "
+                "current pose", "place_cup_into once more if the reason was NOT_CENTRED_OVER_TARGET or a motion stop"]
+               if held else ["the cup is no longer held: observe_scene, plan_cup_stack, pick_cup again"])
+    elif name in ("verify_stack",):
+        out = ["observe_scene, then verify_stack again (the first view may have been blocked)"]
+    else:
+        out = ["observe_scene and continue with the step that failed"]
+    return {"failed_tool": name, "reason": reason, "suggestions": out,
+            "do_not_give_up": "TRY HARDER is on: pick one of the suggestions now instead of reporting failure."}
+
+
 def run_cup_task(agent, skills, task, model, api_key="", reasoning_effort="low", max_tool_steps=30, emit=None,
-                 dry_run=False):
+                 dry_run=False, try_harder=False):
     """bounded tool-calling episode for stack_cups, reusing NeroLLMAgent's API transport (providers, retries,
     usage accounting).  -> final text"""
     emit = emit or agent.emit
@@ -2586,7 +2655,9 @@ def run_cup_task(agent, skills, task, model, api_key="", reasoning_effort="low",
         emit(f"[V3.62 CUP TASK START] model={model} | effort={reasoning_effort} | max_tool_steps={max_tool_steps} | "
              f"skill={skills.skill.get('code')} | knobs={json.dumps(skills.k, ensure_ascii=False)}")
         emit(f"[LLM USER TASK] {task}")
-        payload = {"model": str(model), "instructions": CUP_SYSTEM_INSTRUCTIONS, "input": str(task), "tools": CUP_TOOLS,
+        instr = CUP_SYSTEM_INSTRUCTIONS + (TRY_HARDER_INSTRUCTIONS if try_harder else "")
+        pushes = 0
+        payload = {"model": str(model), "instructions": instr, "input": str(task), "tools": CUP_TOOLS,
                    "tool_choice": "auto", "parallel_tool_calls": False, "reasoning": {"effort": str(reasoning_effort)},
                    "max_output_tokens": 1200, "store": True}
         while True:
@@ -2605,6 +2676,22 @@ def run_cup_task(agent, skills, task, model, api_key="", reasoning_effort="low",
                 emit(f"[LLM TEXT] {text}")
             if not calls:
                 final = text
+                verified = any(h["tool"] == "verify_stack" and h["result"].get("ok") for h in history)
+                if try_harder and not verified and pushes < TRY_HARDER_PUSHES and steps < max_tool_steps - 1:
+                    pushes += 1
+                    last = next((h for h in reversed(history) if not h["result"].get("ok")), None)
+                    why = f"{last['tool']}: {last['result'].get('reason') or last['result'].get('error')}" if last else "-"
+                    sugg = try_harder_suggestions(last["tool"], {}, last["result"])["suggestions"] if last else \
+                        ["observe_scene"]
+                    emit(f"[V4.6.9 TRY HARDER] LLM 想结束但任务还没完成（{why}）→ 第 {pushes}/{TRY_HARDER_PUSHES} 次要求它换策略继续")
+                    payload = {"model": str(model), "instructions": instr,
+                               "previous_response_id": agent._last_response_id,
+                               "input": [{"role": "user", "content":
+                                          "TRY HARDER: the task is NOT finished (last failure " + why + "). Do not stop. "
+                                          "Choose a different strategy now and call a tool. Options: " + "; ".join(sugg)}],
+                               "tools": CUP_TOOLS, "tool_choice": "auto", "parallel_tool_calls": False,
+                               "reasoning": {"effort": str(reasoning_effort)}, "max_output_tokens": 1200, "store": True}
+                    continue
                 break
             outs = []
             for call in calls:
@@ -2625,12 +2712,17 @@ def run_cup_task(agent, skills, task, model, api_key="", reasoning_effort="low",
                     emit(f"[LLM DRY RUN] skipped physical tool {name}")
                 else:
                     res = skills.run_tool(name, args)
+                if try_harder and not res.get("ok"):          # V4.6.9: no "stop", concrete alternatives instead
+                    res = dict(res)
+                    res["recommended_next_actions"] = [a for a in (res.get("recommended_next_actions") or [])
+                                                       if a != "stop_and_report"] or ["observe_scene"]
+                    res["try_harder"] = try_harder_suggestions(name, args, res)
                 emit(f"[LLM TOOL RESULT #{steps}] {name} | elapsed={time.perf_counter() - t_tool:.2f}s | "
                      + json.dumps({k: v for k, v in res.items() if k != "scene"}, ensure_ascii=False)[:1500])
                 history.append({"tool": name, "result": res})
                 outs.append({"type": "function_call_output", "call_id": str(call.get("call_id", "")),
                              "output": json.dumps(res, ensure_ascii=False, default=str)})
-            payload = {"model": str(model), "instructions": CUP_SYSTEM_INSTRUCTIONS,
+            payload = {"model": str(model), "instructions": instr,
                        "previous_response_id": agent._last_response_id, "input": outs, "tools": CUP_TOOLS,
                        "tool_choice": "auto", "parallel_tool_calls": False,
                        "reasoning": {"effort": str(reasoning_effort)}, "max_output_tokens": 1200, "store": True}
