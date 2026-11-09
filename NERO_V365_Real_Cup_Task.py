@@ -1050,6 +1050,7 @@ MARKER_V45 = "V4.5 EGG PLACE ACCURACY + FINGERTIP Z SAFETY"
 TIP_PLAN_CLEAR_M = 0.005          # planning: lowest fingertip >= table + 5 mm
 TIP_EXEC_GUARD_M = 0.003          # execution fence (all SO-101 tasks): lowest fingertip >= z_table + 3 mm (sort: 4 mm)
 TABLE_DISAGREE_MAX_M = 0.015      # camera table vs fence z_table differ more than this -> refuse (calibration problem)
+TABLE_DISAGREE_TRY_HARDER_M = 0.025   # V4.6.12 (user option A): with Try harder 15-25 mm only warns
 EGG_SLOW_LAST_M = 0.015           # two-stage descent: last 15 mm slowly
 PLAN_MARGIN_HEADROOM_DEG = 1.0    # planned straight lines keep 1 deg more joint margin than execution requires
 EGG_SLOW_SPEED = 0.010
@@ -1072,6 +1073,7 @@ VERIFY_RISE_GAIN_MM = 15.0        # verify: cup middle this much higher than bef
 JAW_CLEAR_M = 0.006               # place: jaw tip >= egg radius + this from an egg already standing next to the slot
 JAW_REACH_M = 0.027               # jaw tip distance from the held egg's centre along the closing axis
 FILL_MAX_FAILS = 3                # fill the carton: stop after this many eggs that could not be placed
+MARKER_V4612 = "V4.6.12 TABLE HEIGHT 15-25 MM WARN WITH TRY HARDER"
 MARKER_V4610 = "V4.6.10 VERIFY BY RELEASE POSITION + TRY HARDER VERIFY + UNCONFIRMED CONTINUE"
 VERIFY_RAISE_M = 0.10             # V4.6.10: look k (k >= 1) from k x this higher (joint-space move if the line fails)
 VERIFY_SOURCE_GONE_M = 0.025      # V4.6.10: no egg this close to where the egg was picked = it left the table
@@ -1110,8 +1112,10 @@ def so101_tip_tool_T(T_l7g):
     return T @ S
 
 
-def conservative_table_z(obs):
+def conservative_table_z(obs, try_harder=False):
     """V4.5: camera-fitted table height vs the safety fence z_table -> the HIGHER one (tips stay clear of both).
+    V4.6.12: with Try harder a difference of 15-25 mm is a warning (source text starts with "WARN"), not a refusal;
+    the grasp still uses the higher table, so the fingertips cannot hit the table.
     -> (zt, source text, error or None)"""
     zc = (obs or {}).get("table_z_m")
     zf = (obs or {}).get("fence_z_table_m")
@@ -1121,6 +1125,9 @@ def conservative_table_z(obs):
         z = float(zc if zc is not None else zf)
         return z, ("相机桌面" if zc is not None else "安全区 z_table"), None
     zc, zf = float(zc), float(zf)
+    if try_harder and TABLE_DISAGREE_MAX_M < abs(zc - zf) <= TABLE_DISAGREE_TRY_HARDER_M:
+        return max(zc, zf), (f"WARN 相机桌面比安全区 z_table {'高' if zc > zf else '低'} {abs(zc - zf) * 1000:.0f} mm"
+                             f"（Try harder：15–25 mm 只警告），取较高者"), None
     if abs(zc - zf) > TABLE_DISAGREE_MAX_M:
         return max(zc, zf), "不一致", (f"相机测得的桌面比安全区 z_table {'高' if zc > zf else '低'} {abs(zc - zf) * 1000:.0f} mm"
                                        f"（> {TABLE_DISAGREE_MAX_M * 1000:.0f} mm）：手眼标定或安全区桌面高度有问题，先复核再夹蛋")
@@ -1662,7 +1669,10 @@ class RealEggSkills:
         if target_slot not in self.cam:
             return self._res("plan_egg_place", False, reason="CARTON_SLOT_NOT_FOUND", nxt=["observe_scene"])
         egg = self.cam[source_egg]
-        zt, zt_src, zt_err = conservative_table_z(self.last_obs)    # V4.5: higher of camera table / fence z_table
+        zt, zt_src, zt_err = conservative_table_z(self.last_obs, getattr(self, "try_harder", False))
+        if zt_src.startswith("WARN"):
+            self.io.emit(f"[WARN] [V4.6.12 EGG PLAN] {zt_src[5:]}：夹取高度按较高的桌面算，不会撞桌；"
+                         "请尽快在 Camera调试 页做「快速复核」")
         if zt_err:
             self.io.emit(f"[FAIL] [V4.5 EGG PLAN] {zt_err}")
             return self._res("plan_egg_place", False, {"detail": zt_err}, reason="TABLE_HEIGHT_DISAGREE",
@@ -2888,6 +2898,7 @@ def run_execute(io, source, target, knobs=None, skill=None, agent=None, llm_cfg=
     import NERO_V362_Cup_Skills as CK
     sk = _record(make_skills(io, knobs, skill, scene=scene), io, recorder)
     io.home_q = io.current_q()
+    sk.try_harder = bool(try_harder)                # V4.6.12: plan_egg_place reads it (table height option A)
     if scene == "fill_egg_holder" and fill_all:
         out = sk.fill_carton_episode(try_harder=try_harder)
         if not getattr(sk, "held", None):

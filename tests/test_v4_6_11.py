@@ -167,7 +167,8 @@ class TestV4611(unittest.TestCase):
         import NERO_V4_Console_Tab as VT
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
-        self.assertEqual((v, C.VERSION, RR.VERSION), ("V4.6.11", "V4.6.11", "V4.6.11"))
+        self.assertEqual((C.VERSION, RR.VERSION), (v, v))
+        self.assertIn(v, ("V4.6.11", "V4.6.12"))
         self.assertEqual(DR.MARKER_V4611_REC, "V4.6.11 DISK SPOOL + BACKGROUND SAVE + DISCARD")
         self.assertEqual(VT.MARKER_V4611, "V4.6.11 AUTO TEACH RECORD + SPACE BINDTAG + RECENT EPISODES + LIGHT REFRESH")
         src = open(os.path.join(HERE, "NERO_V4_Console_Tab.py"), encoding="utf-8").read()

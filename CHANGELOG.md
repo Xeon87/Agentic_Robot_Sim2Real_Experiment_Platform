@@ -1,3 +1,13 @@
+## V4.6.12 (2026-11-09) — 蛋托槽位落回槽里（用户真实画面验证）+ 槽被占判断 + 桌面高度选项 A
+- `NERO_V349_Real_Wrist_Camera.py`（`V4.6.12 CUPS INSIDE THE OUTLINE + OCCUPIED NEEDS RIM TOP`）：
+  - `footprint_ok_map`：全部蛋托 mask 像素经射线投到桌面平面（蛋托半高处），再向内腐蚀 `CUP_EDGE_CLEAR_FRAC = 0.30` × 孔距；`fit_carton_template(foot_st_mm=…)` 在此区域以外的碗形分数一律记为 -5。
+  - `TEMPLATE_SEARCH_MM = 60`。
+  - `slot_rise` 增加 `core_med_mm`、`rim_top_mm`；`rise_says_egg`：rise ≥ 8 mm 且槽心中位高度 ≥ 槽口顶部 − 3 mm。
+  - 诊断图右半边文字在翻转之后再画；标题改为 V4.6.12。
+- `NERO_V365_Real_Cup_Task.py`（`V4.6.12 TABLE HEIGHT 15-25 MM WARN WITH TRY HARDER`）：`conservative_table_z(obs, try_harder)`；`plan_egg_place` 发出 WARN；`run_execute` 设置 `sk.try_harder`。
+- 测试：新 `tests/test_v4_6_12.py`（6 项），其中 R1 使用用户 2026-11-09 10:03 的真实画面：旧结果 ≥ 3 个槽在轮廓边上或外面；新结果 6 个槽都在轮廓内，有蛋的槽离鸡蛋 < 10 mm，且只有它被判为已占。新增数据文件 `tests/data/v4612_real_carton.npz`（33 KB，只含深度裁剪、轮廓、相机参数）。
+- **没有在真实硬件上运行过。**
+
 ## V4.6.11 (2026-11-09) — Smol VLA 示教采集：不卡顿 + 自动进出示教模式 + 空格键修复 + 放弃本次 + 最近 Episode
 - `NERO_V4_Dataset_Recorder.py`（`V4.6.11 DISK SPOOL + BACKGROUND SAVE + DISCARD`）：
   - `ImageSpool`：图像经写线程进入本地磁盘的两个 raw 文件（`NERO_REC_SPOOL_DIR`，默认 `~/.cache/nero_record_spool`），队列上限 120 帧；分辨率和格式不变。

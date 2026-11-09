@@ -2144,7 +2144,9 @@ def egg_task_config(path=None):
 
 
 MARKER_V466_TEMPLATE = "V4.6.6 FIXED CARTON TEMPLATE"
+MARKER_V4612_TEMPLATE = "V4.6.12 CUPS INSIDE THE OUTLINE + OCCUPIED NEEDS RIM TOP"
 CARTON_DIAG_KEEP = 30
+TEMPLATE_SEARCH_MM = 60.0         # V4.6.12: template centre search +- this around the outer-box centre (was 40)
 TEMPLATE_MIN_PTS = 150            # V4.6.9: depth points inside the (eroded) carton mask needed for the template fit
 BOWL_MIN_CORE_FRAC = 0.04         # V4.6.9: bowl score needs this share of the cup-middle cells with depth (was 0.10)
 BOWL_MIN_RING_FRAC = 0.10         # V4.6.9: ... and of the rim-ring cells (was 0.30) - sparse High Accuracy depth
@@ -2230,8 +2232,27 @@ def template_offsets(R, C, pc_mm, pr_mm):
     return [((c_i + 0.5 - 0.5 * C) * pc_mm, (r_i + 0.5 - 0.5 * R) * pr_mm) for r_i in range(R) for c_i in range(C)]
 
 
+def footprint_ok_map(bw, foot_s_mm, foot_t_mm, clear_mm):
+    """V4.6.12: raster (same grid as the bowl map) of the cells that are at least clear_mm INSIDE the carton outline.
+    foot_* = every carton-mask pixel projected onto the table plane (depth or not)."""
+    import numpy as np
+    cv2 = _cv2()
+    S = bw["S"]
+    ny, nx = S.shape
+    res = bw["res"]
+    ix = ((np.asarray(foot_s_mm, float) - bw["x0"]) / res).astype(int)
+    iy = ((np.asarray(foot_t_mm, float) - bw["y0"]) / res).astype(int)
+    g = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny)
+    fp = np.zeros((ny, nx), np.uint8)
+    fp[iy[g], ix[g]] = 1
+    fp = cv2.morphologyEx(fp, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))          # fill pixel gaps
+    r = max(1, int(round(clear_mm / res)))
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    return cv2.erode(fp, k).astype(bool)
+
+
 def fit_carton_template(s_mm, t_mm, h_mm, R, C, pc_mm, pr_mm, phi0_rad, centre0_mm, res_mm=1.0, search_mm=40.0,
-                        cav_mm=4.0):
+                        cav_mm=4.0, foot_st_mm=None):
     """V4.6.6 FIXED CARTON TEMPLATE: rigid R x C grid with the MEASURED pitches; only its centre (search +-search_mm
     around centre0) and direction (phi0 or phi0 + 90 deg, +-10 deg) are searched; score = sum of the bowl scores at
     the slot centres.  The grid size never changes (a 2x3 carton is never read as 3x3 / 3x4).
@@ -2240,6 +2261,13 @@ def fit_carton_template(s_mm, t_mm, h_mm, R, C, pc_mm, pr_mm, phi0_rad, centre0_
     bw = bowl_score_map(s_mm, t_mm, h_mm, min(pc_mm, pr_mm), res_mm)
     S, x0, y0 = bw["S"], bw["x0"], bw["y0"]
     ny, nx = S.shape
+    inside_ok = None
+    if foot_st_mm is not None and len(foot_st_mm[0]) > 0:
+        # V4.6.12 CUPS INSIDE THE CARTON: a cup centre is >= CUP_EDGE_CLEAR_FRAC x pitch inside the outline (V4.6.11
+        # real frame: centres just OUTSIDE the edge scored as "bowls" - carton wall on one side, the low foot / paper
+        # in the middle - and the whole grid slid one pitch onto the edge)
+        inside_ok = footprint_ok_map(bw, foot_st_mm[0], foot_st_mm[1], CUP_EDGE_CLEAR_FRAC * min(pc_mm, pr_mm))
+        S = np.where(inside_ok, S, -5.0).astype(np.float32)
     off = np.asarray(template_offsets(R, C, pc_mm, pr_mm), float)
     g = np.arange(-search_mm, search_mm + 1e-9, res_mm)
     TX, TY = np.meshgrid(centre0_mm[0] + g, centre0_mm[1] + g)
@@ -2265,9 +2293,12 @@ def fit_carton_template(s_mm, t_mm, h_mm, R, C, pc_mm, pr_mm, phi0_rad, centre0_
     score, centre, phi, per = best
     phi = math.atan2(math.sin(phi), math.cos(phi))
     return {"centre_mm": centre, "phi_rad": phi, "score": round(score, 2),
-            "per_slot": [round(v, 1) for v in per], "n_cavities": int(sum(v >= cav_mm for v in per)), "bowl": bw}
+            "per_slot": [round(v, 1) for v in per], "n_cavities": int(sum(v >= cav_mm for v in per)), "bowl": bw,
+            "inside_checked": inside_ok is not None}
 
 
+CUP_EDGE_CLEAR_FRAC = 0.30      # V4.6.12: a cup centre lies at least this x pitch inside the carton outline
+SLOT_EGG_TOP_TOL_MM = 3.0       # V4.6.12: see rise_says_egg
 SLOT_EGG_RISE_MM = 8.0          # V4.6.8: cup middle this much ABOVE the rim ring = an egg stands in the cup
 
 
@@ -2285,7 +2316,23 @@ def slot_rise(pts, centre_uv_mm, pitch_mm, min_core=12):
         return {"core_top_mm": None, "rim_mm": None, "rise_mm": None, "n_core": n_core}
     ct = float(np.percentile(h[core], 90))
     rm = float(np.median(h[ring]))
-    return {"core_top_mm": round(ct, 1), "rim_mm": round(rm, 1), "rise_mm": round(ct - rm, 1), "n_core": n_core}
+    # V4.6.12: the middle of the cup must also reach the TOP of its rim (an egg sticks out of the cup).  Real pulp
+    # carton (V4.6.11 frame): the depth inside empty cups scatters by ~28 mm between cups, an empty cup had
+    # rise +11 mm (-> "occupied") while its middle stayed 20 mm below the rim top.
+    cm = float(np.median(h[core]))
+    rt = float(np.percentile(h[ring], 90))
+    return {"core_top_mm": round(ct, 1), "rim_mm": round(rm, 1), "rise_mm": round(ct - rm, 1), "n_core": n_core,
+            "core_med_mm": round(cm, 1), "rim_top_mm": round(rt, 1)}
+
+
+def rise_says_egg(rise):
+    """V4.6.12: occupied by depth only when the middle rose above the rim (>= SLOT_EGG_RISE_MM) AND the middle's
+    median reaches the rim top (- SLOT_EGG_TOP_TOL_MM)"""
+    if not rise or rise.get("rise_mm") is None or rise["rise_mm"] < SLOT_EGG_RISE_MM:
+        return False
+    if rise.get("core_med_mm") is None or rise.get("rim_top_mm") is None:
+        return True
+    return rise["core_med_mm"] >= rise["rim_top_mm"] - SLOT_EGG_TOP_TOL_MM
 
 
 def save_carton_diag(rgb_crop, mask_crop, mask_inner, slot_px, slot_scores, bowl, slot_st_mm, rect_st_mm, title,
@@ -2334,9 +2381,11 @@ def save_carton_diag(rgb_crop, mask_crop, mask_inner, slot_px, slot_scores, bowl
             cv2.polylines(right, [pts], True, (255, 255, 255), 1)
         for k, st in enumerate(slot_st_mm):
             cv2.circle(right, px(st), int(r_in), (255, 255, 255), 1)
-            cv2.putText(right, f"{k + 1}:{slot_scores[k]:+.0f}", (px(st)[0] - 12, px(st)[1] + 4),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
         right = cv2.flip(right, 0)                             # plane frame y up
+        hh = right.shape[0]
+        for k, st in enumerate(slot_st_mm):                    # V4.6.12: text AFTER the flip (was mirrored)
+            cv2.putText(right, f"{k + 1}:{slot_scores[k]:+.0f}", (px(st)[0] - 12, hh - 1 - px(st)[1] + 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
         return _save_diag_panels(left, right, title, root, keep)
     except Exception:
         return None
@@ -2579,8 +2628,15 @@ def locate_egg_holder(dets2d, rgb, depth_m, K, T_base_cam, table_z=None, fence_p
             rel_t = P_d - o_pl
             s_pl, t_pl = (rel_t @ e1) * 1000.0, (rel_t @ e2) * 1000.0
             if int(inner.sum()) >= TEMPLATE_MIN_PTS:
+                # V4.6.12: the carton outline on the table plane (every mask pixel, at half the carton height)
+                rays = np.stack([(uu_m - K["ppx"]) / K["fx"], (vv_m - K["ppy"]) / K["fy"], np.ones(len(uu_m))], axis=1)
+                Dr = rays @ T[:3, :3].T
+                lam_f = (d_pl + 0.5 * h_top_m - float(n_vec @ T[:3, 3])) / (Dr @ n_vec)
+                Pf = T[:3, 3] + lam_f[:, None] * Dr - o_pl
+                foot = ((Pf @ e1) * 1000.0, (Pf @ e2) * 1000.0)
                 tmpl = fit_carton_template(s_pl[inner], t_pl[inner], hs_d[inner] * 1000.0, R, C, pc_mm, pr_mm,
-                                           yaw_rad, (float(sc_mm), float(tc_mm)))
+                                           yaw_rad, (float(sc_mm), float(tc_mm)), foot_st_mm=foot,
+                                           search_mm=TEMPLATE_SEARCH_MM)
         if tmpl is not None and tmpl["n_cavities"] >= 2:
             phi = tmpl["phi_rad"]
             s0, t0 = tmpl["centre_mm"]
@@ -2709,7 +2765,7 @@ def locate_egg_holder(dets2d, rgb, depth_m, K, T_base_cam, table_z=None, fence_p
             has_egg_near = any(math.hypot(s_xyz[0] - ex_, s_xyz[1] - ey_) < 0.42 * min(pl_m, pw_m) for ex_, ey_ in egg_pts)
             occ = (slot_idx in occ_override) or (sid in occ_override) or has_egg_near or (cell_h_mm > h_top_m * 1000.0 + 9.0)
             rise = slot_rise(crop_pts, slot_uv_mm[slot_idx - 1], min(pl_m, pw_m) * 1000.0) if crop_pts is not None else None
-            if rise is not None and rise["rise_mm"] is not None and rise["rise_mm"] >= SLOT_EGG_RISE_MM:
+            if rise_says_egg(rise):
                 occ = True
             uv = CAM.project(CAM.T_apply(CAM.T_inv(T.tolist()), s_xyz.tolist()), K)
             bx = [round(uv[0] - 14), round(uv[1] - 14), round(uv[0] + 14), round(uv[1] + 14)] if uv else [round(v) for v in d["box"]]
@@ -2746,7 +2802,7 @@ def locate_egg_holder(dets2d, rgb, depth_m, K, T_base_cam, table_z=None, fence_p
             tmpl_info["diag_png"] = save_carton_diag(
                 crop_rgb, mc, mc_er, slot_px, tmpl["per_slot"] if tmpl is not None else [0.0] * (R * C), bowl, st_mm,
                 [tuple(q) for q in box],
-                f"V4.6.9 carton {R}x{C} pitch {pl_m * 1000:.0f}x{pw_m * 1000:.0f} mm | depth {cov * 100:.0f}% | "
+                f"V4.6.12 carton {R}x{C} pitch {pl_m * 1000:.0f}x{pw_m * 1000:.0f} mm | depth {cov * 100:.0f}% | "
                 f"{tmpl_info['how']}", depth_crop=dc)
         except Exception as exc:
             tmpl_info["diag_error"] = str(exc)[:120]
