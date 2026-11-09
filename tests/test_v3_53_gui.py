@@ -156,7 +156,7 @@ def driver(root):
 tk.Tk.mainloop = lambda self, n=0: (driver(self), _orig_mainloop(self, n))
 C.run_console("real")
 
-assert res["dres"] == "1280×720", f"Expected 1280×720, got {res['dres']}"
+assert res["dres"] in ("1280×720", "848×480"), f"Expected 1280×720 (V3.53) or 848×480 (V4.6.10 start default), got {res['dres']}"
 assert res["align_diff_px"] <= 1.0, f"Buttons not vertically aligned with Copy Log: diff={res['align_diff_px']} px"
 assert res["b_out_initial_state"] == "normal", f"退出示教模式 was greyed out: {res['b_out_initial_state']}"
 assert res["cam_exit_when_flag_false"] == [(False, False)], res["cam_exit_when_flag_false"]

@@ -1,3 +1,17 @@
+## V4.6.10 (2026-11-09) — 按松开点验证鸡蛋；Try harder 验证；未确认也继续；主相机默认 848×480 + Default
+- `NERO_V365_Real_Cup_Task.py`（`V4.6.10 VERIFY BY RELEASE POSITION + TRY HARDER VERIFY + UNCONFIRMED CONTINUE`）：
+  - `place_egg_into_slot` 记录 `last_place`（松开点 = 实测关节算出的鸡蛋下端 xy；取蛋位置）。`_release_tip_error` 返回 `tip_xy_m`。
+  - `verify_egg_in_slot` 重写：所有证据都在松开点处取；新画面里离该点最近的槽（不管编号）；鸡蛋计数用放蛋前的槽位。第 k 次看抬高 k×100 mm，直线失败时用关节空间（`_raise_for_look`，抬不到就抬一半）。
+  - 新工具 `verify_egg_try_harder`：腕部相机俯视松开点（`_wrist_look_at`）→ 判掉出（`EGG_FELL_OUT`）/ 没放成功（`NOT_PLACED`）/ 未确认（ok + `unconfirmed` + warnings）。
+  - `_one_egg` 返回 True / "unconfirmed" / False，并维护 `placed_xy`。`observe_scene` 把 `placed_xy` 附近的槽算作已占，附近的鸡蛋算作"已在蛋托里"。
+  - `fill_carton_episode`：未确认的鸡蛋记入 `unconfirmed`，继续下一轮；`run_execute` 返回 `unconfirmed`。
+  - `is_fill_all_task`：识别复数 eggs / slots、one by one、逐个、依次、剩下的 等说法。
+  - 总结标签：鸡蛋 / 分拣任务写"固定流程（+ Try harder）"，只有叠杯子任务写 "(LLM)"。
+- `NERO_V368_Real_Task_Record.py`：步骤记录加 `unconfirmed`；`task_summary` 有未确认步骤时为 YELLOW `UNCONFIRMED`。
+- `NERO_V312_Console.py`（`V4.6.10 DEPTH DEFAULT 848x480 + DEFAULT`）：`v4610_depth_defaults` 在启动时把主相机深度设为 848×480 · Default（`NERO_DEPTH_KEEP_SAVED=1` 保留设置文件里的值）。`NERO_V325_Camera.py` 未改动（冻结文件）。
+- 测试：新 `tests/test_v4_6_10.py`（8 项，含按 V4.6.9 失败那次重建的旋转 37° 场景）；`test_v4_6_8` 的 f2 / f5 适配新的日志标签和返回字段；版本白名单补 V4.6.10。
+- **没有在真实硬件上运行过。**
+
 ## V4.6.9 (2026-11-09) — Smol VLA 页 5 个子页 + 夹爪示教 / 空格键 + 实机回放；叠杯目标固定；LLM Try harder；深度覆盖率
 - `NERO_V4_Console_Tab.py`：
   - 顶栏（后端 / 策略 / `v_arb_text` 控制权 / 急停）+ `self.sub_nb` 5 个子页（`self.pages`：prep / teach / train / run / adv）；原有控件名和按钮文字不变。

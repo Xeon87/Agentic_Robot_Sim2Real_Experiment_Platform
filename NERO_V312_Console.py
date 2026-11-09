@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.6.9"
+VERSION = "V4.6.10"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -338,6 +338,25 @@ def install_crash_log(log_dir, root=None):
 MARKER_V463 = "V4.6.3 NATIVE CRASH GUARD"
 MARKER_V466 = "V4.6.6 NATIVE CRASH TRACE + TK INPUT METHOD OFF"
 MARKER_V468 = "V4.6.8 CAMERA TAB SCROLL"
+MARKER_V4610 = "V4.6.10 DEPTH DEFAULT 848x480 + DEFAULT"
+V4610_DEPTH_RES, V4610_DEPTH_PRESET = "848×480", "Default"
+
+
+def v4610_depth_defaults(cam_tab, log=None):
+    """V4.6.10: the main D435i starts with depth 848x480 + Default (user decision 2026-11-09: 1280x720 + High Accuracy
+    left only 1-13 % of the egg-carton pixels with depth).  Overrides the depth fields of a loaded locate settings file
+    at start; the user can still pick another value in Camera调试 for this session.  NERO_DEPTH_KEEP_SAVED=1 keeps the
+    saved file's values.  The colour stream (1280x720) and its intrinsics are unchanged -> the hand-eye calibration
+    stays valid (recheck with 快速复核)."""
+    if os.environ.get("NERO_DEPTH_KEEP_SAVED") == "1" or not hasattr(cam_tab, "v_dres"):
+        return None
+    old = (cam_tab.v_dres.get(), cam_tab.v_dpreset.get())
+    cam_tab.v_dres.set(V4610_DEPTH_RES)
+    cam_tab.v_dpreset.set(V4610_DEPTH_PRESET)
+    if log and old != (V4610_DEPTH_RES, V4610_DEPTH_PRESET):
+        log(f"[INFO] [V4.6.10 camera] 主相机深度默认 {V4610_DEPTH_RES} · {V4610_DEPTH_PRESET}（设置文件里是 {old[0]} · {old[1]}；"
+            "彩色画面和内参不变，手眼标定照用，建议做一次「快速复核」）")
+    return old
 
 
 def v463_xinitthreads():
@@ -943,6 +962,7 @@ def run_console(initial_tab="sim"):
         cam_q.put(line)
     cam_tab = CAM.CameraTabUI(tk, ttk, cam_main, pipe, jpanel, safe_tab, real_cfg, log=cam_log_line,
                               ask=confirm_from_worker, visible_fn=lambda: nb.select() == str(cam_outer))
+    v4610_depth_defaults(cam_tab, cam_log_line)    # V4.6.10: depth 848x480 + Default at every start
     cam_tab.attach_workflow_bar(real_wf_bar)
     cam_tab.attach_workflow_bar(cam_bar)
 

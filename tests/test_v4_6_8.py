@@ -139,7 +139,7 @@ class TestV468(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertEqual(r["reason"], "SLOT_EMPTY")
         self.assertEqual(len(r["physical_verification"]["looks"]), 3)
-        self.assertEqual(sum("[V4.6.8 VERIFY]" in s for s in io.logs), 3)
+        self.assertEqual(sum(("[V4.6.8 VERIFY]" in s or "[V4.6.10 VERIFY]" in s) and "次看" in s for s in io.logs), 3)
 
     def test_f3_eggs_in_carton(self):
         scene = Scene()
@@ -185,7 +185,7 @@ class TestV468(unittest.TestCase):
         scene = Scene()
         sk, io = make(scene)
         out = sk.fill_carton_episode(try_harder=False)
-        self.assertEqual(sk.fill_result, {"placed": ["slot_6", "slot_3", "slot_5"], "fails": 0})
+        self.assertEqual({k: sk.fill_result[k] for k in ("placed", "fails")}, {"placed": ["slot_6", "slot_3", "slot_5"], "fails": 0})
         self.assertEqual(sum(1 for r in out if r["tool"] == "observe_scene"), 4)     # 3 rounds + the empty table
         self.assertEqual(sum(1 for r in out if r["tool"] == "verify_egg_in_slot" and r["ok"]), 3)
         self.assertEqual(scene.eggs, [])
@@ -197,7 +197,7 @@ class TestV468(unittest.TestCase):
         sk, io = make(scene)
         sk._plan_slot_candidates = lambda *a, **k: []
         sk.fill_carton_episode(try_harder=False)
-        self.assertEqual(sk.fill_result, {"placed": [], "fails": 1})
+        self.assertEqual({k: sk.fill_result[k] for k in ("placed", "fails")}, {"placed": [], "fails": 1})
         scene = Scene()
         sk, io = make(scene)
         sk._plan_slot_candidates = lambda *a, **k: []
@@ -290,7 +290,7 @@ class TestV468(unittest.TestCase):
         import NERO_V313_Real_Robot as RR
         v = open(os.path.join(HERE, "VERSION")).read().strip()
         self.assertEqual((C.VERSION, RR.VERSION), (v, v))
-        self.assertIn(v, ("V4.6.8", "V4.6.9"))
+        self.assertIn(v, ("V4.6.8", "V4.6.9", "V4.6.10"))
         self.assertEqual(RT.MARKER_V468, "V4.6.8 FILL CARTON + VERIFY BY RISE + TRY HARDER")
 
 

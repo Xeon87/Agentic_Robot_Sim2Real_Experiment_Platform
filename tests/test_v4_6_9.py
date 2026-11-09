@@ -334,7 +334,8 @@ class TestV469(unittest.TestCase):
         import NERO_V365_Real_Cup_Task as RT
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
-        self.assertEqual((v, C.VERSION, RR.VERSION), ("V4.6.9", "V4.6.9", "V4.6.9"))
+        self.assertEqual((C.VERSION, RR.VERSION), (v, v))
+        self.assertIn(v, ("V4.6.9", "V4.6.10"))
         self.assertEqual(RT.MARKER_V469, "V4.6.9 VERIFY BY EGG COUNT + LONG-AXIS WARNING + DEPTH COVERAGE")
         self.assertEqual(DR.MARKER_V469_REPLAY, "V4.6.9 REAL REPLAY")
 

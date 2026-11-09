@@ -90,7 +90,7 @@ class TestV463(unittest.TestCase):
         import NERO_V312_Console as C
         import NERO_V313_Real_Robot as RR
         v = open(os.path.join(HERE, "VERSION")).read().strip()
-        self.assertIn(v, ("V4.6.3", "V4.6.4", "V4.6.5", "V4.6.6", "V4.6.8", "V4.6.9"))
+        self.assertIn(v, ("V4.6.3", "V4.6.4", "V4.6.5", "V4.6.6", "V4.6.8", "V4.6.9", "V4.6.10"))
         self.assertEqual((C.VERSION, RR.VERSION), (v, v))
         self.assertEqual(C.MARKER_V463, "V4.6.3 NATIVE CRASH GUARD")
 

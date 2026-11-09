@@ -151,6 +151,7 @@ class TaskRecorder:
                    "reason": (res or {}).get("reason") or (res or {}).get("error"), "dt_s": round(dt, 2),
                    "time": time.strftime("%H:%M:%S"), "state_before": st0, "state_after": st1,
                    "details": step_details(name, res), "warnings": (res or {}).get("warnings") or [],
+                   "unconfirmed": bool((res or {}).get("unconfirmed")),
                    "physical_verification": (res or {}).get("physical_verification"), "image_after": img}
             self.steps.append(rec)
             try:
@@ -314,7 +315,10 @@ def task_summary(task, mode, steps, ok, elapsed_s, setup=None, cups=None, final_
     """end-of-task block (egg-task style).  steps: [{"n","tool","args","ok","reason","dt_s","details","warnings"}]"""
     failed = [s for s in steps if not s.get("ok") and s.get("reason") != "ALREADY_STACKED"]
     warns = sum(len(s.get("warnings") or []) for s in steps)
-    if ok and not failed and not warns:
+    unconf = [s for s in steps if s.get("unconfirmed")]
+    if ok and unconf:                                   # V4.6.10: placed but the cameras could not confirm it
+        color, status = "YELLOW", f"UNCONFIRMED ({len(unconf)} 个大概率已放入，相机未确认)"
+    elif ok and not failed and not warns:
         color, status = "GREEN", "SUCCESS"
     elif ok:
         color, status = "YELLOW", "SUCCESS WITH WARNINGS"
