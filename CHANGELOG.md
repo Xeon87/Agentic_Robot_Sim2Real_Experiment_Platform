@@ -1,3 +1,18 @@
+## V4.6.11 (2026-11-09) — Smol VLA 示教采集：不卡顿 + 自动进出示教模式 + 空格键修复 + 放弃本次 + 最近 Episode
+- `NERO_V4_Dataset_Recorder.py`（`V4.6.11 DISK SPOOL + BACKGROUND SAVE + DISCARD`）：
+  - `ImageSpool`：图像经写线程进入本地磁盘的两个 raw 文件（`NERO_REC_SPOOL_DIR`，默认 `~/.cache/nero_record_spool`），队列上限 120 帧；分辨率和格式不变。
+  - `stop_capture` / `save_captured` / `discard_captured`；`stop_and_save` 保持兼容。
+  - `save_episode(images=…)` 直接用 memmap 分块写入 npz；返回的 meta 带 `file`；新增 `next_episode_index()`。保存日志写出文件路径。
+- `NERO_V4_Observation_Bridge.py`：SO-101 状态最多每 0.2 s 读一次（`GRIPPER_READ_MIN_S`）；新增 `peek_observation()`（不读硬件、不复制图像）。
+- `NERO_V462_Teach_Gravity.py`：`TeachBar.enter_now(done)` / `exit_now(done)`（不弹框，带完成回调；退出时 `return_home=False`）；`_exit_prep` 从 `on_exit` 中抽出。
+- `NERO_V4_Console_Tab.py`（`V4.6.11 AUTO TEACH RECORD + SPACE BINDTAG + RECENT EPISODES + LIGHT REFRESH`）：
+  - 录制状态机 idle / entering / recording / saving；开始时（实机后端）先进入示教模式，停止时退出示教模式并在后台保存；新增「✗ 放弃本次（不保存）」。
+  - 空格键：`NeroVLASpace` bindtag 放在本页所有非输入框控件（含日志框）的最前面，处理后返回 "break"，Tk 的 TButton `<space>` 不再按下按钮；开始录制时焦点移到本页；夹爪命令失败写日志。
+  - 「下一个：Episode #N」+ 最近 5 个 Episode + 保存位置。
+  - `_refresh_status`：录制中只用 `peek_observation`，其余时间每秒读一次硬件；episode 数量缓存。
+- 测试：新 `tests/test_v4_6_11.py`（6 项）、`tests/test_v4_6_11_gui.py`（真实 Tk：按钮有焦点时按空格；去掉修复后此测试会失败，复现了用户遇到的问题）；版本白名单补 V4.6.11。
+- **没有在真实硬件上运行过。**
+
 ## V4.6.10 (2026-11-09) — 按松开点验证鸡蛋；Try harder 验证；未确认也继续；主相机默认 848×480 + Default
 - `NERO_V365_Real_Cup_Task.py`（`V4.6.10 VERIFY BY RELEASE POSITION + TRY HARDER VERIFY + UNCONFIRMED CONTINUE`）：
   - `place_egg_into_slot` 记录 `last_place`（松开点 = 实测关节算出的鸡蛋下端 xy；取蛋位置）。`_release_tip_error` 返回 `tip_xy_m`。

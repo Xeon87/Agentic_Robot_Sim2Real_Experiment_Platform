@@ -241,6 +241,43 @@ class TeachBar:
         if not self._ask("退出示教模式", "NERO 将退出示教模式并切回正常控制（直接保持并锁在当前姿态，不强制回零位）。\n"
                                        "请扶稳机械臂、手在急停上。继续？"):
             return
+        model, home_fn = self._exit_prep()
+        self._run("退出示教模式", lambda: self.pipe.set_teach_mode(False, home_model=model, home_fn=home_fn,
+                                                                 return_home=False))
+
+    # ------------------------------------------------------------ V4.6.11: used by 「开始 / 停止示教录制」
+    def enter_now(self, done=None):
+        """enter teach mode without the dialog (the caller asked already); done(result_dict) in the worker thread"""
+        why = self._blocked()
+        if why:
+            self.log(f"[WARN] [V4.6.11 teach] 现在不能进入示教模式：{why}")
+            if done:
+                done({"ok": False, "error": why})
+            return False
+        self.log(f"[INFO] [V4.6.11 teach] 录制前自动进入示教模式 · 重力补偿：{describe(load())}")
+
+        def job():
+            r = self.pipe.set_teach_mode(True)
+            if done:
+                done(r if isinstance(r, dict) else {"ok": bool(r)})
+        if not self._run("进入示教模式", job):
+            if done:
+                done({"ok": False, "error": "上一个示教切换还没结束"})
+            return False
+        return True
+
+    def exit_now(self, done=None):
+        """exit teach mode without the dialog, holding the pose (as 「退出示教模式」)"""
+        model, home_fn = self._exit_prep()
+        self.log("[INFO] [V4.6.11 teach] 录制结束，自动退出示教模式（保持当前姿态）")
+
+        def job():
+            r = self.pipe.set_teach_mode(False, home_model=model, home_fn=home_fn, return_home=False)
+            if done:
+                done(r if isinstance(r, dict) else {"ok": bool(r)})
+        return self._run("退出示教模式", job)
+
+    def _exit_prep(self):
         st = None
         try:
             st = self.safe_tab_fn()
@@ -261,8 +298,7 @@ class TeachBar:
                 pass
         model = getattr(self.jpanel, "model", None)
         home_fn = getattr(st, "exit_home", None) if st is not None else None
-        self._run("退出示教模式", lambda: self.pipe.set_teach_mode(False, home_model=model, home_fn=home_fn,
-                                                                 return_home=False))
+        return model, home_fn
 
     def on_advanced(self):
         if self.dialog is not None:

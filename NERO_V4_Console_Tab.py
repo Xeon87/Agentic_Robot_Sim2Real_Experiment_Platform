@@ -46,6 +46,7 @@ import numpy as np
 
 VERSION = "V4.6"
 MARKER = "V4.2 VLA LEROBOT CONSOLE TAB"
+MARKER_V4611 = "V4.6.11 AUTO TEACH RECORD + SPACE BINDTAG + RECENT EPISODES + LIGHT REFRESH"
 HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
@@ -169,6 +170,13 @@ class VLALeRobotTabUI:
         self.ipc_server: Optional[NEROIPCServer] = None
 
         self._build(parent)
+        # V4.6.11: the space bar must reach the gripper from every widget of this tab (see _on_space); the log box
+        # is a Text widget but not for typing -> it gets the tag too (V4.6.10: a click into the log swallowed space)
+        self._install_space_tag(parent)
+        try:
+            self.txt.bindtags(("NeroVLASpace",) + tuple(t for t in self.txt.bindtags() if t != "NeroVLASpace"))
+        except Exception:
+            pass
         self._schedule()
         threading.Thread(target=self._startup_drive_check, daemon=True).start()
 
@@ -311,7 +319,9 @@ class VLALeRobotTabUI:
         rb = ttk.Frame(pg["teach"])
         rb.pack(fill="x", padx=2, pady=2)
         self.btn_rec = ttk.Button(rb, text="● 开始示教录制", command=self.on_toggle_record)
-        self.btn_rec.pack(side="left", padx=(0, 6))
+        self.btn_rec.pack(side="left", padx=(0, 2))
+        self.btn_discard = ttk.Button(rb, text="✗ 放弃本次（不保存）", command=self.on_discard_record, state="disabled")
+        self.btn_discard.pack(side="left", padx=(0, 6))
         ttk.Button(rb, text="夹爪示教: 张开", command=lambda: self.on_teach_gripper(True)).pack(side="left", padx=2)
         ttk.Button(rb, text="夹爪示教: 夹紧", command=lambda: self.on_teach_gripper(False)).pack(side="left", padx=2)
         self.v_grip_teach = tk.StringVar(value="空格键 = 张开 / 夹紧 切换（录制时双手扶臂也能操作）")
@@ -330,6 +340,15 @@ class VLALeRobotTabUI:
         ttk.Button(rb3, text="删除 Episode", command=self.on_delete_episode).pack(side="left", padx=2)
         self.v_ep_info = tk.StringVar(value="")
         ttk.Label(rb3, textvariable=self.v_ep_info, foreground="#37474f").pack(side="left", padx=8)
+        # V4.6.11: what was recorded so far + the next episode number, always in view on this page
+        rb5 = ttk.Frame(pg["teach"])
+        rb5.pack(fill="x", padx=2, pady=(2, 0))
+        self.v_next_ep = tk.StringVar(value="下一个：Episode #0")
+        ttk.Label(rb5, textvariable=self.v_next_ep, font=("TkDefaultFont", 11, "bold"),
+                  foreground="#2e7d32").pack(side="left", padx=(2, 10))
+        self.v_recent_eps = tk.StringVar(value="还没有录制的 Episode")
+        JC.fixed_label(tk, rb5, 2, width=1000, textvariable=self.v_recent_eps, font=("TkDefaultFont", 9),
+                       wraplength=1000, pack={"side": "left", "fill": "x", "expand": True})
         self.v_rec_status = tk.StringVar(value="录制 / 回放真机：先在上方选「实机 NERO」后端；「仿真替身」只录 / 回放虚拟机械臂")
         JC.fixed_label(tk, pg["teach"], 1, textvariable=self.v_rec_status, font=("TkDefaultFont", 9),
                        wraplength=1150, pack={"fill": "x", "padx": 4})
@@ -393,11 +412,15 @@ class VLALeRobotTabUI:
 
         # V4.6.9: space bar toggles the teach gripper (both hands are on the arm while recording)
         self._grip_teach_open = True
+        self._rec_phase = "idle"                 # V4.6.11: idle / entering / recording / saving
+        self._rec_auto_teach = False
+        self._n_eps_cache = None
         try:
             parent.winfo_toplevel().bind_all("<KeyPress-space>", self._on_space, add="+")
         except Exception:
             pass
         self._update_ep_info()
+        self._refresh_recent_eps()
 
         # V4.6.2: monitors (side by side) in one row, the log below them over the full width with 「Copy Log」
         bottom = ttk.Frame(parent)
@@ -995,25 +1018,61 @@ class VLALeRobotTabUI:
             return
 
         def _drive(_v):
-            r = g.open_gap(REPLAY_OPEN_GAP_MM) if open_ else g.clamp(REPLAY_CLAMP_PCT)
-            self._log(f"[OK] [V4.6.9 TEACH GRIPPER] SO-101 {word}：{r}")
+            try:                                      # V4.6.11: a failure is reported (V4.6.9: silently swallowed)
+                r = g.open_gap(REPLAY_OPEN_GAP_MM) if open_ else g.clamp(REPLAY_CLAMP_PCT)
+            except Exception as exc:
+                self._log(f"[FAIL] [V4.6.11 TEACH GRIPPER] SO-101 {word} 没执行：{exc}")
+                return
+            bad = isinstance(r, dict) and r.get("ok") is False and not r.get("held")
+            self._log(f"[{'WARN' if bad else 'OK'}] [V4.6.9 TEACH GRIPPER] SO-101 {word}：{r}")
         threading.Thread(target=lambda: self.recorder.set_teach_gripper_norm(v, drive_gripper_fn=_drive),
                          daemon=True, name="v469_teach_gripper").start()
 
+    TEXT_CLASSES = ("Entry", "TEntry", "Text", "TCombobox", "Spinbox", "TSpinbox")
+
     def _on_space(self, e=None):
-        """V4.6.9: space bar = toggle the teach gripper while this tab is shown and no text field has the focus"""
+        """V4.6.9 / V4.6.11: space bar = toggle the teach gripper while this tab is shown.
+        V4.6.11 BUG FIX: a ttk button that was CLICKED keeps the keyboard focus (ttk::clickToFocus), and Tk's own
+        <space> binding of TButton then pressed that button: after 「● 开始示教录制」 the space bar stopped the recording,
+        after 「夹爪示教: 夹紧」 it pressed 「夹紧」 and this handler toggled to 「张开」 at the same time (two gripper commands
+        racing -> nothing visible).  Now every widget of this tab carries the bindtag 'NeroVLASpace' FIRST, whose
+        handler returns "break" so the class binding never runs; this bind_all handler covers widgets outside the
+        tab.  Text fields keep their space."""
         try:
             if not self.visible_fn():
                 return None
             w = getattr(e, "widget", None) or self.parent.winfo_toplevel().focus_get()
             if isinstance(w, str):
                 w = self.parent.nametowidget(w)
-            if w is not None and w.winfo_class() in ("Entry", "TEntry", "Text", "TCombobox", "Spinbox", "TSpinbox"):
+            if (w is not None and w.winfo_class() in self.TEXT_CLASSES
+                    and str(w) != str(getattr(self, "txt", ""))):      # the log box is not for typing
                 return None
         except Exception:
             return None
         self.on_teach_gripper(not self._grip_teach_open)
         return "break"
+
+    def _install_space_tag(self, root_widget=None) -> int:
+        """V4.6.11: 'NeroVLASpace' in front of the bindtags of every non-text widget of this tab -> n widgets"""
+        root_widget = root_widget or self.parent
+        try:
+            root_widget.bind_class("NeroVLASpace", "<KeyPress-space>", self._on_space)
+        except Exception:
+            return 0
+        n, todo = 0, [root_widget]
+        while todo:
+            w = todo.pop()
+            try:
+                todo.extend(w.winfo_children())
+                if w.winfo_class() in self.TEXT_CLASSES:
+                    continue
+                tags = list(w.bindtags())
+                if "NeroVLASpace" not in tags:
+                    w.bindtags(("NeroVLASpace",) + tuple(tags))
+                    n += 1
+            except Exception:
+                pass
+        return n
 
     def _update_ep_info(self) -> None:
         try:
@@ -1029,23 +1088,135 @@ class VLALeRobotTabUI:
                            f"{'有效' if ep.get('valid') else '无效'} · {ep.get('saved_at', '')} · "
                            f"{(ep.get('tasks') or [''])[0][:40]}")
 
+    def _post(self, fn) -> None:
+        """run fn in the Tk thread (from any thread)"""
+        self.q.put(("call", fn))
+
+    def _real_teach_ok(self) -> bool:
+        return (self.v_backend.get() == "real" and self.teach_bar is not None
+                and hasattr(self.pipe, "set_teach_mode"))
+
+    def _set_rec_buttons(self) -> None:
+        ph = self._rec_phase
+        txt = {"idle": "● 开始示教录制", "entering": "进入示教模式中 …", "recording": "■ 停止并保存 Episode",
+               "saving": "保存中 …"}[ph]
+        self.btn_rec.configure(text=txt, state="normal" if ph in ("idle", "recording") else "disabled")
+        self.btn_discard.configure(state="normal" if ph == "recording" else "disabled")
+
     def on_toggle_record(self) -> None:
-        if not self.recorder.is_recording and self.v_backend.get() != "real":
+        """V4.6.11: 「开始示教录制」 on the real back end enters teach mode FIRST (recording starts when the controller
+        confirms), 「停止并保存」 stops the capture at once, exits teach mode (pose held) and saves in a worker thread
+        (V4.6.10: compressing GBs of images froze the console)."""
+        if self._rec_phase == "recording":
+            self._finish_recording(discard=False)
+            return
+        if self._rec_phase != "idle":
+            self._log(f"[INFO] [V4.6.11 RECORDER] 请稍等：{'正在进入示教模式' if self._rec_phase == 'entering' else '正在保存上一个 Episode'}")
+            return
+        if self.v_backend.get() != "real":
             self._log("[WARN] [V4.6.9 RECORDER] 后端是「" + {"mock": "仿真替身", "mujoco": "MuJoCo"}.get(self.v_backend.get(), "?")
-                      + "」：录到的是虚拟机械臂，不是真机。要录真机示教：先在最上方选「实机 NERO」后端，再进入示教模式")
+                      + "」：录到的是虚拟机械臂，不是真机。要录真机示教：先在最上方选「实机 NERO」后端")
         ds_name = self.v_ds_name.get().strip() or "nero_v4_demo"
         if self.dataset.dataset_name != ds_name:
             self.dataset = NEROLeRobotDataset(dataset_name=ds_name)
             self.recorder.dataset = self.dataset
-        if not self.recorder.is_recording:
-            self.recorder.start_recording(self.v_task.get().strip(), split="train")
-            self.btn_rec.configure(text="■ 停止并保存 Episode")
+            self._refresh_recent_eps()
+        if self._real_teach_ok() and not getattr(self.pipe, "teach_mode", False):
+            if not self.ask("开始示教录制", "NERO 将先进入示教模式（可以用手带动），进入成功后自动开始录制。\n"
+                                         "请先用手扶住机械臂（尤其是前臂和末端），确认周围无人。继续？"):
+                return
+            self._rec_phase = "entering"
+            self._set_rec_buttons()
+            self.teach_bar.enter_now(done=lambda r: self._post(lambda: self._teach_entered(r)))
+            return
+        self._start_recording(auto_teach=False)
+
+    def _teach_entered(self, r) -> None:
+        if not (r or {}).get("ok"):
+            self._rec_phase = "idle"
+            self._set_rec_buttons()
+            self._log(f"[FAIL] [V4.6.11 RECORDER] 没进入示教模式（{(r or {}).get('error') or r}）→ 没有开始录制")
+            return
+        self._start_recording(auto_teach=True)
+
+    def _start_recording(self, auto_teach) -> None:
+        r = self.recorder.start_recording(self.v_task.get().strip(), split="train")
+        if not r.get("ok"):
+            self._rec_phase = "idle"
+            self._set_rec_buttons()
+            self._log(f"[FAIL] [V4.6.11 RECORDER] 没开始录制：{r.get('error')}")
+            return
+        self._rec_phase, self._rec_auto_teach = "recording", bool(auto_teach)
+        self._set_rec_buttons()
+        try:                                       # V4.6.11: keyboard to this tab, so the space bar reaches it
+            self.parent.focus_set()
+        except Exception:
+            pass
+        self._log(f"[INFO] [V4.6.11 RECORDER] 正在录制 Episode #{self.dataset.next_episode_index()}"
+                  + ("（已进入示教模式）" if auto_teach else "") + " · 空格键 = 夹爪张开 / 夹紧")
+
+    def on_discard_record(self) -> None:
+        """V4.6.11: abandon the running recording - nothing is saved (user decision: discard)"""
+        if self._rec_phase != "recording":
+            return
+        n = len(getattr(self.recorder, "_frames", []) or [])
+        if not self.ask("放弃本次录制", f"放弃正在录制的 Episode（已录 {n} 帧，约 {n / max(1.0, self.recorder.fps):.0f} s）？\n"
+                                     "放弃后不保存，临时文件直接删除。"):
+            return
+        self._finish_recording(discard=True)
+
+    def _finish_recording(self, discard) -> None:
+        cap = self.recorder.stop_capture()
+        self._rec_phase = "saving"
+        self._set_rec_buttons()
+        if self._real_teach_ok() and getattr(self.pipe, "teach_mode", False):
+            self.teach_bar.exit_now()                 # pose held, no move home
+        self.v_rec_status.set("放弃中 …" if discard else
+                              f"保存中 …（{len(cap['frames'])} 帧，在后台写入，界面可以继续用）")
+
+        def job():
+            try:
+                res = self.recorder.discard_captured(cap) if discard else self.recorder.save_captured(cap, True)
+            except Exception as exc:
+                res = {"ok": False, "error": str(exc)}
+                self._log(f"[FAIL] [V4.6.11 RECORDER] 保存失败：{exc}")
+            self._post(lambda: self._after_save(res))
+        threading.Thread(target=job, daemon=True, name="v4611_save_episode").start()
+
+    def _after_save(self, res) -> None:
+        self._rec_phase = "idle"
+        self._set_rec_buttons()
+        self._n_eps_cache = None
+        if res.get("discarded"):
+            self.v_rec_status.set(f"已放弃上一次录制（{res.get('frames')} 帧，没有保存）")
+        elif res.get("ok"):
+            ep = res["episode"]
+            self.v_ep_idx.set(str(ep["episode_index"]))
+            self.v_rec_status.set(f"已保存 Episode #{ep['episode_index']} → {ep.get('file')}")
         else:
-            res = self.recorder.stop_and_save(episode_success=True)
-            self.btn_rec.configure(text="● 开始示教录制")
-            if res.get("ok"):
-                self.v_ep_idx.set(str(res["episode"]["episode_index"]))
-                self._update_ep_info()
+            self.v_rec_status.set(f"保存失败：{res.get('error')}")
+        self._update_ep_info()
+        self._refresh_recent_eps()
+
+    def _refresh_recent_eps(self) -> None:
+        """V4.6.11: 「下一个：Episode #N」 + the last 5 episodes (duration, frames, valid, time) + the folder"""
+        try:
+            eps = self.dataset.list_episodes()
+        except Exception:
+            eps = []
+        self._n_eps_cache = len(eps)
+        nxt = (max(int(e["episode_index"]) for e in eps) + 1) if eps else 0
+        self.v_next_ep.set(f"下一个：Episode #{nxt}")
+        if not eps:
+            self.v_recent_eps.set(f"还没有录制的 Episode · 保存位置：{self.dataset.data_dir}")
+            return
+        parts = []
+        for e in sorted(eps, key=lambda x: -int(x["episode_index"]))[:5]:
+            fps = float(e.get("fps") or 20.0)
+            n = int(e.get("length") or 0)
+            parts.append(f"#{e['episode_index']} {n / fps:.1f} s · {n} 帧 · {'有效' if e.get('valid') else '无效'} · "
+                         f"{str(e.get('saved_at', ''))[11:16]}")
+        self.v_recent_eps.set("最近：" + "  |  ".join(parts) + f"\n共 {len(eps)} 个 · 保存位置：{self.dataset.data_dir}")
 
     def on_replay_episode(self) -> None:
         """V4.6.9: real back end -> the real NERO replays the recording (one timed joint path per segment, gripper
@@ -1182,6 +1353,11 @@ class VLALeRobotTabUI:
                     self.toggle_drive_detail(True)
             elif kind == "drive":
                 self.v_drive.set(str(val))
+            elif kind == "call":                      # V4.6.11: a function posted by a worker thread
+                try:
+                    val()
+                except Exception as exc:
+                    self.txt.insert("end", f"[WARN] [V4.6.11 UI] {exc}\n")
             elif kind == "repoint_dataset":
                 self._repoint_dataset()
             elif kind == "apply_env":
@@ -1209,11 +1385,18 @@ class VLALeRobotTabUI:
         self._schedule()
 
     def _refresh_status(self) -> None:
-        obs = self.obs_bridge.get_synchronized_observation()
+        # V4.6.11: the Tk thread does not read the hardware while recording (the record thread does, 20 Hz) and
+        # otherwise only once a second; the episode count is cached (V4.6.10: episodes.jsonl read every 200 ms)
+        if self.recorder.is_recording or self._tick_n % 5:
+            obs = self.obs_bridge.peek_observation()
+        else:
+            obs = self.obs_bridge.get_synchronized_observation()
         q_deg = [round(math.degrees(float(v)), 1) for v in obs["robot_state"]]
         arb = self.arbiter.status()
         ex = self.executor.status()
-        n_eps = len(self.dataset.list_episodes())
+        if self._n_eps_cache is None or self._tick_n % 25 == 0:
+            self._n_eps_cache = len(self.dataset.list_episodes())
+        n_eps = self._n_eps_cache
         avg_inf = round(float(np.mean(self.vla_policy.inference_latencies_ms)), 2) if self.vla_policy.inference_latencies_ms else 0.0
         bk = ex.get("backend_kind") or "mock"
         bk_txt = {"real": "实机 NERO", "mock": "仿真替身（机械臂不动）", "mujoco_twin": "MuJoCo 替身",

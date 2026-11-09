@@ -169,7 +169,7 @@ class TestV466(unittest.TestCase):
         import NERO_V313_Real_Robot as RR
         import NERO_V365_Real_Cup_Task as RT
         v = open(os.path.join(HERE, "VERSION")).read().strip()
-        self.assertIn(v, ("V4.6.6", "V4.6.8", "V4.6.9", "V4.6.10"))
+        self.assertIn(v, ("V4.6.6", "V4.6.8", "V4.6.9", "V4.6.10", "V4.6.11"))
         self.assertEqual((C.VERSION, RR.VERSION), (v, v))
         self.assertEqual(C.MARKER_V466, "V4.6.6 NATIVE CRASH TRACE + TK INPUT METHOD OFF")
         self.assertEqual(RT.MARKER_V466, "V4.6.6 FIXED CARTON TEMPLATE LOG")

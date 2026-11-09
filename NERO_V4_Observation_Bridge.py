@@ -41,6 +41,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 DEFAULT_IMAGE_SHAPE: Tuple[int, int, int] = (480, 640, 3)
+GRIPPER_READ_MIN_S = 0.2              # V4.6.11: SO-101 status read at most 5 times a second
 GRIPPER_MAX_GAP_MM: float = 45.0
 MAX_SYNC_SKEW_MS: float = 50.0
 SHM_HEADER_BYTES: int = 128
@@ -91,6 +92,7 @@ class ObservationBridge:
         self.shm_prefix = shm_prefix
         self.log = log
         self.lock = threading.RLock()
+        self._grip_read_t = 0.0                  # V4.6.11
 
         # Latest timestamped sensor slots (monotonic_ns)
         self._cam_main_rgb: Optional[np.ndarray] = None
@@ -259,7 +261,13 @@ class ObservationBridge:
                 if deg and len(deg) == 7:
                     self.update_robot_state([math.radians(v) for v in deg], ts_ns=now_ns)
             if gripper is not None and getattr(gripper, "connected", False):
-                st = getattr(gripper, "last", None) or gripper.status()
+                # V4.6.11: one serial read per GRIPPER_READ_MIN_S at most (V4.6.10: 20 + 5 reads/s on the bus that
+                # also carries the teach gripper commands); in between the last reading
+                now_m = time.monotonic()
+                st = getattr(gripper, "last", None)
+                if st is None or now_m - self._grip_read_t >= GRIPPER_READ_MIN_S:
+                    self._grip_read_t = now_m
+                    st = gripper.status()
                 if st and st.get("gap_mm") is not None:
                     self.update_gripper_state(gap_mm=float(st["gap_mm"]), ts_ns=now_ns)
             if cam_tab is not None:
@@ -346,6 +354,17 @@ class ObservationBridge:
         _pull()
 
     # ------------------------------------------------------------------ Synchronized Observation Retrieval
+    def peek_observation(self) -> Dict[str, Any]:
+        """V4.6.11: the latest values WITHOUT reading any hardware and without image copies (for the Tk status line)"""
+        with self.lock:
+            ts_list = [t for t in (self._cam_main_ts_ns, self._cam_wrist_ts_ns, self._q_ts_ns, self._gripper_ts_ns) if t > 0]
+            skew_ms = (max(ts_list) - min(ts_list)) * 1e-6 if len(ts_list) >= 2 else 0.0
+            return {"seq": self._obs_seq, "env_mode": self.env_mode, "robot_state": self._q_rad.copy(),
+                    "gripper_state": float(self._gripper_norm), "gripper_gap_mm": round(float(self._gripper_gap_mm), 2),
+                    "task_instruction": self._task_instruction, "sync_skew_ms": round(float(skew_ms), 2),
+                    "sync_ok": bool(self._cam_main_rgb is not None and self._cam_wrist_rgb is not None
+                                    and self._q_ts_ns > 0 and skew_ms <= self.max_sync_skew_ms)}
+
     def get_synchronized_observation(self) -> Dict[str, Any]:
         """Pull latest sensor data, verify inter-sensor timestamp skew, and return a unified LeRobot-compatible observation."""
         for cb in list(self._pull_callbacks):

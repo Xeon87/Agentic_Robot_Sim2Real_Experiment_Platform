@@ -220,8 +220,11 @@ class NEROLeRobotDataset:
         calib_version: str = VERSION,
         episode_success: bool = True,
         thumbnail_stride: int = 1,
+        images: Optional[Tuple[Any, Any]] = None,
     ) -> Dict[str, Any]:
-        """Validate and save one recorded episode to local LeRobotDataset storage."""
+        """Validate and save one recorded episode to local LeRobotDataset storage.
+        V4.6.11: `images` = (cam_main, cam_wrist) arrays of shape (n, H, W, 3), e.g. read-only memmaps of the disk
+        spool - written to the npz in chunks, never stacked in RAM (full resolution, lossless)."""
         split = str(split).strip().lower()
         if split not in VALID_SPLITS:
             raise ValueError(f"split must be one of {VALID_SPLITS}, got {split!r}")
@@ -235,10 +238,13 @@ class NEROLeRobotDataset:
         skews = np.asarray([float(f.get("sync_skew_ms", 0.0)) for f in frames], dtype=np.float32)
 
         # Store compact RGB frames (subsampled or full, resized to (120, 160, 3) if thumbnail_stride > 1, or full)
-        c1_list = [np.asarray(f["camera1"], dtype=np.uint8) for f in frames[::max(1, int(thumbnail_stride))]]
-        c2_list = [np.asarray(f["camera2"], dtype=np.uint8) for f in frames[::max(1, int(thumbnail_stride))]]
-        cam_main_arr = np.stack(c1_list, axis=0) if c1_list else np.zeros((0, *self.image_shape), dtype=np.uint8)
-        cam_wrist_arr = np.stack(c2_list, axis=0) if c2_list else np.zeros((0, *self.image_shape), dtype=np.uint8)
+        if images is not None:
+            cam_main_arr, cam_wrist_arr = images
+        else:
+            c1_list = [np.asarray(f["camera1"], dtype=np.uint8) for f in frames[::max(1, int(thumbnail_stride))]]
+            c2_list = [np.asarray(f["camera2"], dtype=np.uint8) for f in frames[::max(1, int(thumbnail_stride))]]
+            cam_main_arr = np.stack(c1_list, axis=0) if c1_list else np.zeros((0, *self.image_shape), dtype=np.uint8)
+            cam_wrist_arr = np.stack(c2_list, axis=0) if c2_list else np.zeros((0, *self.image_shape), dtype=np.uint8)
 
         existing = self.list_episodes()
         ep_idx = (max(e["episode_index"] for e in existing) + 1) if existing else 0
@@ -273,11 +279,17 @@ class NEROLeRobotDataset:
             meta_json=np.array(json.dumps(ep_meta, ensure_ascii=False)),
         )
 
+        ep_meta["file"] = npz_path                    # V4.6.11: where it is (on the removable drive when mounted)
         with open(self._episodes_path(), "a", encoding="utf-8") as f:
             f.write(json.dumps(ep_meta, ensure_ascii=False) + "\n")
 
         self._rebuild_info_and_stats()
         return ep_meta
+
+    def next_episode_index(self) -> int:
+        """V4.6.11: the index the next saved episode gets"""
+        eps = self.list_episodes()
+        return (max(int(e["episode_index"]) for e in eps) + 1) if eps else 0
 
     def load_episode(self, ep_idx: int) -> Dict[str, Any]:
         """Load a saved episode's states, actions, camera arrays, and metadata."""
@@ -376,6 +388,73 @@ class NEROLeRobotDataset:
         return self._rebuild_info_and_stats()
 
 
+MARKER_V4611_REC = "V4.6.11 DISK SPOOL + BACKGROUND SAVE + DISCARD"
+SPOOL_ROOT = os.path.expanduser(os.environ.get("NERO_REC_SPOOL_DIR", "~/.cache/nero_record_spool"))
+SPOOL_QUEUE_FRAMES = 120                # ~ 6 s at 20 Hz of full-size images waiting for the disk
+
+
+class ImageSpool:
+    """V4.6.11: the camera images of a recording go to two raw files on the local disk (full 640x480, lossless) by a
+    writer thread, instead of a Python list in RAM (V4.6.10: ~37 MB/s, 2.2 GB per minute -> the console got slower and
+    slower).  The record loop only puts the arrays into a bounded queue."""
+
+    def __init__(self, shape, root=None):
+        import queue as _q
+        root = root or SPOOL_ROOT
+        self.shape = (int(shape[0]), int(shape[1]), 3)
+        self.dir = os.path.join(root, time.strftime("%Y%m%d_%H%M%S") + f"_{os.getpid()}_{id(self) % 10000}")
+        os.makedirs(self.dir, exist_ok=True)
+        self.paths = (os.path.join(self.dir, "cam_main.raw"), os.path.join(self.dir, "cam_wrist.raw"))
+        self._f = [open(p, "wb") for p in self.paths]
+        self._q = _q.Queue(maxsize=SPOOL_QUEUE_FRAMES)
+        self.n_written = 0
+        self.error = None
+        self._t = threading.Thread(target=self._writer, daemon=True, name="nero_v4611_spool")
+        self._t.start()
+
+    def _fit(self, img):
+        a = np.asarray(img, dtype=np.uint8)
+        if a.shape != self.shape:
+            from NERO_V4_Observation_Bridge import resize_rgb_if_needed
+            a = resize_rgb_if_needed(a, self.shape[:2])
+        return np.ascontiguousarray(a)
+
+    def put(self, c1, c2):
+        self._q.put((self._fit(c1), self._fit(c2)))
+
+    def _writer(self):
+        while True:
+            item = self._q.get()
+            if item is None:
+                break
+            try:
+                self._f[0].write(item[0].tobytes())
+                self._f[1].write(item[1].tobytes())
+                self.n_written += 1
+            except Exception as exc:          # disk full etc.: keep draining, report at the end
+                self.error = str(exc)
+
+    def close(self):
+        if self._t.is_alive():
+            self._q.put(None)
+            self._t.join()
+        for f in self._f:
+            try:
+                f.close()
+            except Exception:
+                pass
+
+    def arrays(self, n):
+        n = min(int(n), self.n_written)
+        if n <= 0:
+            return (np.zeros((0, *self.shape), np.uint8), np.zeros((0, *self.shape), np.uint8))
+        return tuple(np.memmap(p, dtype=np.uint8, mode="r", shape=(n, *self.shape)) for p in self.paths)
+
+    def delete(self):
+        self.close()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
 class DemonstrationRecorder:
     """Real-time demonstration recorder for NERO (supports zero-force drag + independent gripper control + replay)."""
 
@@ -402,6 +481,8 @@ class DemonstrationRecorder:
         self._current_split: str = "train"
         # Independent gripper target command during zero-force drag teaching
         self._teach_gripper_cmd_norm: Optional[float] = None
+        self.use_spool = True                       # V4.6.11: images to a disk spool, not RAM
+        self._spool: Optional[ImageSpool] = None
 
     @property
     def is_recording(self) -> bool:
@@ -428,6 +509,7 @@ class DemonstrationRecorder:
             if self._recording:
                 return {"ok": False, "error": "已经在录制中"}
             self._frames.clear()
+            self._spool = ImageSpool(self.dataset.image_shape) if self.use_spool else None    # V4.6.11
             self._current_task = str(task_instruction or "").strip() or "Demonstrate manipulation task"
             self._current_split = split if split in VALID_SPLITS else "train"
             self.obs_bridge.set_task_instruction(self._current_task)
@@ -451,9 +533,13 @@ class DemonstrationRecorder:
                     "sync_skew_ms": float(obs["sync_skew_ms"]),
                     "state": state8,
                     "action": np.concatenate([state8[:7], np.array([g_cmd], dtype=np.float32)]).astype(np.float32),
-                    "camera1": obs["camera1"],
-                    "camera2": obs["camera2"],
                 }
+                sp = self._spool
+                if sp is None:
+                    frame["camera1"], frame["camera2"] = obs["camera1"], obs["camera2"]
+            if sp is not None:
+                sp.put(obs["camera1"], obs["camera2"])         # may wait for the disk (bounded queue), lock released
+            with self.lock:
                 self._frames.append(frame)
             elapsed = time.perf_counter() - t0
             sleep_s = max(0.0, dt - elapsed)
@@ -483,16 +569,49 @@ class DemonstrationRecorder:
                 "camera2": c2,
             })
 
-    def stop_and_save(self, episode_success: bool = True, lead_action_by_one_step: bool = True) -> Dict[str, Any]:
-        """Stop recording, align action[t] = state[t+1] (for kinesthetic teach), run quality checks, and save."""
+    def stop_capture(self) -> Dict[str, Any]:
+        """V4.6.11: stop the record loop at once (fast, Tk thread OK) -> the captured episode for save_captured /
+        discard_captured (slow parts, a worker thread)"""
         self._stop_ev.set()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=2.0)
         with self.lock:
             self._recording = False
-            frames = list(self._frames)
-            task = self._current_task or "Demonstrate manipulation task"
-            split = self._current_split
+            cap = {"frames": list(self._frames), "spool": self._spool,
+                   "task": self._current_task or "Demonstrate manipulation task", "split": self._current_split}
+            self._frames = []
+            self._spool = None
+        return cap
+
+    def discard_captured(self, cap: Dict[str, Any]) -> Dict[str, Any]:
+        """V4.6.11: user decision - an abandoned recording is deleted, nothing is saved"""
+        sp = cap.get("spool")
+        n = len(cap.get("frames") or [])
+        where = sp.dir if sp is not None else None
+        if sp is not None:
+            sp.delete()
+        self.log(f"[INFO] [V4.6.11 RECORDER] 已放弃本次录制（{n} 帧，{n / max(1.0, self.fps):.1f} s）：没有保存"
+                 + (f"，临时文件已删除（{where}）" if where else ""))
+        return {"ok": True, "discarded": True, "frames": n}
+
+    def stop_and_save(self, episode_success: bool = True, lead_action_by_one_step: bool = True) -> Dict[str, Any]:
+        """Stop recording, align action[t] = state[t+1] (for kinesthetic teach), run quality checks, and save."""
+        return self.save_captured(self.stop_capture(), episode_success, lead_action_by_one_step)
+
+    def save_captured(self, cap: Dict[str, Any], episode_success: bool = True,
+                      lead_action_by_one_step: bool = True) -> Dict[str, Any]:
+        frames, task, split, sp = cap["frames"], cap["task"], cap["split"], cap.get("spool")
+        images = None
+        if sp is not None:
+            t0 = time.perf_counter()
+            sp.close()                                  # waits for the writer to finish the queue
+            if sp.error:
+                self.log(f"[WARN] [V4.6.11 RECORDER] 临时图像文件写入出错：{sp.error}")
+            if sp.n_written < len(frames):
+                frames = frames[:sp.n_written]
+            images = sp.arrays(len(frames))
+            self.log(f"[INFO] [V4.6.11 RECORDER] 正在保存 {len(frames)} 帧（640×480 原图，无损压缩）… "
+                     f"写完临时文件用了 {time.perf_counter() - t0:.1f} s")
 
         if len(frames) >= 2 and lead_action_by_one_step:
             # In zero-force drag teaching, the target action at frame t is the achieved joint position at frame t+1
@@ -501,15 +620,22 @@ class DemonstrationRecorder:
                 g_cmd = frames[i]["action"][7]
                 frames[i]["action"] = np.concatenate([next_q, np.array([g_cmd], dtype=np.float32)]).astype(np.float32)
 
-        meta = self.dataset.save_episode(
-            frames,
-            task_instruction=task,
-            split=split,
-            episode_success=episode_success,
-        )
+        try:
+            meta = self.dataset.save_episode(
+                frames,
+                task_instruction=task,
+                split=split,
+                episode_success=episode_success,
+                images=images,
+            )
+        finally:
+            if sp is not None:
+                images = None
+                sp.delete()
         self.log(
             f"[{'OK' if meta['valid'] else 'WARN'}] [V4.2 RECORDER] 已保存 Episode #{meta['episode_index']} "
-            f"({meta['length']} 帧, split={split}, valid={meta['valid']}, max_skew={meta['quality']['max_skew_ms']:.1f} ms)"
+            f"({meta['length']} 帧, {meta['length'] / max(1.0, self.fps):.1f} s, split={split}, valid={meta['valid']}, "
+            f"max_skew={meta['quality']['max_skew_ms']:.1f} ms) → {meta.get('file')}"
         )
         return {"ok": True, "episode": meta}
 

@@ -335,7 +335,7 @@ class TestV469(unittest.TestCase):
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
         self.assertEqual((C.VERSION, RR.VERSION), (v, v))
-        self.assertIn(v, ("V4.6.9", "V4.6.10"))
+        self.assertIn(v, ("V4.6.9", "V4.6.10", "V4.6.11"))
         self.assertEqual(RT.MARKER_V469, "V4.6.9 VERIFY BY EGG COUNT + LONG-AXIS WARNING + DEPTH COVERAGE")
         self.assertEqual(DR.MARKER_V469_REPLAY, "V4.6.9 REAL REPLAY")
 

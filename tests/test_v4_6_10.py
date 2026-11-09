@@ -229,7 +229,8 @@ class TestV4610(unittest.TestCase):
         import NERO_V313_Real_Robot as RR
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
-        self.assertEqual((v, C.VERSION, RR.VERSION), ("V4.6.10", "V4.6.10", "V4.6.10"))
+        self.assertEqual((C.VERSION, RR.VERSION), (v, v))
+        self.assertIn(v, ("V4.6.10", "V4.6.11"))
         self.assertEqual(RT.MARKER_V4610, "V4.6.10 VERIFY BY RELEASE POSITION + TRY HARDER VERIFY + UNCONFIRMED CONTINUE")
         self.assertEqual(C.MARKER_V4610, "V4.6.10 DEPTH DEFAULT 848x480 + DEFAULT")
 

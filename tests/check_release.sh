@@ -94,6 +94,7 @@ grep -qF 'V4.6.6 FIXED CARTON TEMPLATE' NERO_V349_Real_Wrist_Camera.py && grep -
 grep -qF 'V4.6.8 FILL CARTON + VERIFY BY RISE + TRY HARDER' NERO_V365_Real_Cup_Task.py && grep -qF 'V4.6.8 CAMERA TAB SCROLL' NERO_V312_Console.py && grep -qF 'def slot_rise' NERO_V349_Real_Wrist_Camera.py && grep -qF 'V4.6.8 RECOGNIZE BEFORE EVERY HOVER' NERO_V464_Vision_Check.py || { echo "[FAIL] V4.6.8 markers missing"; exit 1; }
 grep -qF 'V4.6.9 VERIFY BY EGG COUNT + LONG-AXIS WARNING + DEPTH COVERAGE' NERO_V365_Real_Cup_Task.py && grep -qF 'V4.6.9 REAL REPLAY' NERO_V4_Dataset_Recorder.py && grep -qF 'TRY_HARDER_INSTRUCTIONS' NERO_V362_Cup_Skills.py && grep -qF 'self.sub_nb = ttk.Notebook(parent)' NERO_V4_Console_Tab.py || { echo "[FAIL] V4.6.9 markers missing"; exit 1; }
 grep -qF 'V4.6.10 VERIFY BY RELEASE POSITION + TRY HARDER VERIFY + UNCONFIRMED CONTINUE' NERO_V365_Real_Cup_Task.py && grep -qF 'V4.6.10 DEPTH DEFAULT 848x480 + DEFAULT' NERO_V312_Console.py && grep -qF 'UNCONFIRMED' NERO_V368_Real_Task_Record.py || { echo "[FAIL] V4.6.10 markers missing"; exit 1; }
+grep -qF 'V4.6.11 DISK SPOOL + BACKGROUND SAVE + DISCARD' NERO_V4_Dataset_Recorder.py && grep -qF 'V4.6.11 AUTO TEACH RECORD + SPACE BINDTAG' NERO_V4_Console_Tab.py && grep -qF 'def enter_now' NERO_V462_Teach_Gravity.py || { echo "[FAIL] V4.6.11 markers missing"; exit 1; }
 grep -qF 'V3.81 YOLOE TRAIN' NERO_V381_Yolo_Train.py && grep -qF 'V3.81 PROFILE FILES + TRAIN PAGE' NERO_V379_Camera_Lab.py && grep -qF 'NERO_V381_Yolo_Train.py' start_nero.sh || { echo "[FAIL] V3.81 train marker missing"; exit 1; }
 grep -qF 'V3.82 FINE-TUNED MODELS' NERO_V347_Yolo_Perception.py && grep -qF 'V3.82 HIGHLIGHTS + GAMMA + LABEL ASSIST' NERO_V379_Camera_Lab.py && grep -qF 'V3.82 APPLY FINE-TUNED + 1280 TRAINING' NERO_V381_Yolo_Train.py || { echo "[FAIL] V3.82 marker missing"; exit 1; }
 grep -qF 'V3.83 MULTI-MODEL DISTRIBUTION' NERO_V347_Yolo_Perception.py && grep -qF 'V3.83 GPU PREFLIGHT' start_nero.sh && grep -qF 'NERO_V383_Gpu_Check.py' start_nero.sh || { echo "[FAIL] V3.83 marker missing"; exit 1; }
@@ -170,4 +171,5 @@ python3 tests/test_v4_6_6.py 2>&1 | tail -1   # V4.6.6 fixed carton template, na
 python3 tests/test_v4_6_8.py 2>&1 | tail -1   # V4.6.8 verify by rise, fill carton, try harder, labels, Camera scroll
 python3 tests/test_v4_6_9.py 2>&1 | tail -1   # V4.6.9 real replay, LLM try harder, cup target pin, egg count, sparse depth, VLA tab
 python3 tests/test_v4_6_10.py 2>&1 | tail -1  # V4.6.10 verify by release point, try harder verify, unconfirmed continue, depth default
+python3 tests/test_v4_6_11.py 2>&1 | tail -1  # V4.6.11 disk spool, background save, discard, light refresh, teach enter/exit
 python3 tests/test_v4_6_1_gui.py | tail -1   # skips without tkinter / DISPLAY
