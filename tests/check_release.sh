@@ -100,6 +100,7 @@ grep -qF 'V4.6.13 ADAPTER + WRIST CAMERA COLLISION' NERO_V4613_Tool_Collision.py
 grep -qF 'V4.7 ONE-CLICK PREPARE + EPISODE BROWSER' NERO_V4_Console_Tab.py && grep -qF 'V4.7 EPISODE BROWSER + PLAYER' NERO_V47_VLA_Tools.py || { echo "[FAIL] V4.7 markers missing"; exit 1; }
 grep -qF 'V4.7.1: ONLY the focal length' NERO_V386_Real_Wrist_Camera.py || { echo "[FAIL] V4.7.1 marker missing"; exit 1; }
 grep -qF 'V4.7.2 WRIST CALIBRATION CONSISTENCY' NERO_V472_Wrist_Calib.py && grep -qF 'NERO_V472_Wrist_Calib' NERO_V312_Console.py && grep -qF 'def disambiguate_planar_samples' NERO_V349_Real_Wrist_Camera.py && grep -qF 'SELF_CAL_ALLOWED' NERO_V386_Real_Wrist_Camera.py || { echo "[FAIL] V4.7.2 markers missing"; exit 1; }
+grep -qF 'V4.7.3 READY_TO_WORK BEFORE TEACH RECORDING' NERO_V4_Console_Tab.py && grep -qF 'def _work_yolo' NERO_V47_VLA_Tools.py && grep -qF 'V473Episodes.Treeview' NERO_V4_Console_Tab.py && test -f config/real_poses.json || { echo "[FAIL] V4.7.3 markers missing"; exit 1; }
 grep -qF 'V3.81 YOLOE TRAIN' NERO_V381_Yolo_Train.py && grep -qF 'V3.81 PROFILE FILES + TRAIN PAGE' NERO_V379_Camera_Lab.py && grep -qF 'NERO_V381_Yolo_Train.py' start_nero.sh || { echo "[FAIL] V3.81 train marker missing"; exit 1; }
 grep -qF 'V3.82 FINE-TUNED MODELS' NERO_V347_Yolo_Perception.py && grep -qF 'V3.82 HIGHLIGHTS + GAMMA + LABEL ASSIST' NERO_V379_Camera_Lab.py && grep -qF 'V3.82 APPLY FINE-TUNED + 1280 TRAINING' NERO_V381_Yolo_Train.py || { echo "[FAIL] V3.82 marker missing"; exit 1; }
 grep -qF 'V3.83 MULTI-MODEL DISTRIBUTION' NERO_V347_Yolo_Perception.py && grep -qF 'V3.83 GPU PREFLIGHT' start_nero.sh && grep -qF 'NERO_V383_Gpu_Check.py' start_nero.sh || { echo "[FAIL] V3.83 marker missing"; exit 1; }
@@ -183,4 +184,6 @@ python3 tests/test_v4_7.py 2>&1 | tail -1     # V4.7 episode video reader, datas
 python3 tests/test_v4_7_1.py 2>&1 | tail -1   # V4.7.1 the calibrated wrist intrinsics survive a restart
 python3 tests/test_v4_7_2.py 2>&1 | tail -1   # V4.7.2 grades, intrinsics fingerprint, quick check, planar pose ambiguity
 python3 tests/test_v4_7_2_gui.py | tail -1     # V4.7.2 wrist calibration life cycle (skips without tkinter / DISPLAY)
+python3 tests/test_v4_7_3.py 2>&1 | tail -1   # V4.7.3 ready_to_work pose
+python3 tests/test_v4_7_3_gui.py | tail -1     # V4.7.3 episode rows, player with YOLOE, ready_to_work before teach recording
 python3 tests/test_v4_6_1_gui.py | tail -1   # skips without tkinter / DISPLAY

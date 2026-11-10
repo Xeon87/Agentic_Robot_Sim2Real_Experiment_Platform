@@ -267,6 +267,7 @@ class EpisodePlayer:
         self.chk_yolo.pack(side="left", padx=(12, 2))
         if yolo_fn is None:
             self.chk_yolo.state(["disabled"])
+        self._note0 = yolo_note
         self.v_note = tk.StringVar(value=yolo_note)
         ttk.Label(bar, textvariable=self.v_note, foreground="#607d8b").pack(side="left", padx=6)
         self.v_pos = tk.StringVar(value="")
@@ -278,8 +279,17 @@ class EpisodePlayer:
         for seq, fn in (("<space>", lambda e: self.toggle()), ("<Left>", lambda e: self.step(-1)),
                         ("<Right>", lambda e: self.step(1)), ("<Escape>", lambda e: self.close())):
             self.win.bind(seq, lambda e, f=fn: (f(e), "break")[1])
+        # V4.7.3: raw video and YOLOE run in separate threads; a frame is drawn when it is not older than the one on
+        # screen (V4.7 drew a frame only if it was STILL the current one when the worker finished - with YOLOE (2
+        # inferences / frame, > 50 ms) every frame was late during playback -> black canvas, one still at the end)
+        self._cur = None                                  # (i, {cam: view rgb}, {cam: (w, h)}) on screen
+        self.n_drawn = 0                                  # frames drawn (tests)
+        self._want_y = None
+        self._need_y = threading.Event()
         self._worker = threading.Thread(target=self._work, daemon=True, name="v47_player")
         self._worker.start()
+        self._yworker = threading.Thread(target=self._work_yolo, daemon=True, name="v47_player_yolo")
+        self._yworker.start()
         self._show(0)
         self._t_last = time.time()
         self.win.after(30, self._tick)
@@ -287,8 +297,9 @@ class EpisodePlayer:
     # -- Tk thread
     def _on_yolo(self):
         self._yolo_mirror = bool(self.v_yolo.get())
-        self._want = self.i
-        self._need.set()
+        self._want_y = self.i
+        self._need_y.set()
+        self._redraw()
 
     def _set_speed(self):
         try:
@@ -322,6 +333,8 @@ class EpisodePlayer:
         self.i = int(i)
         self._want = self.i
         self._need.set()
+        self._want_y = self.i
+        self._need_y.set()
         if not from_slider:
             try:
                 self.sl.set(self.i)
@@ -336,9 +349,15 @@ class EpisodePlayer:
             while True:
                 kind, val = self.q.get_nowait()
                 if kind == "frame":
-                    i, imgs = val
-                    if i == self.i:
-                        self._draw(imgs)
+                    i, views, sizes = val
+                    cur = -1 if self._cur is None else self._cur[0]
+                    # playing: anything not older than the frame on screen; paused / stepping: the asked frame only
+                    if i == self.i or (self.playing and i >= cur):
+                        self._cur = (i, views, sizes)
+                        self._redraw()
+                elif kind == "dets":
+                    if self._cur is not None and 0 <= self._cur[0] - val <= 2:
+                        self._redraw()
                 elif kind == "note":
                     self.v_note.set(val)
         except queue.Empty:
@@ -347,7 +366,7 @@ class EpisodePlayer:
             now = time.time()
             adv = int((now - self._t_last) * self.rd.fps * self.speed)
             if adv >= 1:
-                self._t_last = now
+                self._t_last += adv / (self.rd.fps * self.speed)
                 j = self.i + adv
                 if j >= self.rd.n - 1:
                     j = self.rd.n - 1
@@ -355,6 +374,30 @@ class EpisodePlayer:
                     self.btn_play.configure(text="▶ 播放")
                 self._show(j)
         self.win.after(15, self._tick)
+
+    def _dets_near(self, k, i):
+        """YOLOE boxes of frame i, else of the 2 frames before it (playback: YOLOE is slower than the video)"""
+        for j in (i, i - 1, i - 2):
+            d = self.dets.get((k, j))
+            if d is not None:
+                return d
+        return None
+
+    def _redraw(self):
+        if self._cur is None:
+            return
+        i, views, sizes = self._cur
+        yolo_on = self.yolo_fn is not None and bool(self._yolo_mirror)
+        imgs = {}
+        for k, view in views.items():
+            if view is not None and yolo_on:
+                d = self._dets_near(k, i)
+                if d:
+                    w, h = sizes[k]
+                    view = draw_dets(view, d, (self.VIEW_W / float(w), self.VIEW_H / float(h)))
+            imgs[k] = view
+        self._draw(imgs)
+        self.n_drawn += 1
 
     def _draw(self, imgs):
         for k, rgb in imgs.items():
@@ -370,8 +413,9 @@ class EpisodePlayer:
             c.delete("all")
             c.create_image(0, 0, image=ph, anchor="nw")
 
-    # -- worker
+    # -- workers
     def _work(self):
+        """the video: read + scale the wanted frame of both cameras (never waits for YOLOE)"""
         import cv2
         while not self._stop.is_set():
             self._need.wait(0.2)
@@ -379,27 +423,47 @@ class EpisodePlayer:
             i = self._want
             if i is None:
                 continue
-            out = {}
-            yolo_on = self.yolo_fn is not None and bool(self._yolo_flag())
+            views, sizes = {}, {}
             for k in CAM_KEYS:
                 fr = self.rd.frame(k, i)
                 if fr is None:
-                    out[k] = None
+                    views[k] = None
                     continue
                 h, w = fr.shape[:2]
-                view = cv2.resize(fr, (self.VIEW_W, self.VIEW_H), interpolation=cv2.INTER_AREA)
-                if yolo_on:
-                    key = (k, i)
-                    if key not in self.dets:
-                        try:
-                            self.dets[key] = self.yolo_fn(np.ascontiguousarray(fr)) or []
-                        except Exception as exc:
-                            self.dets[key] = []
-                            self.q.put(("note", f"YOLOE 出错：{str(exc)[:60]}"))
-                    if key in self.dets:
-                        view = draw_dets(view, self.dets[key], (self.VIEW_W / float(w), self.VIEW_H / float(h)))
-                out[k] = view
-            self.q.put(("frame", (i, out)))
+                sizes[k] = (w, h)
+                views[k] = cv2.resize(fr, (self.VIEW_W, self.VIEW_H), interpolation=cv2.INTER_AREA)
+            self.q.put(("frame", (i, views, sizes)))
+
+    def _work_yolo(self):
+        """YOLOE on the newest wanted frame (skips frames it cannot keep up with); boxes cached per frame"""
+        first = True
+        while not self._stop.is_set():
+            self._need_y.wait(0.2)
+            self._need_y.clear()
+            i = self._want_y
+            if i is None or self.yolo_fn is None or not self._yolo_flag():
+                continue
+            done = False
+            for k in CAM_KEYS:
+                key = (k, i)
+                if key in self.dets:
+                    continue
+                fr = self.rd.frame(k, i)
+                if fr is None:
+                    continue
+                if first:
+                    self.q.put(("note", "YOLOE 计算中（第一次要加载模型）…"))
+                try:
+                    self.dets[key] = self.yolo_fn(np.ascontiguousarray(fr)) or []
+                except Exception as exc:
+                    self.dets[key] = []
+                    self.q.put(("note", f"YOLOE 出错：{str(exc)[:60]}"))
+                if first:
+                    first = False
+                    self.q.put(("note", self._note0))
+                done = True
+            if done:
+                self.q.put(("dets", i))
 
     def _yolo_flag(self):
         """the checkbox state mirrored into a plain attribute by the Tk thread (a worker must not read a Tk variable)"""
@@ -409,6 +473,7 @@ class EpisodePlayer:
         self.alive = False
         self._stop.set()
         self._need.set()
+        self._need_y.set()
         try:
             self.win.destroy()
         except Exception:

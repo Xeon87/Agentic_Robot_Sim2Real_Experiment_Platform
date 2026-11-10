@@ -72,6 +72,28 @@ MARKER_V47 = "V4.7 ONE-CLICK PREPARE + EPISODE BROWSER"
 LAMP_COLORS = {"off": "#9e9e9e", "busy": "#ffb300", "ok": "#2e7d32", "warn": "#ef6c00", "bad": "#c62828"}
 
 
+
+# V4.7.3 READY_TO_WORK: the pose the user set in 实机NERO调试 (2026-11-09 screenshot); 「开始示教录制」 offers to move
+# there first.  The pose library entry "ready_to_work" (config/real_poses.json) wins when it exists.
+MARKER_V473 = "V4.7.3 READY_TO_WORK BEFORE TEACH RECORDING"
+READY_TO_WORK_NAME = "ready_to_work"
+READY_TO_WORK_DEFAULT_DEG = [-0.2, 21.6, -0.1, 61.2, 0.1, 0.2, 44.8]
+READY_TO_WORK_SPEED = 0.10
+
+
+def ready_to_work_deg(path=None):
+    """-> (7 joint angles in degrees, where they came from)"""
+    try:
+        import NERO_V314_Joint_Control as JC
+        lib = JC.PoseLibrary(path or JC.POSES_PATH)
+        q = lib.get(f"{READY_TO_WORK_NAME} (用户)")
+        if q and len(q) == 7:
+            return [float(v) for v in q], f"姿态库「{READY_TO_WORK_NAME}」"
+    except Exception:
+        pass
+    return list(READY_TO_WORK_DEFAULT_DEG), "程序内置（2026-11-09 用户的姿态）"
+
+
 class StatusLamp:
     """V4.6 STATUS LAMPS: a coloured dot (Canvas, no font glyph) + a short status text."""
 
@@ -394,7 +416,15 @@ class VLALeRobotTabUI:
         tvf = ttk.Frame(epf)
         tvf.pack(fill="x", padx=4)
         cols = ("ep", "dur", "frames", "state", "saved", "size", "task")
-        self.ep_tree = ttk.Treeview(tvf, columns=cols, show="headings", height=5, selectmode="browse")
+        # V4.7.3: row height from the font (the default ttk row height is fixed in pixels -> on a scaled screen the
+        # Chinese rows overlapped); the same shared style as the Camera tab tables
+        try:
+            import NERO_V325_Camera as _CAM
+            self._ep_style, _rh = _CAM.treeview_style(ttk, tvf, "V473Episodes.Treeview")
+        except Exception:
+            self._ep_style = "Treeview"
+        self.ep_tree = ttk.Treeview(tvf, columns=cols, show="headings", height=5, selectmode="browse",
+                                    style=self._ep_style)
         for c, t, w, anc in (("ep", "Episode", 64, "center"), ("dur", "时长", 62, "e"), ("frames", "帧数", 58, "e"),
                              ("state", "状态", 64, "center"), ("saved", "保存时间", 120, "center"),
                              ("size", "大小", 70, "e"), ("task", "任务", 220, "w")):
@@ -1507,8 +1537,8 @@ class VLALeRobotTabUI:
 
     def _set_rec_buttons(self) -> None:
         ph = self._rec_phase
-        txt = {"idle": "● 开始示教录制", "entering": "进入示教模式中 …", "recording": "■ 停止并保存 Episode",
-               "saving": "保存中 …"}[ph]
+        txt = {"idle": "● 开始示教录制", "moving": "移动到 ready_to_work …", "entering": "进入示教模式中 …",
+               "recording": "■ 停止并保存 Episode", "saving": "保存中 …"}[ph]
         self.btn_rec.configure(text=txt, state="normal" if ph in ("idle", "recording") else "disabled",
                                bg={"idle": "#c62828", "recording": "#37474f"}.get(ph, "#9e9e9e"))
         self.btn_discard.configure(state="normal" if ph == "recording" else "disabled")
@@ -1521,7 +1551,8 @@ class VLALeRobotTabUI:
             self._finish_recording(discard=False)
             return
         if self._rec_phase != "idle":
-            self._log(f"[INFO] [V4.6.11 RECORDER] 请稍等：{'正在进入示教模式' if self._rec_phase == 'entering' else '正在保存上一个 Episode'}")
+            self._log("[INFO] [V4.6.11 RECORDER] 请稍等：" + {"entering": "正在进入示教模式", "moving": "正在移动到 ready_to_work"}
+                      .get(self._rec_phase, "正在保存上一个 Episode"))
             return
         if self.v_backend.get() != "real":
             self._log("[WARN] [V4.6.9 RECORDER] 后端是「" + {"mock": "仿真替身", "mujoco": "MuJoCo"}.get(self.v_backend.get(), "?")
@@ -1532,14 +1563,68 @@ class VLALeRobotTabUI:
             self.recorder.dataset = self.dataset
             self._refresh_recent_eps()
         if self._real_teach_ok() and not getattr(self.pipe, "teach_mode", False):
-            if not self.ask("开始示教录制", "NERO 将先进入示教模式（可以用手带动），进入成功后自动开始录制。\n"
-                                         "请先用手扶住机械臂（尤其是前臂和末端），确认周围无人。继续？"):
+            q_rw, src = ready_to_work_deg()
+            go = self.ask_ready_to_work(q_rw, src)                    # V4.7.3: True / False / None (cancel)
+            if go is None:
                 return
-            self._rec_phase = "entering"
-            self._set_rec_buttons()
-            self.teach_bar.enter_now(done=lambda r: self._post(lambda: self._teach_entered(r)))
+            if not self.ask("开始示教录制", ("NERO 先以 10% 速度移动到 ready_to_work，再" if go else "NERO 将先")
+                            + "进入示教模式（可以用手带动），进入成功后自动开始录制。\n"
+                            "请先用手扶住机械臂（尤其是前臂和末端），确认周围无人。继续？"):
+                return
+            if go:
+                self._move_ready_then_teach(q_rw, src)
+                return
+            self._enter_teach_for_record()
             return
         self._start_recording(auto_teach=False)
+
+    def ask_ready_to_work(self, q_deg, src):
+        """V4.7.3: -> True (move first) / False (record where the arm is) / None (cancel)"""
+        from tkinter import messagebox
+        txt = "、".join(f"J{k + 1} {v:+.1f}°" for k, v in enumerate(q_deg))
+        return messagebox.askyesnocancel(
+            "开始示教录制", f"机械臂是否先进入 ready_to_work 位姿？\n\n{txt}\n（来源：{src}）\n\n"
+                         "是 = 先以 10% 速度移过去，再进入示教模式开始录制\n否 = 就在当前位置进入示教模式\n取消 = 不录制",
+            parent=self.parent.winfo_toplevel())
+
+    def _enter_teach_for_record(self) -> None:
+        self._rec_phase = "entering"
+        self._set_rec_buttons()
+        self.teach_bar.enter_now(done=lambda r: self._post(lambda: self._teach_entered(r)))
+
+    def _move_ready_then_teach(self, q_deg, src) -> None:
+        """V4.7.3: move to ready_to_work at 10 % (as the replay's move to the recorded start), then teach + record"""
+        model = getattr(self.jpanel, "model", None)
+        if self.pipe is None or not model:
+            self._log("[FAIL] [V4.7.3 RECORDER] 实机没有就绪（实机NERO调试 步骤 5/6）→ 没有移动，也没有开始录制")
+            return
+        self._rec_phase = "moving"
+        self._set_rec_buttons()
+        self._log(f"[INFO] [V4.7.3 RECORDER] 先以 10% 速度移动到 ready_to_work（{src}）："
+                  + " ".join(f"{v:+.1f}" for v in q_deg) + "°")
+        self.arbiter.request_mode("teleop", owner_tag="ui_record_ready")
+        self.arbiter.set_allow_control(True, reason="move to ready_to_work before teach recording")
+        self.v_mode.set(self.arbiter.mode)
+        self.v_allow.set(True)
+
+        def job():
+            try:
+                r = self.pipe.move_and_settle(model, [math.radians(v) for v in q_deg], READY_TO_WORK_SPEED,
+                                              label="V4.7.3 record: go to ready_to_work")
+            except Exception as exc:
+                r = {"ok": False, "error": str(exc)}
+            self._post(lambda: self._ready_reached(r))
+        threading.Thread(target=job, daemon=True, name="v473_ready").start()
+
+    def _ready_reached(self, r) -> None:
+        if not (r or {}).get("ok") or self.arbiter.mode == "estop":
+            self._rec_phase = "idle"
+            self._set_rec_buttons()
+            self._log(f"[FAIL] [V4.7.3 RECORDER] 没到 ready_to_work（{(r or {}).get('error') or ('急停' if self.arbiter.mode == 'estop' else r)}）"
+                      "→ 没有进入示教模式，也没有开始录制")
+            return
+        self._log("[OK] [V4.7.3 RECORDER] 已到 ready_to_work → 进入示教模式")
+        self._enter_teach_for_record()
 
     def _teach_entered(self, r) -> None:
         if not (r or {}).get("ok"):

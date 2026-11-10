@@ -1,3 +1,9 @@
+## V4.7.3 (2026-11-10) — Smol VLA 页：Episode 列表行高、带 YOLOE 的录像回放、录制前先到 ready_to_work
+- `NERO_V4_Console_Tab.py`：Episode 表用共用 Treeview 样式（行高 = 字体行高 + 8，原来默认固定行高在缩放屏上重叠）；「开始示教录制」（实机）先问是否移到 ready_to_work（是 / 否 / 取消），是 → 10% 速度 `move_and_settle` → 示教模式 → 录制，移动失败则不进示教、不录制；`ready_to_work_deg()` 姿态库 `ready_to_work` 优先，否则内置用户 2026-11-09 的位姿。
+- `NERO_V47_VLA_Tools.py`：EpisodePlayer 视频线程和 YOLOE 线程分开；不比屏幕上的帧旧的帧都画（原来只画"仍是当前帧"的结果，开 YOLOE 时播放中每帧都被丢掉 → 黑屏、最后一张静止图）；标签取当前帧或前 2 帧。
+- 新 `config/real_poses.json`（`ready_to_work`）。
+- 测试：新 `tests/test_v4_7_3.py`、`tests/test_v4_7_3_gui.py`；`test_v4_6_11_gui` 的录制流程答"否"（不移动，原流程）；版本白名单补 V4.7.3。
+
 ## V4.7.2 (2026-11-10) — 腕部相机标定整条流程全面检查（P1–P10 + 两个一直失败的测试）
 - 新 `NERO_V472_Wrist_Calib.py`（控制台建 Camera 页前在 `CameraTabUI` 类上替换 8 个方法；V325 冻结未改）：P1 手眼结果分 良好 / 可以用 / 不能用，"可以用"弹窗保存（原来 5.07 mm 不保存也不提示）；P2「清除内参」重启后仍保持（`config/wrist_intrinsics.cleared`）；P3 手眼文件记录标定目标（标定板 / ArUco），快速检查看同一个；P4 快速检查看姿态间一致性，标记挪动时更新位置；P7 手眼文件记录所用内参，不一致时提醒；P8 启动时打印加载的文件；P9 ArUco 样本补上两个位姿解。
 - `NERO_V349_Real_Wrist_Camera.py`：P6 `PLANNING_K_FN`（内参自动采集用实测内参规划）；P9 `planar_pose_candidates` + `disambiguate_planar_samples`（按机械臂转动角选位姿解），`calibrate_eye_in_hand` 先做这一步；P10 去掉 8→5 参数截断。

@@ -30,7 +30,7 @@ os.environ.setdefault("NERO_V308_HEIGHT", "480")
 import NERO_V308_Camera_Perception as CP
 
 cfg = CP.camera_config(); K = CP.intrinsics(cfg); T = CP.extrinsics(cfg)
-assert CP.VERSION in ("V3.10", "V3.11", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4", "V4.6.5", "V4.6.6", "V4.6.8", "V4.6.9", "V4.6.10", "V4.6.11", "V4.6.12", "V4.6.13", "V4.7", "V4.7.1", "V4.7.2")
+assert CP.VERSION in ("V3.10", "V3.11", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4", "V4.6.5", "V4.6.6", "V4.6.8", "V4.6.9", "V4.6.10", "V4.6.11", "V4.6.12", "V4.6.13", "V4.7", "V4.7.1", "V4.7.2", "V4.7.3")
 h, w = K["height"], K["width"]
 _vv, _uu = np.mgrid[0:h, 0:w]
 D = (np.stack([(_uu - K["ppx"]) / K["fx"], (_vv - K["ppy"]) / K["fy"], np.ones_like(_uu, float)], -1).reshape(-1, 3)) @ T[:3, :3].T

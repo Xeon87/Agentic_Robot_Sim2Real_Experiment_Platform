@@ -192,7 +192,9 @@ class TestV472(unittest.TestCase):
         import NERO_V313_Real_Robot as RR
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
-        self.assertEqual((v, C.VERSION, RR.VERSION), ("V4.7.2", "V4.7.2", "V4.7.2"))
+        self.assertEqual(v, C.VERSION)
+        self.assertEqual(v, RR.VERSION)
+        self.assertIn(v, ("V4.7.2", "V4.7.3"))
         self.assertEqual(WC.MARKER, "V4.7.2 WRIST CALIBRATION CONSISTENCY")
         self.assertIn("_capture_wrist_sample", WC.PATCHES)
         self.assertTrue(W86.SELF_CAL_ALLOWED)

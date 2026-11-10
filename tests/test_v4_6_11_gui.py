@@ -269,6 +269,7 @@ nb.select(fr3)
 vt.sub_nb.select(vt.pages["teach"])
 vt.v_backend.set("real")
 vt.on_backend_change()
+vt.ask_ready_to_work = lambda q, src: False   # V4.7.3: "否" = record where the arm is (the flow tested here)
 pump(0.8)
 
 
