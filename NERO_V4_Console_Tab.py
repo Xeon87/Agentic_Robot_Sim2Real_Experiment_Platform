@@ -383,7 +383,14 @@ class VLALeRobotTabUI:
         self.btn_discard.pack(side="left", padx=(0, 4))
         rbg = ttk.Frame(left)
         rbg.pack(fill="x", pady=2)
-        ttk.Label(rbg, text="夹爪：").pack(side="left")
+        import NERO_V48_Gripper as GG                                 # V4.8 gripper switch (global, all pages)
+        self.v_grip_kind = tk.StringVar(value=GG.SHORT[GG.active_type()])
+        self.cb_grip_kind = ttk.Combobox(rbg, textvariable=self.v_grip_kind, values=[GG.SHORT[t] for t in GG.TYPES],
+                                         width=9, state="readonly")
+        self.cb_grip_kind.pack(side="left")
+        self.cb_grip_kind.bind("<<ComboboxSelected>>", lambda _e: self.on_gripper_kind())
+        GG.add_listener(lambda t: self._post(lambda: self.v_grip_kind.set(GG.SHORT[t])))
+        GG.add_blocker(lambda: "Smol VLA 正在录制 / 保存" if getattr(self, "_rec_phase", "idle") != "idle" else None)
         ttk.Button(rbg, text="夹爪示教: 张开", command=lambda: self.on_teach_gripper(True)).pack(side="left", padx=2)
         ttk.Button(rbg, text="夹爪示教: 夹紧", command=lambda: self.on_teach_gripper(False)).pack(side="left", padx=2)
         self.v_grip_teach = tk.StringVar(value="空格键 = 张开 / 夹紧 切换")
@@ -823,12 +830,20 @@ class VLALeRobotTabUI:
                 if g is None:
                     done("grip", "warn", "无", "Agentic实机任务 页不可用")
                 else:
-                    if not getattr(g, "connected", False) and hasattr(rt, "on_grip_connect"):
+                    import NERO_V48_Gripper as GG                      # V4.8: whichever gripper is selected
+                    agx = GG.is_agx()
+                    if not getattr(g, "connected", False):
                         self._prep_set("grip", "busy", "连接中")
-                        self._post(rt.on_grip_connect)
+                        if agx and hasattr(g, "devices"):
+                            threading.Thread(target=g.devices["agx_gripper"].connect, daemon=True,
+                                             name="v48_prep_agx").start()
+                        elif hasattr(rt, "on_grip_connect"):
+                            self._post(rt.on_grip_connect)
                     ok = self._wait_for(lambda: getattr(g, "connected", False), 10.0)
                     done("grip", "ok" if ok else "warn", "已连接" if ok else "没连上",
-                         "" if ok else "SO-101 没连上：检查 USB（/dev/ttyACM*）和电源，或在 Agentic实机任务 页手动连接")
+                         "" if ok else ("NERO 原装夹爪没连上：检查 24 V 供电和 CAN（夹爪 ID 10），或在 实机NERO调试 → 夹爪 手动连接"
+                                        if agx else
+                                        "SO-101 没连上：检查 USB（/dev/ttyACM*）和电源，或在 Agentic实机任务 页手动连接"))
             # 10. load SmolVLA + connect the adapter
             if res["model"][0] != "ok" and not self.vla_policy.is_loaded:
                 done("vla", "off", "跳过", "没有模型文件")
@@ -1325,6 +1340,20 @@ class VLALeRobotTabUI:
         g = getattr(self.rct_tab, "grip", None) if self.rct_tab is not None else None
         return g if (g is not None and getattr(g, "connected", False)) else None
 
+    def on_gripper_kind(self) -> None:
+        """V4.8: the same global gripper choice as 实机NERO调试 / Agentic实机任务"""
+        import NERO_V48_Gripper as GG
+        want = next((t for t in GG.TYPES if GG.SHORT[t] == self.v_grip_kind.get()), None)
+        if want is None or want == GG.active_type():
+            return
+        r = GG.set_active(want)
+        if not r.get("ok"):
+            self._log(f"[WARN] [V4.8 GRIPPER] {r.get('error')}")
+            self.v_grip_kind.set(GG.SHORT[GG.active_type()])
+            return
+        self._log(f"[OK] [V4.8 GRIPPER] 夹爪切换为 {GG.LABELS[want]}。接下来：" + "；".join(
+            f"{i + 1}. {t}" for i, t in enumerate(r.get("todo") or [])))
+
     def on_teach_gripper(self, open_: bool) -> None:
         """V4.6.9: the teach gripper buttons / space bar DRIVE the real SO-101 on the real back end (before: only a
         number in the recording); the recorded gripper action follows; on the simulated back ends only the number."""
@@ -1335,19 +1364,30 @@ class VLALeRobotTabUI:
         self.v_grip_teach.set(f"夹爪示教：{word}（空格键切换）")
         if g is None:
             self.recorder.set_teach_gripper_norm(v)
+            import NERO_V48_Gripper as GG
             why = ("后端不是「实机 NERO」" if self.v_backend.get() != "real" else
-                   "SO-101 夹爪没有连接（Agentic实机任务 页 → 连接）")
+                   ("NERO 原装夹爪没有连接（实机NERO调试 → 夹爪 → 连接）" if GG.is_agx() else
+                    "SO-101 夹爪没有连接（Agentic实机任务 页 → 连接）"))
             self._log(f"[WARN] [V4.6.9 TEACH GRIPPER] {word}：只记录数值，真夹爪不动（{why}）")
             return
 
+        import NERO_V48_Gripper as GG
+        agx = GG.is_agx()
+        name = GG.SHORT[GG.active_type()]
+
         def _drive(_v):
             try:                                      # V4.6.11: a failure is reported (V4.6.9: silently swallowed)
-                r = g.open_gap(REPLAY_OPEN_GAP_MM) if open_ else g.clamp(REPLAY_CLAMP_PCT)
+                if agx:                               # V4.8: AgxGripper - open to its stroke / close with the default force
+                    c = GG.load_cfg()
+                    r = (g.open_gap(float(getattr(g, "stroke_mm", 100.0))) if open_ else
+                         g.clamp(force=float(c["agx"].get("default_force", 1.0))))
+                else:
+                    r = g.open_gap(REPLAY_OPEN_GAP_MM) if open_ else g.clamp(REPLAY_CLAMP_PCT)
             except Exception as exc:
-                self._log(f"[FAIL] [V4.6.11 TEACH GRIPPER] SO-101 {word} 没执行：{exc}")
+                self._log(f"[FAIL] [V4.6.11 TEACH GRIPPER] {name} {word} 没执行：{exc}")
                 return
             bad = isinstance(r, dict) and r.get("ok") is False and not r.get("held")
-            self._log(f"[{'WARN' if bad else 'OK'}] [V4.6.9 TEACH GRIPPER] SO-101 {word}：{r}")
+            self._log(f"[{'WARN' if bad else 'OK'}] [V4.6.9 TEACH GRIPPER] {name} {word}：{r}")
         threading.Thread(target=lambda: self.recorder.set_teach_gripper_norm(v, drive_gripper_fn=_drive),
                          daemon=True, name="v469_teach_gripper").start()
 

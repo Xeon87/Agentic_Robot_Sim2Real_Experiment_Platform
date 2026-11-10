@@ -1,3 +1,12 @@
+## V4.8 (2026-11-10) — 第 1 部分：NERO 原装夹爪 AgxGripper + 夹爪切换 + 实机NERO调试 → 夹爪 页
+- 新 `NERO_V48_Gripper.py`：全局夹爪选择（`config/gripper.json`，阻止 / 通知）；`AgxGripper`（与 SO101RealGripper 同接口：connect / status / open_gap / clamp / relax / held）；pyAgxArm 助手进程（`serve`，JSON 行）+ `PyAgxServer`；模拟夹爪 `FakeAgxBackend`；`GripperProxy`；力度换算（N → 0.5–3.0，测力计表插值）；校正归零、全行程检查、空载基线、示教模式测试、J7 控制器限位读写。
+- 新 `NERO_V48_Gripper_UI.py`：「实机NERO调试 → 夹爪」页（状态 / 操作 / ① 校正归零 / ② 力控标定 / ③ 示教模式测试 / ④ J7 控制器限位）。
+- `NERO_V312_Console.py`：新增「夹爪」子页；原装夹爪时驱动强制 `effector_type:=none`。
+- `NERO_V365_Real_Cup_Task.py`：`grip` 改成 GripperProxy（SO-101 设置走 `grip_so101`）；夹爪区切换框 + 原装夹爪按钮；RealIO 开合 / 夹紧 / 状态按原装夹爪换算。
+- `NERO_V4_Console_Tab.py`：示教夹爪行切换框；空格键 / 一键准备 / 提示按当前夹爪。`NERO_V4_Dataset_Recorder.py`：实机回放夹爪按原装夹爪。
+- `NERO_V47_VLA_Tools.py`：修了一个竞争：播放器第一次 YOLOE 计算时点「应用」，旧提示词的提示文字会把新的盖掉（V4.7.4 的测试偶尔失败）。
+- 测试：新 `tests/test_v4_8.py`、`tests/test_v4_8_gui.py`；版本白名单补 V4.8。
+
 ## V4.7.4 (2026-11-10) — 关节超限 A+B+C1、回放 YOLOE 按任务、修改任务描述、重命名数据集
 - 新 `NERO_V474_Episode_Tools.py`：可执行范围（限位 − 3°）检查（实时 / 整个 Episode）、任务描述 → YOLOE 提示词、`set_episode_task`（先备份 meta）、`update_npz_meta`（流式重写录像文件里的描述副本，数组逐位不变）、`rename_dataset`（修正 episodes.jsonl 里的文件路径）、`backfill_limits`（旧 Episode 补检查）。
 - `NERO_V4_Dataset_Recorder.py`：保存时写 `limit_ok` / `limit_report`；`replay_episode_real` 回放前按真实限位检查，超限不动。

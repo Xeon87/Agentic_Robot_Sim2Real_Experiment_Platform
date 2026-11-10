@@ -192,7 +192,9 @@ class TestV474(unittest.TestCase):
         import NERO_V4_Console_Tab as VT
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
-        self.assertEqual((v, C.VERSION, RR.VERSION), ("V4.7.4", "V4.7.4", "V4.7.4"))
+        self.assertEqual(v, C.VERSION)
+        self.assertEqual(v, RR.VERSION)
+        self.assertIn(v, ("V4.7.4", "V4.8"))
         self.assertEqual(ET.MARKER, "V4.7.4 JOINT LIMITS + TASK PROMPTS + EDIT TASK + RENAME DATASET")
         for name in ("on_edit_task", "edit_task", "on_rename_dataset", "rename_dataset_to", "_check_live_limits",
                      "_ask_over_limit"):

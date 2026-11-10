@@ -825,7 +825,12 @@ def _grip(gripper, what, log):
         log(f"[INFO] [V4.6.9 REPLAY] 夹爪{('张开' if what == 'open' else '夹紧')}（夹爪未连接，跳过）")
         return
     try:
-        r = gripper.open_gap(REPLAY_OPEN_GAP_MM) if what == "open" else gripper.clamp(REPLAY_CLAMP_PCT)
+        if getattr(gripper, "kind", "so101") == "agx_gripper":      # V4.8 NERO AgxGripper
+            import NERO_V48_Gripper as GG
+            r = (gripper.open_gap(float(getattr(gripper, "stroke_mm", 100.0))) if what == "open" else
+                 gripper.clamp(force=float(GG.load_cfg()["agx"].get("default_force", 1.0))))
+        else:
+            r = gripper.open_gap(REPLAY_OPEN_GAP_MM) if what == "open" else gripper.clamp(REPLAY_CLAMP_PCT)
         log(f"[INFO] [V4.6.9 REPLAY] 夹爪{('张开' if what == 'open' else '夹紧')}：{r}")
     except Exception as exc:
         log(f"[WARN] [V4.6.9 REPLAY] 夹爪动作失败：{exc}")

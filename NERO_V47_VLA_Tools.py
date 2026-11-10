@@ -401,8 +401,10 @@ class EpisodePlayer:
                 elif kind == "dets":
                     if self._cur is not None and 0 <= self._cur[0] - val <= 2:
                         self._redraw()
-                elif kind == "note":
-                    self.v_note.set(val)
+                elif kind == "note":                       # V4.8: a note from older prompts is dropped
+                    g_, txt = val if isinstance(val, tuple) else (self._ygen, val)
+                    if g_ == self._ygen:
+                        self.v_note.set(self._note0 if txt is None else txt)
         except queue.Empty:
             pass
         if self.playing:
@@ -496,15 +498,15 @@ class EpisodePlayer:
                 if fr is None:
                     continue
                 if first:
-                    self.q.put(("note", "YOLOE 计算中（第一次要加载模型）…"))
+                    self.q.put(("note", (gen, "YOLOE 计算中（第一次要加载模型）…")))
                 try:
                     dets[key] = fn(np.ascontiguousarray(fr)) or []      # into the dict of ITS prompts (V4.7.4)
                 except Exception as exc:
                     dets[key] = []
-                    self.q.put(("note", f"YOLOE 出错：{str(exc)[:60]}"))
+                    self.q.put(("note", (gen, f"YOLOE 出错：{str(exc)[:60]}")))
                 if first:
                     first = False
-                    self.q.put(("note", self._note0))
+                    self.q.put(("note", (gen, None)))
                 done = True
             if done and gen == self._ygen:
                 self.q.put(("dets", i))

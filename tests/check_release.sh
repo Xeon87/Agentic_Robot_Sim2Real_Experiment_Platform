@@ -102,6 +102,7 @@ grep -qF 'V4.7.1: ONLY the focal length' NERO_V386_Real_Wrist_Camera.py || { ech
 grep -qF 'V4.7.2 WRIST CALIBRATION CONSISTENCY' NERO_V472_Wrist_Calib.py && grep -qF 'NERO_V472_Wrist_Calib' NERO_V312_Console.py && grep -qF 'def disambiguate_planar_samples' NERO_V349_Real_Wrist_Camera.py && grep -qF 'SELF_CAL_ALLOWED' NERO_V386_Real_Wrist_Camera.py || { echo "[FAIL] V4.7.2 markers missing"; exit 1; }
 grep -qF 'V4.7.3 READY_TO_WORK BEFORE TEACH RECORDING' NERO_V4_Console_Tab.py && grep -qF 'def _work_yolo' NERO_V47_VLA_Tools.py && grep -qF 'V473Episodes.Treeview' NERO_V4_Console_Tab.py && test -f config/real_poses.json || { echo "[FAIL] V4.7.3 markers missing"; exit 1; }
 grep -qF 'V4.7.4 JOINT LIMITS + TASK PROMPTS + EDIT TASK + RENAME DATASET' NERO_V474_Episode_Tools.py && grep -qF 'def rename_dataset_to' NERO_V4_Console_Tab.py && grep -qF 'include_over_limit' NERO_V44_SmolVLA_Worker.py && grep -qF 'V4.7.4 (C1)' NERO_V4_Dataset_Recorder.py || { echo "[FAIL] V4.7.4 markers missing"; exit 1; }
+grep -qF 'V4.8 NERO AGX GRIPPER + GRIPPER SWITCH' NERO_V48_Gripper.py && grep -qF 'V4.8 GRIPPER PANEL: ZERO + FORCE CALIBRATION + TEACH TEST + J7 LIMIT' NERO_V48_Gripper_UI.py && grep -qF 'GripperProxy' NERO_V365_Real_Cup_Task.py && grep -qF 'grip_holder' NERO_V312_Console.py || { echo "[FAIL] V4.8 markers missing"; exit 1; }
 grep -qF 'V3.81 YOLOE TRAIN' NERO_V381_Yolo_Train.py && grep -qF 'V3.81 PROFILE FILES + TRAIN PAGE' NERO_V379_Camera_Lab.py && grep -qF 'NERO_V381_Yolo_Train.py' start_nero.sh || { echo "[FAIL] V3.81 train marker missing"; exit 1; }
 grep -qF 'V3.82 FINE-TUNED MODELS' NERO_V347_Yolo_Perception.py && grep -qF 'V3.82 HIGHLIGHTS + GAMMA + LABEL ASSIST' NERO_V379_Camera_Lab.py && grep -qF 'V3.82 APPLY FINE-TUNED + 1280 TRAINING' NERO_V381_Yolo_Train.py || { echo "[FAIL] V3.82 marker missing"; exit 1; }
 grep -qF 'V3.83 MULTI-MODEL DISTRIBUTION' NERO_V347_Yolo_Perception.py && grep -qF 'V3.83 GPU PREFLIGHT' start_nero.sh && grep -qF 'NERO_V383_Gpu_Check.py' start_nero.sh || { echo "[FAIL] V3.83 marker missing"; exit 1; }
@@ -189,4 +190,6 @@ python3 tests/test_v4_7_3.py 2>&1 | tail -1   # V4.7.3 ready_to_work pose
 python3 tests/test_v4_7_3_gui.py | tail -1     # V4.7.3 episode rows, player with YOLOE, ready_to_work before teach recording
 python3 tests/test_v4_7_4.py 2>&1 | tail -1   # V4.7.4 joint limits, replay pre-check, export skip, prompts, task edit, rename
 python3 tests/test_v4_7_4_gui.py | tail -1     # V4.7.4 live limit warning, keep / delete, player prompts, edit task, rename
+python3 tests/test_v4_8.py 2>&1 | tail -1     # V4.8 gripper switch, force mapping, AgxGripper device, proxy, task I/O, helper protocol
+python3 tests/test_v4_8_gui.py | tail -1       # V4.8 实机NERO调试 -> 夹爪: switch, status, zero wizard, force calibration, teach test, J7 limit
 python3 tests/test_v4_6_1_gui.py | tail -1   # skips without tkinter / DISPLAY

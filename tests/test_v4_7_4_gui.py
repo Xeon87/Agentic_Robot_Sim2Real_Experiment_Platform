@@ -366,7 +366,7 @@ pl.v_prompts.set("cup, plate")
 pl.apply_prompts()
 assert wait(lambda: ("cup", "plate") in seen_prompts, 5.0), seen_prompts[-3:]
 assert all(d and d[0]["name"] == "cup" for d in pl.dets.values()), pl.dets
-assert "cup, plate" in pl.v_note.get()
+assert "cup, plate" in pl.v_note.get(), (pl.v_note.get(), pl._note0)
 pl.close()
 pump(0.2)
 cam.det_yolo.detect = orig_detect

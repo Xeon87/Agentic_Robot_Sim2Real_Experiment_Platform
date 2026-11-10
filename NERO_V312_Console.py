@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.7.4"
+VERSION = "V4.8"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -796,7 +796,14 @@ def run_console(initial_tab="sim"):
             dom = int(v_domain.get())
         except Exception:
             dom = int(RR.DEFAULT_DOMAIN_ID)
-        return {"can_port": v_port.get().strip() or "can0", "effector_type": v_eff.get(), "fw_version": v_fw.get(),
+        eff = v_eff.get()
+        try:                                     # V4.8: the NERO AgxGripper is driven by pyAgxArm only -> the ROS2
+            import NERO_V48_Gripper as GG        # driver must not send gripper frames too (one sender on CAN 0x159)
+            if GG.is_agx():
+                eff = "none"
+        except Exception:
+            pass
+        return {"can_port": v_port.get().strip() or "can0", "effector_type": eff, "fw_version": v_fw.get(),
                 "push_fw": v_fw.get() or RR.DEFAULT_FW_VERSION, "speed_percent": int(v_speed.get()), "speed_unlocked": bool(v_unlock.get()),
                 "auto_control_gate": bool(v_gate.get()), "follow": bool(v_follow.get()), "use_rviz": bool(v_rviz.get()),
                 "domain_id": dom, "teach_payload": v_payload.get()} | {
@@ -877,6 +884,8 @@ def run_console(initial_tab="sim"):
     real_nb.add(jp_holder, text="关节控制")
     real_nb.add(cons_holder, text="一致性测试")
     real_nb.add(safe_holder, text="工作区安全")
+    grip_holder = ttk.Frame(real_nb)          # V4.8 GRIPPER PANEL (built after the Agentic tab: it shares its gripper)
+    real_nb.add(grip_holder, text="夹爪")
     real_wf_bar = ttk.Frame(real_tab)
     real_wf_bar.pack(fill="x", pady=(4, 0))
     real_log = make_log(real_tab)
@@ -997,6 +1006,21 @@ def run_console(initial_tab="sim"):
                 lambda _e: rct_tab.refresh_skill() if nb.select() == str(rct_outer) else None, add="+")
     except Exception as exc:
         log_append(real_log, f"[FAIL] [V3.65 REAL CUP TASK] {TAB_AGENTIC} tab not available: {exc}")
+
+    # ---- V4.8 GRIPPER PANEL in 实机NERO调试 -> 夹爪: the same gripper object as the Agentic / Smol VLA tabs
+    grip_panel = None
+    try:
+        import NERO_V48_Gripper as GG
+        import NERO_V48_Gripper_UI as GUI
+        g_proxy = rct_tab.grip if (rct_tab is not None and isinstance(getattr(rct_tab, "grip", None), GG.GripperProxy)) \
+            else GG.GripperProxy(None, log=lambda line: log_append(real_log, line))
+        grip_panel = GUI.GripperPanelUI(tk, ttk, grip_holder, g_proxy, log=lambda line: log_append(real_log, line),
+                                        ask=lambda t, m: bool(messagebox.askyesno(t, m)),
+                                        visible_fn=lambda: (nb.select() == str(real_outer)
+                                                            and real_nb.select() == str(grip_holder)),
+                                        teach_fn=lambda: getattr(pipe, "teach_mode", None))
+    except Exception as exc:
+        log_append(real_log, f"[FAIL] [V4.8 GRIPPER] 夹爪页不可用：{exc}")
 
     # ---- V4.6.4 VISION ACCURACY CHECK: panel at the bottom of Camera调试 -> 视觉定位 (closed SO-101 fingertip above
     #      the target; main camera only / wrist camera only / main + wrist assist; the person writes dx / dy)

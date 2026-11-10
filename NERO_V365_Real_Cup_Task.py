@@ -664,10 +664,16 @@ class RealIO:
         return r
 
     # -- gripper (virtual opening mm = simulation backend units, 2000 * q1)
+    def _agx(self):
+        return getattr(self.grip, "kind", "so101") == "agx_gripper"
+
     def gripper_open(self, mm):
         import NERO_V365_STS3215_Gripper as GR
         if not self.motion_allowed or self.grip is None:
             return {"opening_mm": round(float(mm), 1), "skipped": True}
+        if self._agx():                       # V4.8: the backend's opening mm IS the AgxGripper's opening
+            r = self.grip.open_gap(float(mm))
+            return {"opening_mm": r.get("gap_mm"), "gap_mm": r.get("gap_mm"), "ok": r.get("ok"), "error": r.get("error")}
         r = self.grip.open_deg(GR.open_deg_for_virtual_mm(mm))
         a = r.get("open_deg")
         return {"opening_mm": round(GR.virtual_mm_for_open_deg(a), 1) if a is not None else None,
@@ -683,6 +689,15 @@ class RealIO:
         if not self.motion_allowed or self.grip is None:
             return {"contact_left": False, "contact_right": False, "left_N": 0.0, "right_N": 0.0, "hold_active": False,
                     "opening_mm": None, "error": "gripper not available in this run mode"}
+        if self._agx():                       # V4.8: force setting 0.5..3.0 from the requested N (force_level)
+            import NERO_V48_Gripper as GG
+            lv = GG.force_level(float(force_n))
+            r = self.grip.clamp(force=lv)
+            held = bool(r.get("held"))
+            return {"contact_left": held, "contact_right": held, "left_N": float(force_n) if held else 0.0,
+                    "right_N": float(force_n) if held else 0.0, "hold_active": held, "opening_mm": r.get("gap_mm"),
+                    "gap_mm": r.get("gap_mm"), "force_setting": lv, "force_reading": r.get("force"),
+                    "servo_errors": r.get("errors"), "force_note": "AgxGripper force setting (uncalibrated unless 力控标定)"}
         pct = self.clamp_pct(force_n)
         r = self.grip.clamp(pct)
         held = bool(r.get("held"))
@@ -698,6 +713,10 @@ class RealIO:
         import NERO_V365_STS3215_Gripper as GR
         st = self.grip.status() if (self.grip is not None and self.grip.connected) else None
         held = bool(self.grip.held) if self.grip is not None else False
+        if self._agx():                                                # V4.8
+            return {"opening_mm": st["gap_mm"] if st else None, "gap_mm": st["gap_mm"] if st else None,
+                    "hold_active": held, "contact_left": held, "contact_right": held, "force_mode": held,
+                    "connected": st is not None}
         return {"opening_mm": round(GR.virtual_mm_for_open_deg(st["open_deg"]), 1) if st else None,
                 "gap_mm": st["gap_mm"] if st else None, "hold_active": held, "contact_left": held,
                 "contact_right": held, "force_mode": held, "connected": st is not None}
@@ -3236,7 +3255,12 @@ class RealCupTaskTabUI:
             self.st["geometry"], self._v391_mount_lines = migrate_geometry_v391(self.st["geometry"])
             if self._v391_mount_lines:
                 save_settings(self.st, self.settings_path)
-        self.grip = gripper or GR.SO101RealGripper(self.st.get("gripper") or {}, log=self._log)
+        self.grip_so101 = gripper or GR.SO101RealGripper(self.st.get("gripper") or {}, log=self._log)
+        import NERO_V48_Gripper as GG                                  # V4.8: SO-101 or NERO AgxGripper (global)
+        self.GG = GG
+        self.grip = gripper if isinstance(gripper, GG.GripperProxy) else GG.GripperProxy(self.grip_so101, log=self._log)
+        GG.add_listener(lambda t: self._ui(self._on_gripper_switched))
+        GG.add_blocker(lambda: "Agentic实机任务 正在运行" if self.busy() else None)
         self.q = queue.Queue()
         self.worker = None
         self.io = None
@@ -3318,15 +3342,34 @@ class RealCupTaskTabUI:
                        wraplength=self.DW - 6, pack={"fill": "x"})
 
         # -- gripper
-        gf = ttk.LabelFrame(right, text="SO-101 夹爪（STS3215 舵机 · 180° = 夹紧，正角度 = 张开）")
+        gf = ttk.LabelFrame(right, text="夹爪")
         gf.pack(fill="x")
-        g = self.grip.cfg
+        self.grip_frame = gf
+        rs = ttk.Frame(gf)                                             # V4.8 gripper switch (global, all pages)
+        rs.pack(fill="x", padx=4, pady=(2, 0))
+        ttk.Label(rs, text="当前夹爪").pack(side="left")
+        self.v_grip_type = tk.StringVar(value=self.GG.LABELS[self.GG.active_type()])
+        self.cb_grip_type = ttk.Combobox(rs, textvariable=self.v_grip_type, values=[self.GG.LABELS[t] for t in self.GG.TYPES],
+                                         width=26, state="readonly")
+        self.cb_grip_type.pack(side="left", padx=4)
+        self.cb_grip_type.bind("<<ComboboxSelected>>", lambda _e: self.on_gripper_type())
+        ttk.Label(rs, text="（三个页面共用同一个设置）", foreground="#607d8b").pack(side="left")
+        self.agx_row = ttk.Frame(gf)                                   # V4.8 NERO AgxGripper basic buttons
+        ttk.Button(self.agx_row, text="连接（CAN）", command=lambda: self.on_grip("agx_connect", None)).pack(side="left")
+        ttk.Button(self.agx_row, text="张开 60 mm", command=lambda: self.on_grip("gap", 60.0)).pack(side="left", padx=2)
+        ttk.Button(self.agx_row, text="张到最大", command=lambda: self.on_grip("gap", 100.0)).pack(side="left", padx=2)
+        ttk.Button(self.agx_row, text="夹紧测试", command=lambda: self.on_grip("clamp", None)).pack(side="left", padx=2)
+        ttk.Button(self.agx_row, text="失能", command=lambda: self.on_grip("relax", None)).pack(side="left", padx=2)
+        ttk.Label(self.agx_row, text="归零 / 力控标定：实机NERO调试 → 夹爪", foreground="#607d8b").pack(side="left", padx=6)
+        self.so101_rows = []
+        g = self._so101().cfg
         self.v_port = tk.StringVar(value=str(g["port"]))
         self.v_baud = tk.StringVar(value=str(g["baud"]))
         self.v_sid = tk.StringVar(value=str(g["servo_id"]))
         self.v_sign = tk.StringVar(value=str(g["open_sign"]))
         r0 = ttk.Frame(gf)
         r0.pack(fill="x", padx=4, pady=2)
+        self.so101_rows.append(r0)
         ttk.Label(r0, text="串口").pack(side="left")
         self.port_box = ttk.Combobox(r0, textvariable=self.v_port, values=self.GR.STSBus.list_ports() + [self.GR.SIM_PORT],
                                      width=16)
@@ -3343,14 +3386,16 @@ class RealCupTaskTabUI:
         ttk.Button(r0, text="断开", command=self.on_grip_disconnect).pack(side="left")
         r1 = ttk.Frame(gf)
         r1.pack(fill="x", padx=4, pady=2)
+        self.so101_rows.append(r1)
         ttk.Button(r1, text="张开 10°（方向检查）", command=lambda: self.on_grip("deg", 10.0)).pack(side="left")
         ttk.Button(r1, text="张开 32 mm（预抓取）", command=lambda: self.on_grip("gap", 32.0)).pack(side="left", padx=2)
         ttk.Button(r1, text="夹紧测试", command=lambda: self.on_grip("clamp", None)).pack(side="left", padx=2)
         ttk.Button(r1, text="卸力", command=lambda: self.on_grip("relax", None)).pack(side="left", padx=2)
         ttk.Button(r1, text="空夹标定（夹爪里不要有东西）", command=lambda: self.on_grip("touch", None)).pack(side="left", padx=2)
         self.v_grip = tk.StringVar(value="夹爪未连接")
-        JC.fixed_label(tk, gf, 2, width=640, textvariable=self.v_grip, font=("TkFixedFont", 9), wraplength=630,
-                       pack={"fill": "x", "padx": 4})
+        self.lbl_grip = JC.fixed_label(tk, gf, 2, width=640, textvariable=self.v_grip, font=("TkFixedFont", 9),
+                                       wraplength=630, pack={"fill": "x", "padx": 4})
+        self._show_gripper_rows()
 
         # -- skill + parameters
         sf = ttk.LabelFrame(right, text="技能与参数（= 仿真「叠杯子 · SO-101 夹爪」场景）")
@@ -3525,7 +3570,7 @@ class RealCupTaskTabUI:
             geo, geo_err = {}, str(exc)
         p = real_profile(CK, cfg=geo)
         _T, _Tg, m = real_mount(geo)
-        tq = self.GR.clamp_torque_pct(knobs["cup_clamp_force_n"], self.grip.cfg)
+        tq = self.GR.clamp_torque_pct(knobs["cup_clamp_force_n"], self._so101().cfg)
         if hasattr(self, "v_geo"):
             self.v_geo.set(geo_err or (
                 f"安装：座面 {m['seat_mm']:.1f} mm + 转接环 {m['ring_mm']:.1f} mm · 偏转 {m['roll_deg']:+.1f}° · 指尖修正 "
@@ -3776,7 +3821,7 @@ class RealCupTaskTabUI:
         path = bool(getattr(self.pipe, "supports_joint_path", lambda: False)())
         ok = lambda b: "●" if b else "○"
         return (f"{ok(moveit)} 机械臂 MoveIt  {ok(path)} 关节路径执行  {ok(cam)} 主相机 D435i  {ok(calib)} 手眼标定  "
-                f"{ok(wrist)} 腕部相机  {ok(self.grip.connected)} SO-101 夹爪"
+                f"{ok(wrist)} 腕部相机  {ok(self.grip.connected)} {self.GG.SHORT[self.GG.active_type()]} 夹爪"
                 + ("   · 运行中…" if self.busy() else ""))
 
     # ---------------------------------------------------------------- gripper buttons
@@ -3798,18 +3843,55 @@ class RealCupTaskTabUI:
         except ValueError as exc:
             self._log(f"[FAIL] [V3.65 GRIPPER] {exc}")
             return
-        self.grip.cfg.update(c)
+        self._so101().cfg.update(c)
 
         d = self._collect_settings()               # Tk variables: read here, in the Tk thread
 
         def job():
-            ok, msg = self.grip.connect(c["port"], c["baud"], c["servo_id"])
+            ok, msg = self._so101().connect(c["port"], c["baud"], c["servo_id"])
             self._log(f"{'[OK]' if ok else '[FAIL]'} [V3.65 GRIPPER] 连接 {msg}")
             if ok:
                 self.st = d
                 save_settings(d, self.settings_path)
                 self._grip_text()
         self._start("夹爪连接", job)
+
+    # ---------------------------------------------------------------- V4.8 gripper switch
+    def _so101(self):
+        """the SO-101 device behind `grip` (the proxy's SO-101, or `grip` itself when it was replaced, e.g. by a test)"""
+        g = self.grip
+        return g.devices["so101"] if isinstance(g, self.GG.GripperProxy) else g
+
+    def _show_gripper_rows(self):
+        agx = self.GG.is_agx()
+        for r in self.so101_rows:
+            r.pack_forget()
+        self.agx_row.pack_forget()
+        if agx:
+            self.agx_row.pack(fill="x", padx=4, pady=2, before=self.lbl_grip.holder)
+        else:
+            for r in self.so101_rows:
+                r.pack(fill="x", padx=4, pady=2, before=self.lbl_grip.holder)
+        self.grip_frame.configure(text="夹爪 · NERO 原装 AgxGripper（pyAgxArm · CAN）" if agx else
+                                  "夹爪 · SO-101（STS3215 舵机 · 180° = 夹紧，正角度 = 张开）")
+        self.v_grip_type.set(self.GG.LABELS[self.GG.active_type()])
+
+    def on_gripper_type(self):
+        want = next((t for t in self.GG.TYPES if self.GG.LABELS[t] == self.v_grip_type.get()), None)
+        if want is None or want == self.GG.active_type():
+            return
+        r = self.GG.set_active(want)
+        if not r.get("ok"):
+            self._log(f"[WARN] [V4.8 GRIPPER] {r.get('error')}")
+            self.v_grip_type.set(self.GG.LABELS[self.GG.active_type()])
+            return
+        self._log(f"[OK] [V4.8 GRIPPER] 夹爪切换为 {self.GG.LABELS[want]}。接下来：" + "；".join(
+            f"{i + 1}. {t}" for i, t in enumerate(r.get("todo") or [])))
+
+    def _on_gripper_switched(self):
+        if hasattr(self, "so101_rows"):
+            self._show_gripper_rows()
+            self.v_grip.set("夹爪未连接" if not self.grip.connected else self.v_grip.get())
 
     def on_grip_disconnect(self):
         self.grip.disconnect()
@@ -3819,6 +3901,12 @@ class RealCupTaskTabUI:
         st = self.grip.status() if self.grip.connected else None
         if st is None:
             self._ui(lambda: self.v_grip.set("夹爪无读数"))
+            return
+        if self.GG.is_agx():                                           # V4.8
+            t = (f"NERO 原装夹爪 · 开口 {st['gap_mm']:.1f} mm（行程 0–{st['stroke_mm']:.0f}）· 力 {st['force']:.2f} · "
+                 f"{'已使能' if st['enabled'] else '未使能'} · {'已归零' if st['homed'] else '未归零'}"
+                 + (f" · ⚠ {'/'.join(st['faults'])}" if st["faults"] else "") + (" · 夹持中" if self.grip.held else ""))
+            self._ui(lambda: self.v_grip.set(t))
             return
         t = (f"张开 {st['open_deg']:+.1f}°（舵机 {st['servo_deg']:.1f}°）· 指尖缝 {st['gap_mm']:.1f} mm · 负载 "
              f"{st['load_pct']:.0f}% · 电流 {st['current_ma']:.0f} mA · {st['voltage_v']:.1f} V · {st['temp_c']} °C · "
@@ -3839,18 +3927,24 @@ class RealCupTaskTabUI:
         knobs = getattr(self, "knobs", None) or {"cup_clamp_force_n": 5.0}
 
         def job():
-            if what == "deg":
+            if what == "agx_connect":                 # V4.8
+                ok, msg = self.grip.devices["agx_gripper"].connect()
+                r = {"ok": ok, "msg": msg}
+            elif what == "deg":
                 r = self.grip.open_deg(val)
             elif what == "gap":
                 r = self.grip.open_gap(val)
             elif what == "clamp":
-                pct = float(tq) if tq else self.GR.clamp_torque_pct(knobs["cup_clamp_force_n"], self.grip.cfg)
-                r = self.grip.clamp(pct)
+                if self.GG.is_agx():                       # V4.8: force setting from the skill's clamp force
+                    r = self.grip.clamp(force=self.GG.force_level(float(knobs["cup_clamp_force_n"])))
+                else:
+                    pct = float(tq) if tq else self.GR.clamp_torque_pct(knobs["cup_clamp_force_n"], self._so101().cfg)
+                    r = self.grip.clamp(pct)
             elif what == "touch":                     # V3.67 EMPTY-CLAMP CALIBRATION
                 r = self.grip.calibrate_touch()
                 if r.get("ok"):
                     self.st = dict(self.st, gripper=dict(self.st.get("gripper") or {},
-                                                        touch_deg=self.grip.cfg["touch_deg"], touch_calibrated=True))
+                                                        touch_deg=self._so101().cfg["touch_deg"], touch_calibrated=True))
                     save_settings(self.st, self.settings_path)
             else:
                 r = {"ok": bool(self.grip.relax()[0])}
@@ -3867,7 +3961,7 @@ class RealCupTaskTabUI:
 
     def _collect_settings(self):
         d = dict(self.st)
-        d["gripper"] = {k: self.grip.cfg[k] for k in ("port", "baud", "servo_id", "open_sign", "touch_deg",
+        d["gripper"] = {k: self._so101().cfg[k] for k in ("port", "baud", "servo_id", "open_sign", "touch_deg",
                                                       "touch_calibrated")}
         try:
             d["geometry"] = self.geometry_cfg()                       # V3.67
@@ -4007,7 +4101,8 @@ class RealCupTaskTabUI:
             if w is not None and w.is_alive():
                 bad.append("Camera调试 页正在执行操作")
         if mode == "execute" and not self.grip.connected:
-            bad.append("SO-101 夹爪没有连接")
+            bad.append(f"{self.GG.SHORT[self.GG.active_type()]} 夹爪没有连接"
+                       + ("（实机NERO调试 → 夹爪 → 连接）" if self.GG.is_agx() else ""))
         return bad
 
     def on_perceive(self):
@@ -4088,7 +4183,7 @@ class RealCupTaskTabUI:
                                           query=self.v_cup_prompt.get().strip() or "cup")
         # V3.71 LIVE OVERLAY: every perception of the task (observe / pick / place / verify) goes to the monitor at once
         io.on_perception = lambda res, io_=io: self._ui(lambda: self._apply_overlay(res, getattr(io_, "skills", None)))
-        touch_ok = bool(self.grip.cfg.get("touch_calibrated"))
+        touch_ok = bool(self._so101().cfg.get("touch_calibrated")) or self.GG.is_agx()
         geo = {k: mc.get(k) for k in ("roll_deg", "clearance_mm", "seat_mm", "ring_mm")}
         setup = (f"skill [{skill.get('code')}] · SO-101 偏转 {geo['roll_deg']:+.0f}° · 离杯壁 {geo['clearance_mm']:.0f} mm · "
                  f"空夹标定 {'已做' if touch_ok else '未做'} · 关节 {mc['joint_vmax_deg_s']} °/s · 直线 "
