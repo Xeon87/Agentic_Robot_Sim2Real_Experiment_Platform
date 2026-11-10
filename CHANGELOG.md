@@ -1,3 +1,15 @@
+## V4.6.13 (2026-11-09) — 打印的转接环 + 腕部相机支架 + ArUco 支架进入放蛋规划的离桌检查
+- 新 `NERO_V4613_Tool_Collision.py`（`V4.6.13 ADAPTER + WRIST CAMERA COLLISION`）：
+  - 读取 STL；按 y ≥ 25 mm 分出相机托架，x ≥ 23 mm 分出 ArUco 支架，其余为转接环；各自的包围盒加 `margin_mm`，相机托架再加 `camera_pad_mm`。
+  - 安装：STL z → link7 +x（工具轴，z=0 在夹爪座面），绕轴角度由腕部手眼的 `T_flange_cam` 自动求出（`auto_roll_deg`），或用配置值；另在标定的相机光心放一个 `camera_head_mm` 立方体。
+  - `ToolModel.clear_of_table(T_base_l7, z_table)` 返回是否满足、余量和最低的部件。
+  - 新增 `config/tool_collision.json`、`assets/adapter/SO101_NERO_adapter_v5_PRINT.stl`。
+- `NERO_V365_Real_Cup_Task.py`（`V4.6.13 ADAPTER + WRIST CAMERA TABLE CLEARANCE IN PLANNING`）：
+  - `_check_path_fence` 先检查工具方块离桌面的距离（路径加密 5 倍，插入直线全程），再查围栏；`_fence_why` 记录被否决的原因。
+  - `_plan_slot_candidates` 拆出 `_slot_pass`，记录每个俯仰符号被否决的原因；第一轮没有候选时，按每 15° 一个朝向再找一遍；`_log_place_choice` 输出 `[V4.6.13 PLACE]`。
+- 测试：新 `tests/test_v4_6_13.py`（6 项），其中 A3 用用户 15:18 那次的槽位复算：+85° 时相机托架在桌面以下，规划结果为 −85°，离桌面 ≥ 8 mm。
+- **没有在真实硬件上运行过。**
+
 ## V4.6.12 (2026-11-09) — 蛋托槽位落回槽里（用户真实画面验证）+ 槽被占判断 + 桌面高度选项 A
 - `NERO_V349_Real_Wrist_Camera.py`（`V4.6.12 CUPS INSIDE THE OUTLINE + OCCUPIED NEEDS RIM TOP`）：
   - `footprint_ok_map`：全部蛋托 mask 像素经射线投到桌面平面（蛋托半高处），再向内腐蚀 `CUP_EDGE_CLEAR_FRAC = 0.30` × 孔距；`fit_carton_template(foot_st_mm=…)` 在此区域以外的碗形分数一律记为 -5。

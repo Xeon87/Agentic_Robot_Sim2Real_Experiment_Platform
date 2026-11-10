@@ -1073,6 +1073,7 @@ VERIFY_RISE_GAIN_MM = 15.0        # verify: cup middle this much higher than bef
 JAW_CLEAR_M = 0.006               # place: jaw tip >= egg radius + this from an egg already standing next to the slot
 JAW_REACH_M = 0.027               # jaw tip distance from the held egg's centre along the closing axis
 FILL_MAX_FAILS = 3                # fill the carton: stop after this many eggs that could not be placed
+MARKER_V4613 = "V4.6.13 ADAPTER + WRIST CAMERA TABLE CLEARANCE IN PLANNING"
 MARKER_V4612 = "V4.6.12 TABLE HEIGHT 15-25 MM WARN WITH TRY HARDER"
 MARKER_V4610 = "V4.6.10 VERIFY BY RELEASE POSITION + TRY HARDER VERIFY + UNCONFIRMED CONTINUE"
 VERIFY_RAISE_M = 0.10             # V4.6.10: look k (k >= 1) from k x this higher (joint-space move if the line fails)
@@ -1303,9 +1304,49 @@ class RealEggSkills:
                 self._urdf_fence_cache = None
         return self._urdf_fence_cache
 
+    def _tool_model(self):
+        """V4.6.13: the printed adapter + wrist camera cradle + ArUco plate (NERO_V4613_Tool_Collision), once"""
+        if not hasattr(self, "_tool_cache"):
+            try:
+                import NERO_V4613_Tool_Collision as TC
+                self._tool_cache = TC.ToolModel()
+                self.io.emit(f"[{'INFO' if self._tool_cache.ok else 'WARN'}] [V4.6.13 TOOL] {self._tool_cache.note}")
+            except Exception as exc:
+                self._tool_cache = None
+                self.io.emit(f"[WARN] [V4.6.13 TOOL] 转接环 / 相机支架碰撞模型没加载：{exc}")
+        return self._tool_cache if (self._tool_cache is not None and self._tool_cache.ok) else None
+
+    def _tool_clear(self, qs, zt):
+        """V4.6.13: every joint state in qs keeps the adapter / camera boxes above the table -> (ok, worst)"""
+        tm = self._tool_model()
+        if tm is None:
+            return True, None
+        Ti = np.linalg.inv(self.CK.T_L7_TCP)
+        worst = None
+        for q in qs:
+            ok, dz, part = tm.clear_of_table(self._fast.fk(np.asarray(q, float)) @ Ti, zt)
+            if worst is None or dz < worst[0]:
+                worst = (dz, part)
+            if not ok:
+                return False, worst
+        return True, worst
+
     def _check_path_fence(self, q_waypoints, zt: float) -> bool:
         """Verify that every waypoint and interpolated joint step along `q_waypoints` stays strictly inside the
-        workspace polygon fence (including `link3` / `link2~link3` against the `M1-M2` side wall)."""
+        workspace polygon fence (including `link3` / `link2~link3` against the `M1-M2` side wall).
+        V4.6.13: also the printed adapter, the wrist camera cradle / lens and the ArUco plate stay >= clearance above
+        the table (self._fence_why says which check failed)."""
+        self._fence_why = None
+        dense = []
+        for idx in range(len(q_waypoints) - 1):
+            qa = np.asarray(q_waypoints[idx], float)
+            qb = np.asarray(q_waypoints[idx + 1], float)
+            for k in range(5):
+                dense.append(qa + (qb - qa) * (k / 4.0))
+        ok_t, worst = self._tool_clear(dense or [np.asarray(q, float) for q in q_waypoints], zt)
+        if not ok_t:
+            self._fence_why = ("tool", worst)
+            return False
         cache = self._init_fence_checker(zt)
         if not cache:
             return True
@@ -1321,6 +1362,7 @@ class RealEggSkills:
                 pts.append(list(qa + (qb - qa) * (k / float(n_seg))))
         viol = CS.path_fence_check(U, self._fast.joints, self._fast.joints, pts, "base_link", f_cfg, so101_T)
         if viol:
+            self._fence_why = ("fence", None)
             return False
         # Also verify against live RealPipeline safety_fn if attached
         arm = getattr(self.io, "arm", None)
@@ -1330,6 +1372,7 @@ class RealEggSkills:
             for qw in q_waypoints[1:]:
                 ok_g, _txt, _v = pipe.fence_goal_check(model, qw, tool_T=so101_T, tool_z_min_above_table_m=TIP_PLAN_CLEAR_M)
                 if not ok_g:
+                    self._fence_why = ("fence", None)
                     return False
         return True
 
@@ -1533,6 +1576,45 @@ class RealEggSkills:
         if occ_xy:
             yaw_order = tuple(yaw_order) + tuple(float(a) for a in range(-165, 181, 15) if float(a) not in yaw_order)
         cands = []
+        why = {}                                      # V4.6.13: pitch sign -> rejection counts
+
+        def _rej(pitch, key, extra=None):
+            d = why.setdefault("+" if pitch > 0 else "-", {"ik": 0, "joint": 0, "fence": 0, "tool": 0, "tool_min": None})
+            d[key] += 1
+            if key == "tool" and extra is not None and (d["tool_min"] is None or extra[0] > d["tool_min"][0]):
+                d["tool_min"] = extra
+        yaw_orders = [yaw_order, tuple(float(a) for a in range(-165, 181, 15))]   # V4.6.13: 2nd pass every 15 deg
+        for yaw_order in yaw_orders:
+            self._slot_pass(cands, pitch_order, yaw_order, seeds, tip_target, egg_in_G, half_len_m, occ_xy, q_from, zt,
+                            p_slot, _rej)
+            if cands:
+                break
+        self._log_place_choice(slot, cands, why, pitch_order)
+        cands.sort(key=lambda c: (-int(c["margin"] >= 5.0), c["vert_err_deg"], -c["margin"]))
+        return cands
+
+    def _log_place_choice(self, slot, cands, why, pitch_order):
+        """V4.6.13: one line - which pitch was used and why the other one was refused"""
+        cn = {"ik": "IK 无解 / 分支不对", "joint": "关节限位", "fence": "围栏", "tool": "相机 / 支架离桌面太近"}
+        parts = []
+        for sgn, d in sorted(why.items()):
+            items = [f"{cn[k]} {d[k]}" for k in ("ik", "joint", "fence", "tool") if d[k]]
+            if d.get("tool_min"):
+                import NERO_V4613_Tool_Collision as TC
+                items[-1 if d["tool"] else 0] += f"（最好的一次 {TC.PART_CN.get(d['tool_min'][1], d['tool_min'][1])} 离桌面 {d['tool_min'][0]:.0f} mm）"
+            if items:
+                parts.append(f"俯仰 {sgn}：" + "、".join(items))
+        sid = next((k for k, v in self.cam.items() if v is slot), "slot")
+        if cands:
+            c0 = sorted(cands, key=lambda c: (-int(c["margin"] >= 5.0), c["vert_err_deg"], -c["margin"]))[0]
+            if parts:
+                self.io.emit(f"[INFO] [V4.6.13 PLACE] {sid}：用俯仰 {c0['pitch_deg']:+.0f}°、朝向 {c0['pyaw']:.0f}°；"
+                             "其他被否决 —— " + "；".join(parts))
+        else:
+            self.io.emit(f"[WARN] [V4.6.13 PLACE] {sid}：两种插法都不行 —— " + ("；".join(parts) or "没有候选"))
+
+    def _slot_pass(self, cands, pitch_order, yaw_order, seeds, tip_target, egg_in_G, half_len_m, occ_xy, q_from, zt,
+                   p_slot, _rej):
         for pitch_deg in pitch_order:
             for pyaw in yaw_order:
                 R_rel_g = self._slot_vertical_grasp_R(pyaw, pitch_deg)
@@ -1544,26 +1626,33 @@ class RealEggSkills:
                 for sd in seeds:
                     r1 = self._fast.ik([sd], p_above, R_rel, iters=30)
                     if not r1 or r1[0] is None:
+                        _rej(pitch_deg, "ik")
                         continue
                     q_above = list(r1[0])
                     if q_above[1] < -0.20 or abs(q_above[0] - q_from[0]) > math.radians(85.0):
+                        _rej(pitch_deg, "ik")
                         continue
                     r2 = self._fast.ik([q_above], p_rel, R_rel, iters=25)
                     if not r2 or r2[0] is None:
+                        _rej(pitch_deg, "ik")
                         continue
                     q_rel = list(r2[0])
                     chk = self.CK.check_joint_path([q_from, q_above, q_rel], jump_deg=1e9)
                     if not chk.get("ok"):
+                        _rej(pitch_deg, "joint")
                         break  # Same-branch wrist limit reached at this (pitch, yaw); move to next yaw/pitch immediately
                     line_ins = self._line_qs(q_above, p_above, p_rel, R_rel)   # V4.5: the executed straight line
                     chk_line = (self.CK.check_joint_path(line_ins, margin_deg=self.CK.PATH_MARGIN_DEG + PLAN_MARGIN_HEADROOM_DEG)
                                 if line_ins else {"ok": False})
                     if not chk_line.get("ok"):
+                        _rej(pitch_deg, "joint")
                         break
                     q_rel = list(line_ins[-1])
                     chk = dict(chk, min_margin_deg=min(float(chk.get("min_margin_deg", 99.0)),
                                                        float(chk_line.get("min_margin_deg", 99.0))))
-                    if not self._check_path_fence([q_from, q_above, q_rel], zt):
+                    if not self._check_path_fence([q_from, q_above] + [list(q) for q in line_ins], zt):
+                        fw = getattr(self, "_fence_why", None) or ("fence", None)
+                        _rej(pitch_deg, fw[0], fw[1])
                         continue
                     egg_long_axis = R_rel_g[:, 0]
                     vert_err = math.degrees(math.acos(min(1.0, abs(float(egg_long_axis[2])))))
@@ -1583,8 +1672,6 @@ class RealEggSkills:
                     break
             if cands:
                 break
-        cands.sort(key=lambda c: (-int(c["margin"] >= 5.0), c["vert_err_deg"], -c["margin"]))
-        return cands
 
     # ------------------------------------------------------------------ V4.6.8 helpers
     def _pitch_m(self):

@@ -1,0 +1,11 @@
+{
+ "_说明": "V4.6.13 转接环 + 腕部相机支架 + ArUco 支架的碰撞检查（模型 assets/adapter/SO101_NERO_adapter_v5_PRINT.stl）。roll_deg 为 null 时按腕部手眼标定自动对齐；换了支架就换 STL 文件并重做腕部手眼标定。",
+ "enabled": true,
+ "clearance_mm": 8.0,
+ "margin_mm": 3.0,
+ "camera_pad_mm": 6.0,
+ "camera_head_mm": 30.0,
+ "roll_deg": null,
+ "default_roll_deg": 180.0,
+ "seat_x_mm": null
+}

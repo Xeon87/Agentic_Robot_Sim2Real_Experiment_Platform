@@ -230,7 +230,7 @@ class TestV4610(unittest.TestCase):
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
         self.assertEqual((C.VERSION, RR.VERSION), (v, v))
-        self.assertIn(v, ("V4.6.10", "V4.6.11", "V4.6.12"))
+        self.assertIn(v, ("V4.6.10", "V4.6.11", "V4.6.12", "V4.6.13"))
         self.assertEqual(RT.MARKER_V4610, "V4.6.10 VERIFY BY RELEASE POSITION + TRY HARDER VERIFY + UNCONFIRMED CONTINUE")
         self.assertEqual(C.MARKER_V4610, "V4.6.10 DEPTH DEFAULT 848x480 + DEFAULT")
 

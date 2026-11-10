@@ -121,7 +121,8 @@ class TestV4612(unittest.TestCase):
         import NERO_V313_Real_Robot as RR
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
-        self.assertEqual((v, C.VERSION, RR.VERSION), ("V4.6.12", "V4.6.12", "V4.6.12"))
+        self.assertEqual((C.VERSION, RR.VERSION), (v, v))
+        self.assertIn(v, ("V4.6.12", "V4.6.13"))
         self.assertEqual(W.MARKER_V4612_TEMPLATE, "V4.6.12 CUPS INSIDE THE OUTLINE + OCCUPIED NEEDS RIM TOP")
         self.assertEqual(RT.MARKER_V4612, "V4.6.12 TABLE HEIGHT 15-25 MM WARN WITH TRY HARDER")
 

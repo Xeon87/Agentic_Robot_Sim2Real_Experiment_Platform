@@ -290,7 +290,7 @@ class TestV468(unittest.TestCase):
         import NERO_V313_Real_Robot as RR
         v = open(os.path.join(HERE, "VERSION")).read().strip()
         self.assertEqual((C.VERSION, RR.VERSION), (v, v))
-        self.assertIn(v, ("V4.6.8", "V4.6.9", "V4.6.10", "V4.6.11", "V4.6.12"))
+        self.assertIn(v, ("V4.6.8", "V4.6.9", "V4.6.10", "V4.6.11", "V4.6.12", "V4.6.13"))
         self.assertEqual(RT.MARKER_V468, "V4.6.8 FILL CARTON + VERIFY BY RISE + TRY HARDER")
 
 
