@@ -1,3 +1,8 @@
+## V4.7.1 (2026-11-10) — 修复：腕部相机内参每次启动被误判为"旧 130° 镜头"而丢掉
+- `NERO_V386_Real_Wrist_Camera.py` `sanitize_intrinsics_for_model`：去掉按畸变判断的两条规则（|k1| > 0.20、8 参数模型高阶项 > 0.15），只按 fx/w < 0.45 或文件记录的相机名（1080P / 130°）判断；文件记录为 4MP / OV4688 的一律保留；提示语加上"请重新标定内参"。`NERO_V325_Camera.py` 冻结未改。
+- 测试：新 `tests/test_v4_7_1.py`（4 项，用用户这次的内参数值）；`test_v3_88` 原有判断照常通过；版本白名单补 V4.7.1。
+- **没有在真实硬件上运行过。**
+
 ## V4.7 (2026-11-10) — Smol VLA 页：一键准备 + Episode 浏览 / 播放 / 回放 / 删除
 - `NERO_V4_Console_Tab.py`（`V4.7 ONE-CLICK PREPARE + EPISODE BROWSER`）：
   - 「① 准备」：`一键准备`（`on_prepare_all` → 后台线程 `_prep_job`），共 10 项 `PREP_STEPS`。会自动挂载硬盘、建目录，通过 `_post` 在 Tk 线程连接主相机 / 腕部相机 / 夹爪，并用 `_load_vla_sync` 加载 SmolVLA；**不会使能 NERO**。「① 准备」标签带灯（`lamp_images`：灰 / 忙 / 绿 / 黄）；硬盘拔出时绿灯变黄。

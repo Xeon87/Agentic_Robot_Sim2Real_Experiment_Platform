@@ -216,9 +216,15 @@ def sanitize_intrinsics_for_model(intr, camera_model=WRIST_CAMERA_MODELS[0], res
     fx_ratio = float(K.get("fx") or 0.0) / max(1.0, kw)
     dist = [float(v) for v in (intr.get("dist") or [])]
     saved_mod = str(intr.get("camera_model") or "")
-    # Old 130° wide-angle lens had fx_ratio ~ 0.35..0.41 or strong barrel/rational distortion (|k1| > 0.22 or len > 5 with large higher-order terms)
-    if ("1080P" in saved_mod or "130°" in saved_mod) or fx_ratio < 0.45 or (dist and abs(dist[0]) > 0.20) or (len(dist) >= 8 and any(abs(v) > 0.15 for v in dist[2:8])):
-        return nom_4mp, True, f"检测到旧 130° 广角镜头内参 (fx/w={fx_ratio:.2f}, k1={dist[0] if dist else 0:.2f}) 与当前 4MP OV4688 不匹配 → 已自动隔离并启用 OV4688 标准无畸变内参"
+    # V4.7.1: ONLY the focal length (or the saved camera name) tells the old 130 deg lens apart (fx / w ~ 0.35-0.41).
+    # V3.88 also discarded every file with |k1| > 0.20 or an 8-parameter rational model with a higher term > 0.15 -
+    # but the default intrinsics model IS the 8-parameter rational one, whose k4..k6 are routinely that large: the
+    # user's freshly calibrated 4MP intrinsics (fx / w = 0.76) were thrown away at EVERY start and the nominal
+    # fx = 0.55 w used instead (27 % off) -> the saved wrist hand-eye no longer matched and had to be redone each time.
+    saved_4mp = ("4MP" in saved_mod or "OV4688" in saved_mod) and "备用" not in saved_mod
+    if not saved_4mp and (("1080P" in saved_mod or "130°" in saved_mod) or fx_ratio < 0.45):
+        return nom_4mp, True, (f"检测到旧 130° 广角镜头内参 (fx/w={fx_ratio:.2f}，130° 镜头约 0.35–0.41) 与当前 4MP OV4688 "
+                               "不匹配 → 已自动隔离并启用 OV4688 标准无畸变内参；请在「内参标定」页给腕部相机重新标定内参")
     return intr, False, ""
 
 
