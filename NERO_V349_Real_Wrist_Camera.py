@@ -31,6 +31,7 @@ DEFAULT_WRIST_INTR_PATH = WRIST_INTR_PATH
 WRIST_HANDEYE_PATH = os.path.join(HERE, "config", "wrist_handeye_calib.json")
 DEFAULT_WRIST_HANDEYE_PATH = WRIST_HANDEYE_PATH
 WRIST_INTR_SAMPLES_PATH = os.path.join(HERE, "config", "wrist_intrinsics_samples.json")
+PLANNING_K_FN = None             # V4.7.2: callable (w, h) -> K of the wrist camera in use (set by NERO_V472_Wrist_Calib)
 EIH_TARGET_MODES = ("ChArUco标定板/单码自适应 (推荐)", "ChArUco 标定板 (7×5 高精度)", "单张 ArUco 标记")
 
 WRIST_RES_LIST = ("1920×1080", "1280×720")
@@ -857,8 +858,7 @@ def detect_charuco_pose(rgb, K, dist=None, board_cfg=None, model_type=None):
         Dm = np.asarray((d_list + [0.0] * 4)[:4], dtype=np.float64).reshape(4, 1)
         pts_u = cv2.fisheye.undistortPoints(img_pts.reshape(-1, 1, 2), Km, Dm, P=Km).reshape(-1, 2)
     else:
-        if len(d_list) > 5 and any(abs(v) > 8.0 for v in d_list[:8]):
-            d_list = d_list[:5]
+        # V4.7.2: no 8 -> 5 truncation (rational model: k4..k6 cancel k1..k3)
         if len(d_list) in (4, 5, 8, 12, 14):
             dc = np.asarray(d_list, dtype=np.float64)
         elif len(d_list) > 5:
@@ -884,8 +884,11 @@ def detect_charuco_pose(rgb, K, dist=None, board_cfg=None, model_type=None):
         except Exception:
             pass
 
+    alts = planar_pose_candidates(obj_c, pts_u, Km)                           # V4.7.2 both planar solutions
     flag = getattr(cv2, "SOLVEPNP_IPPE", cv2.SOLVEPNP_ITERATIVE)
     ok, rvec, tvec = cv2.solvePnP(obj_c, pts_u, Km, np.zeros(5, dtype=np.float64), flags=flag)
+    if alts:
+        ok, rvec, tvec = True, np.asarray(alts[0][0], dtype=np.float64), np.asarray(alts[0][1], dtype=np.float64)
     if not ok or float(np.asarray(tvec).flatten()[2]) <= 0.04:
         ok, rvec, tvec = cv2.solvePnP(obj_c, pts_u, Km, np.zeros(5, dtype=np.float64), flags=cv2.SOLVEPNP_ITERATIVE)
     if not ok:
@@ -922,6 +925,7 @@ def detect_charuco_pose(rgb, K, dist=None, board_cfg=None, model_type=None):
         "normal_cam": normal_cam,
         "side_px": side_px,
         "reproj_px": round(reproj_px, 3),
+        "pose_alts": [[list(a[0]), list(a[1]), round(a[2], 3)] for a in alts] if len(alts) >= 2 else [],
     }
 
 
@@ -939,8 +943,18 @@ def plan_intr_auto_targets(fk_fn, q0_rad, limits_rad, s0_board=None, image_size=
     if T0 is None:
         return [], {"tries": 0, "pool": 0, "rejected": {"FK": 1}}
     w, h = int(image_size[0]), int(image_size[1])
-    # Realistic 130-deg wide-angle focal prior (fx ≈ 0.38 * w = 730 px on 1920x1080)
-    K_approx = {"width": w, "height": h, "fx": 0.38 * w, "fy": 0.38 * w, "ppx": 0.5 * w, "ppy": 0.5 * h}
+    # V4.7.2: plan with the best KNOWN intrinsics of the camera in use (the console sets PLANNING_K_FN: the loaded
+    # calibration, else the last saved one).  V3.57 used a fixed 130 deg wide-angle prior fx = 0.38 w - the 4MP
+    # wrist camera has fx ~ 0.77 w, so the planner believed the view twice as wide and ~40 % of the poses lost the
+    # board ("ChArUco 角点太少 0/≥6"), the rest crowded the board into one image corner.
+    K_approx = None
+    if PLANNING_K_FN is not None:
+        try:
+            K_approx = PLANNING_K_FN(w, h)
+        except Exception:
+            K_approx = None
+    if not K_approx:
+        K_approx = {"width": w, "height": h, "fx": 0.38 * w, "fy": 0.38 * w, "ppx": 0.5 * w, "ppy": 0.5 * h}
     cfg = dict(DEFAULT_BOARD, **(board_cfg or {}))
     sq_m = float(cfg.get("square_mm", 32.0)) / 1000.0
     cols, rows = int(cfg.get("cols", 7)), int(cfg.get("rows", 5))
@@ -1171,6 +1185,124 @@ def plan_intr_auto_targets(fk_fn, q0_rad, limits_rad, s0_board=None, image_size=
     return chosen, {"tries": tries, "pool": len(pool), "rejected": rej}
 
 
+
+# ---- V4.7.2 PLANAR POSE AMBIGUITY -------------------------------------------------------------------------------
+# A flat target (ChArUco board, ArUco marker) seen nearly face-on has TWO poses with almost the same reprojection
+# error (mirror tilt about the line of sight).  solvePnP(IPPE) returns the one with the smaller error, so a little
+# noise / undistortion error can flip the tilt by tens of degrees while the position stays right (V3.58 board test
+# with the 8-parameter model: 7 of 9 views mirrored -> 51 / 173 mm hand-eye).  The wrist camera looks almost straight
+# down on the board, i.e. exactly this case.
+# Fix: keep both solutions per view and pick the one that agrees with the robot motion (camera fixed on the flange,
+# target fixed: angle(B_i B_j^-1) == angle(A_i^-1 A_j), whatever the hand-eye is).
+PLANAR_ALT_MAX_PX = 1.5            # an alternative is plausible if its error <= best + max(this, 2 * best)
+
+
+def planar_pose_candidates(obj, pts_u, Km):
+    """both IPPE solutions of a planar target (z = 0 object points, undistorted image points)
+    -> [(rvec[3], tvec[3], err_px)] best first; only plausible alternatives (see PLANAR_ALT_MAX_PX)"""
+    cv2 = _cv2()
+    import numpy as np
+    obj = np.asarray(obj, dtype=np.float64).reshape(-1, 3)
+    pts = np.asarray(pts_u, dtype=np.float64).reshape(-1, 2)
+    z5 = np.zeros(5, dtype=np.float64)
+    sols = []
+    try:
+        flag = cv2.SOLVEPNP_IPPE_SQUARE if len(obj) == 4 and hasattr(cv2, "SOLVEPNP_IPPE_SQUARE") else cv2.SOLVEPNP_IPPE
+        _n, rvs, tvs, _e = cv2.solvePnPGeneric(obj, pts, Km, z5, flags=flag)
+        sols = list(zip(rvs or [], tvs or []))
+    except Exception:
+        sols = []
+    out = []
+    for rv, tv in sols:
+        if float(np.asarray(tv).flatten()[2]) <= 0.02:
+            continue
+        if hasattr(cv2, "solvePnPRefineLM") and len(obj) > 4:
+            try:
+                rv, tv = cv2.solvePnPRefineLM(obj, pts, Km, z5, np.asarray(rv).copy(), np.asarray(tv).copy())
+            except Exception:
+                pass
+        pr, _ = cv2.projectPoints(obj, rv, tv, Km, z5)
+        e = float(np.sqrt(np.mean(np.sum((pr.reshape(-1, 2) - pts) ** 2, axis=1))))
+        out.append(([float(v) for v in np.asarray(rv).flatten()], [float(v) for v in np.asarray(tv).flatten()], e))
+    out.sort(key=lambda c: c[2])
+    if out:
+        lim = out[0][2] + max(PLANAR_ALT_MAX_PX, 2.0 * out[0][2])
+        out = [c for c in out if c[2] <= lim]
+    return out
+
+
+def _rot_angle_deg(R):
+    import numpy as np
+    return math.degrees(math.acos(max(-1.0, min(1.0, (float(np.trace(R)) - 1.0) / 2.0))))
+
+
+def disambiguate_planar_samples(samples):
+    """pick, per hand-eye sample with 'pose_alts', the planar pose that agrees with the robot motion.
+    Only the rotation (rvec / T_cam_marker) is replaced; p_cam stays (it may be averaged or from depth).
+    -> (samples (new list, changed ones copied), n_changed)"""
+    import numpy as np
+    n = len(samples or [])
+    if n < 3 or not any(len(s.get("pose_alts") or []) >= 2 for s in samples):
+        return samples, 0
+    try:
+        RA = [np.asarray(s["T_base_flange"], float)[:3, :3] for s in samples]
+        cands = []
+        for s in samples:
+            alts = s.get("pose_alts") or []
+            if len(alts) >= 2:
+                cands.append([np.asarray(CAM.rodrigues(list(a[0])), float) for a in alts])
+            else:
+                cands.append([np.asarray(s["T_cam_marker"], float)[:3, :3]])
+        dA = [[_rot_angle_deg(RA[i].T @ RA[j]) for j in range(n)] for i in range(n)]
+        M = {}
+        for i in range(n):
+            for j in range(i + 1, n):
+                for a, Ri in enumerate(cands[i]):
+                    for b, Rj in enumerate(cands[j]):
+                        M[i, a, j, b] = M[j, b, i, a] = abs(_rot_angle_deg(Ri @ Rj.T) - dA[i][j])
+
+        def cost_i(i, a, ch):
+            return sum(M[i, a, j, ch[j]] for j in range(n) if j != i)
+
+        def descend(ch):
+            for _ in range(8):
+                moved = False
+                for i in range(n):
+                    if len(cands[i]) < 2:
+                        continue
+                    best = min(range(len(cands[i])), key=lambda a: cost_i(i, a, ch))
+                    if cost_i(i, best, ch) < cost_i(i, ch[i], ch) - 1e-9:
+                        ch[i] = best
+                        moved = True
+                if not moved:
+                    break
+            return ch, sum(cost_i(i, ch[i], ch) for i in range(n))
+
+        best_ch, best_c = descend([0] * n)
+        for k in range(n):                                  # every view / solution as the anchor
+            for a in range(len(cands[k])):
+                ch = [0] * n
+                ch[k] = a
+                for i in range(n):
+                    if i != k and len(cands[i]) >= 2:
+                        ch[i] = min(range(len(cands[i])), key=lambda c: M[i, c, k, a])
+                ch, c = descend(ch)
+                if c < best_c - 1e-9:
+                    best_ch, best_c = ch, c
+    except Exception:
+        return samples, 0
+    out, changed = [], 0
+    for s, c in zip(samples, best_ch):
+        alts = s.get("pose_alts") or []
+        if len(alts) >= 2:
+            rv = [float(v) for v in alts[c][0]]
+            if _rot_angle_deg(np.asarray(CAM.rodrigues(rv), float).T @ np.asarray(s["T_cam_marker"], float)[:3, :3]) > 1.0:
+                changed += 1
+            s = dict(s, rvec=rv, T_cam_marker=CAM.T_from(CAM.rodrigues(rv), list(s["p_cam"])), pose_pick=int(c))
+        out.append(s)
+    return out, changed
+
+
 def eih_samples_from_intr_samples(intr_samples, K, dist=None, board_cfg=None, model_type=None):
     """V3.57/V3.58 ONE-PASS JOINT CALIBRATION BRIDGE:
     Convert captured intrinsic board samples that include robot pose ('q_deg' and 'T_base_flange') into
@@ -1190,8 +1322,7 @@ def eih_samples_from_intr_samples(intr_samples, K, dist=None, board_cfg=None, mo
                    [0.0, float(K["fy"]), float(K["ppy"])],
                    [0.0, 0.0, 1.0]], dtype=np.float64)
     d_list = [float(v) for v in (dist or [0.0] * 5)]
-    if len(d_list) > 5 and any(abs(v) > 8.0 for v in d_list[:8]):
-        d_list = d_list[:5]
+    # V4.7.2: no 8 -> 5 truncation: the rational model's k4..k6 (denominator) cancel k1..k3, dropping them is wrong
     mtype = str(model_type or DIST_MODELS[0])
     raw_out = []
     for s in intr_samples:
@@ -1221,8 +1352,11 @@ def eih_samples_from_intr_samples(intr_samples, K, dist=None, board_cfg=None, mo
                         pts_u = pts_u[keep]
             except Exception:
                 pass
+        alts = planar_pose_candidates(obj_c, pts_u, Km)                       # V4.7.2 both planar solutions
         flag = getattr(cv2, "SOLVEPNP_IPPE", cv2.SOLVEPNP_ITERATIVE)
         ok, rvec, tvec = cv2.solvePnP(obj_c, pts_u, Km, np.zeros(5, dtype=np.float64), flags=flag)
+        if alts:
+            ok, rvec, tvec = True, np.asarray(alts[0][0], dtype=np.float64), np.asarray(alts[0][1], dtype=np.float64)
         if not ok or float(np.asarray(tvec).flatten()[2]) <= 0.04:
             ok, rvec, tvec = cv2.solvePnP(obj_c, pts_u, Km, np.zeros(5, dtype=np.float64), flags=cv2.SOLVEPNP_ITERATIVE)
         if not ok:
@@ -1247,6 +1381,7 @@ def eih_samples_from_intr_samples(intr_samples, K, dist=None, board_cfg=None, mo
             "reproj_px": round(reproj_px, 3),
             "n_corners": int(len(obj_c)),
             "source": "charuco",
+            "pose_alts": [[list(a[0]), list(a[1]), round(a[2], 3)] for a in alts] if len(alts) >= 2 else [],
         })
     # If we have >= 9 samples, drop extreme PnP reprojection outliers (> max(1.8 px, 2.2 * median)) while keeping >= 8
     if len(raw_out) > 8:
@@ -1576,6 +1711,14 @@ def calibrate_eye_in_hand(samples, size_mm=40.0, reject_mm=5.0, min_samples=HAND
     wide-angle intrinsic fx/fy inflation)."""
     if len(samples) < min_samples:
         return {"ok": False, "error": f"至少需要 {min_samples} 个样本（现在 {len(samples)} 个）"}
+    samples, n_flip = disambiguate_planar_samples(samples)                   # V4.7.2
+    r = _calibrate_eye_in_hand_v356(samples, size_mm=size_mm, reject_mm=reject_mm, min_samples=min_samples)
+    if isinstance(r, dict) and r.get("ok"):
+        r["planar_flips_fixed"] = n_flip
+    return r
+
+
+def _calibrate_eye_in_hand_v356(samples, size_mm=40.0, reject_mm=5.0, min_samples=HANDEYE_MIN_SAMPLES):
     best = _calibrate_eih_at_scale(samples, scale=(1.0, 1.0), size_mm=size_mm, reject_mm=reject_mm, min_samples=min_samples)
     if not best["good"] and len(samples) >= min_samples:
         used0 = best["used"] if len(best["used"]) >= min_samples else list(range(len(samples)))

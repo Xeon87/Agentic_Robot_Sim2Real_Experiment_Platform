@@ -503,6 +503,9 @@ def _is_axis_aligned_charuco_box(corners_px):
         return False
 
 
+SELF_CAL_ALLOWED = True          # V4.7.2: set False while measured intrinsics are loaded (NERO_V472_Wrist_Calib)
+
+
 def calibrate_eih_4mp(samples, size_mm=24.0, reject_mm=5.0, min_samples=W49.HANDEYE_MIN_SAMPLES):
     """V3.89 GLOBAL KRONECKER + CORNER (fx, k1) + 2D SCALE EYE-IN-HAND SOLVER:
     1. Evaluates current samples at scale=(1.0, 1.0) using the Kronecker-seeded optical-axis stabilized solver;
@@ -514,11 +517,23 @@ def calibrate_eih_4mp(samples, size_mm=24.0, reject_mm=5.0, min_samples=W49.HAND
     if len(samples) < min_samples:
         return {"ok": False, "error": f"至少需要 {min_samples} 个样本（现在 {len(samples)} 个）"}
 
+    samples, n_flip = W49.disambiguate_planar_samples(samples)            # V4.7.2 planar pose ambiguity
+    r = _calibrate_eih_4mp_v389(samples, size_mm=size_mm, reject_mm=reject_mm, min_samples=min_samples)
+    if isinstance(r, dict) and r.get("ok"):
+        r["planar_flips_fixed"] = n_flip
+    return r
+
+
+def _calibrate_eih_4mp_v389(samples, size_mm=24.0, reject_mm=5.0, min_samples=W49.HANDEYE_MIN_SAMPLES):
     has_corners = all(
         isinstance(s.get("corners_px"), (list, tuple)) and len(s["corners_px"]) == 4
         and s.get("source") != "charuco"
         for s in samples
     ) and not all(_is_axis_aligned_charuco_box(s["corners_px"]) for s in samples)
+    # V4.7.2: never "self-calibrate" fx / k1 from 4 marker corners when real (board) intrinsics are in use - V3.89
+    # then replaced the user's 8-parameter calibration with a 1-parameter guess and saved it over the file
+    if not SELF_CAL_ALLOWED:
+        has_corners = False
 
     best = _calibrate_eih_at_scale_stabilized(samples, scale=(1.0, 1.0), size_mm=size_mm,
                                               reject_mm=reject_mm, min_samples=min_samples)

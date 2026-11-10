@@ -27,6 +27,20 @@ import v347_fake as F                         # noqa: E402
 import NERO_V315_Consistency_Safety as CS     # noqa: E402
 import NERO_V325_Camera as CAM                # noqa: E402
 import NERO_V349_Real_Wrist_Camera as W49     # noqa: E402
+import tempfile as _tf                         # noqa: E402
+# V4.7.2: write calibrations to a temp folder - the test now runs to the end and used to overwrite config/ (the
+# user's real wrist intrinsics / hand-eye) and ~/Downloads/cameracalib
+_TMP = _tf.mkdtemp(prefix="nero_gui_calib_")
+_CFG = os.path.join(_TMP, "config")
+os.makedirs(_CFG)
+CAM.CALIB_PATH = CAM.DEFAULT_CALIB_PATH = os.path.join(_CFG, "camera_calib.json")
+CAM.LOCATE_PATH = CAM.DEFAULT_LOCATE_PATH = os.path.join(_CFG, "locate_settings.json")
+CAM.TCP_CALIB_PATH = CAM.DEFAULT_TCP_CALIB_PATH = os.path.join(_CFG, "tcp_calib.json")
+W49.WRIST_INFO_PATH = os.path.join(_CFG, "wrist_camera_info.json")
+W49.WRIST_INTR_PATH = W49.DEFAULT_WRIST_INTR_PATH = os.path.join(_CFG, "wrist_intrinsics.json")
+W49.WRIST_HANDEYE_PATH = W49.DEFAULT_WRIST_HANDEYE_PATH = os.path.join(_CFG, "wrist_handeye_calib.json")
+CAM.CALIB_DIR = os.path.join(_TMP, "cameracalib")
+os.makedirs(CAM.CALIB_DIR)
 
 TMP = tempfile.mkdtemp(prefix="v357gui_")
 CFG = os.path.join(TMP, "config")
@@ -81,7 +95,8 @@ else:
     BOARD_IMG = BOARD.draw((700, 500))
 
 HW, HH = 0.5 * 7 * 0.032, 0.5 * 5 * 0.032
-OUTER_3D = np.array([[-HW, -HH, 0.0], [HW, -HH, 0.0], [HW, HH, 0.0], [-HW, HH, 0.0]], dtype=np.float64)
+OUTER_3D = np.array([[-HW, HH, 0.0], [HW, HH, 0.0], [HW, -HH, 0.0], [-HW, -HH, 0.0]], dtype=np.float64)
+# V4.7.2: board image row 0 = board +y (the old order rendered a mirror image -> 0 corners, test always failed)
 SRC_OUTER = np.float32([[-0.5, -0.5], [699.5, -0.5], [699.5, 499.5], [-0.5, 499.5]])
 
 

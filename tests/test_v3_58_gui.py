@@ -24,6 +24,40 @@ except Exception as exc:
 import NERO_V315_Consistency_Safety as CS     # noqa: E402
 import NERO_V325_Camera as CAM                # noqa: E402
 import NERO_V349_Real_Wrist_Camera as W49     # noqa: E402
+import tempfile as _tf                         # noqa: E402
+# V4.7.2: write calibrations to a temp folder - the test now runs to the end and used to overwrite config/ (the
+# user's real wrist intrinsics / hand-eye) and ~/Downloads/cameracalib
+_TMP = _tf.mkdtemp(prefix="nero_gui_calib_")
+_CFG = os.path.join(_TMP, "config")
+os.makedirs(_CFG)
+CAM.CALIB_PATH = CAM.DEFAULT_CALIB_PATH = os.path.join(_CFG, "camera_calib.json")
+CAM.LOCATE_PATH = CAM.DEFAULT_LOCATE_PATH = os.path.join(_CFG, "locate_settings.json")
+CAM.TCP_CALIB_PATH = CAM.DEFAULT_TCP_CALIB_PATH = os.path.join(_CFG, "tcp_calib.json")
+W49.WRIST_INFO_PATH = os.path.join(_CFG, "wrist_camera_info.json")
+W49.WRIST_INTR_PATH = W49.DEFAULT_WRIST_INTR_PATH = os.path.join(_CFG, "wrist_intrinsics.json")
+W49.WRIST_HANDEYE_PATH = W49.DEFAULT_WRIST_HANDEYE_PATH = os.path.join(_CFG, "wrist_handeye_calib.json")
+CAM.CALIB_DIR = os.path.join(_TMP, "cameracalib")
+os.makedirs(CAM.CALIB_DIR)
+import threading                              # noqa: E402
+
+
+# V4.7.2: run the camera tab's worker synchronously (as test_v3_57_gui) -- the asserts used to run before it finished
+class SyncThread:
+    def __init__(self, target=None, args=(), kwargs=None, daemon=None, name=None):
+        self.t, self.a, self.k, self.alive = target, args, kwargs or {}, False
+
+    def start(self):
+        self.alive = True
+        try:
+            self.t(*self.a, **self.k)
+        finally:
+            self.alive = False
+
+    def is_alive(self):
+        return self.alive
+
+
+CAM.threading = type("T", (), {"Thread": SyncThread, "Lock": threading.Lock, "Event": threading.Event})
 
 U = CS.load_sim_urdf()
 J = [f"joint{i}" for i in range(1, 8)]
@@ -83,7 +117,7 @@ class FakeMain:
     def start(self):
         self._run = True
 
-    def stop(self):
+    def stop(self, *a, **k):
         self._run = False
 
     def running(self):
@@ -93,7 +127,7 @@ class FakeMain:
         return self.rgb, self.depth, self.frame_id
 
     def display_ppm(self, view="color", roi=None):
-        return CAM.ppm_bytes(cv2.resize(self.rgb, (CAM.DW, CAM.DH)))
+        return CAM.ppm_bytes(cv2.resize(self.rgb, (CAM.CameraTabUI.DW, CAM.CameraTabUI.DH)))
 
     def detect(self, marker):
         return None
@@ -128,7 +162,7 @@ class FakeWrist:
     def start(self):
         self._run = True
 
-    def stop(self):
+    def stop(self, *a, **k):
         self._run = False
 
     def running(self):
@@ -144,7 +178,7 @@ class FakeWrist:
         self.frame_id += 1
         return self.rgb, self.frame_id
 
-    def display_ppm(self, view="color", size=(CAM.DW, CAM.DH)):
+    def display_ppm(self, view="color", size=(CAM.CameraTabUI.DW, CAM.CameraTabUI.DH)):
         self.rgb = render_wrist_charuco(pipe.q)
         return CAM.ppm_bytes(cv2.resize(self.rgb, (int(size[0]), int(size[1]))))
 
@@ -214,11 +248,11 @@ cam.v_inauto.set("10")
 cam.on_intr_auto()
 tick(4)
 
-assert len(cam.intr_samples) >= 8, len(cam.intr_samples)
+assert len(cam.intr_samples) >= 8, (len(cam.intr_samples), logs[-12:])
 assert cam.wrist_intr and cam.wrist_intr["good"] and os.path.isfile(W49.WRIST_INTR_PATH), cam.wrist_intr
 assert abs(cam.wrist_intr["K"]["fx"] - 720.0) < 25.0, cam.wrist_intr["K"]
 # Verify both wrist_calib (saved to disk) and wcalib_result are populated and good!
-assert cam.wrist_calib and cam.wrist_calib["good"] and os.path.isfile(W49.WRIST_HANDEYE_PATH), cam.wrist_calib
+assert cam.wrist_calib and cam.wrist_calib["good"] and os.path.isfile(W49.WRIST_HANDEYE_PATH), [l for l in logs if "eih" in l or "intr" in l][-8:]
 assert cam.wcalib_result and cam.wcalib_result["good"], cam.wcalib_result
 # Verify tv_intr still displays per_view_px values even after auto-save!
 first_row_vals = cam.tv_intr.item(cam.tv_intr.get_children()[0], "values")

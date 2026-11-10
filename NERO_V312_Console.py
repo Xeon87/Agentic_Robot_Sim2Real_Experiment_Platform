@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.7.1"
+VERSION = "V4.7.2"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -927,6 +927,11 @@ def run_console(initial_tab="sim"):
 
     # ---- V3.25 CAMERA TAB (D435i: live view, depth check, hand-eye calibration, visual locating)
     import NERO_V325_Camera as CAM
+    try:                                            # V4.7.2: wrist calibration fixes (V325 itself stays frozen)
+        import NERO_V472_Wrist_Calib as WCAL
+        WCAL.patch_class(CAM.CameraTabUI)
+    except Exception as exc:
+        log_append(real_log, f"[WARN] [V4.7.2 wrist] 腕部标定修复没有加载：{exc}")
     # V4.6.8 CAMERA TAB SCROLL (like 实机NERO调试): the whole Camera tab scrolls (scroll bar + mouse wheel); the
     # camera monitors (777 px) + the tallest sub-page + the log no longer have to fit the window
     cam_outer = ttk.Frame(nb)

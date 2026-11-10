@@ -1,3 +1,9 @@
+## V4.7.2 (2026-11-10) — 腕部相机标定整条流程全面检查（P1–P10 + 两个一直失败的测试）
+- 新 `NERO_V472_Wrist_Calib.py`（控制台建 Camera 页前在 `CameraTabUI` 类上替换 8 个方法；V325 冻结未改）：P1 手眼结果分 良好 / 可以用 / 不能用，"可以用"弹窗保存（原来 5.07 mm 不保存也不提示）；P2「清除内参」重启后仍保持（`config/wrist_intrinsics.cleared`）；P3 手眼文件记录标定目标（标定板 / ArUco），快速检查看同一个；P4 快速检查看姿态间一致性，标记挪动时更新位置；P7 手眼文件记录所用内参，不一致时提醒；P8 启动时打印加载的文件；P9 ArUco 样本补上两个位姿解。
+- `NERO_V349_Real_Wrist_Camera.py`：P6 `PLANNING_K_FN`（内参自动采集用实测内参规划）；P9 `planar_pose_candidates` + `disambiguate_planar_samples`（按机械臂转动角选位姿解），`calibrate_eye_in_hand` 先做这一步；P10 去掉 8→5 参数截断。
+- `NERO_V386_Real_Wrist_Camera.py`：P5 `SELF_CAL_ALLOWED`（有实测内参时不自校准焦距）；P9 `calibrate_eih_4mp` 先选位姿解。
+- 测试：新 `tests/test_v4_7_2.py`（7 项）、`tests/test_v4_7_2_gui.py`（E1–E9）；`test_v3_57_gui`（标定板图镜像）和 `test_v3_58_gui`（`CAM.DW` 过期、没有同步线程、`stop()` 参数）修好并通过——这两个测试多个版本一直失败，自动内参 + 手眼流程等于没被测过。这两个测试现在把标定文件写到临时文件夹（修好后它们会跑到最后，原来会写进 `config/` 覆盖真实的腕部标定）。版本白名单补 V4.7.2。
+
 ## V4.7.1 (2026-11-10) — 修复：腕部相机内参每次启动被误判为"旧 130° 镜头"而丢掉
 - `NERO_V386_Real_Wrist_Camera.py` `sanitize_intrinsics_for_model`：去掉按畸变判断的两条规则（|k1| > 0.20、8 参数模型高阶项 > 0.15），只按 fx/w < 0.45 或文件记录的相机名（1080P / 130°）判断；文件记录为 4MP / OV4688 的一律保留；提示语加上"请重新标定内参"。`NERO_V325_Camera.py` 冻结未改。
 - 测试：新 `tests/test_v4_7_1.py`（4 项，用用户这次的内参数值）；`test_v3_88` 原有判断照常通过；版本白名单补 V4.7.1。

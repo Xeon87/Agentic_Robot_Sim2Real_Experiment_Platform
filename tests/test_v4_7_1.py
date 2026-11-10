@@ -59,7 +59,9 @@ class TestV471(unittest.TestCase):
         import NERO_V313_Real_Robot as RR
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
-        self.assertEqual((v, C.VERSION, RR.VERSION), ("V4.7.1", "V4.7.1", "V4.7.1"))
+        self.assertEqual(v, C.VERSION)
+        self.assertEqual(v, RR.VERSION)
+        self.assertIn(v, ("V4.7.1", "V4.7.2"))
         s = open(os.path.join(HERE, "NERO_V386_Real_Wrist_Camera.py"), encoding="utf-8").read()
         self.assertIn("V4.7.1: ONLY the focal length", s)
 
