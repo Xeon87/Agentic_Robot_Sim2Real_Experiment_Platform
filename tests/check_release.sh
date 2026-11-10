@@ -97,6 +97,7 @@ grep -qF 'V4.6.10 VERIFY BY RELEASE POSITION + TRY HARDER VERIFY + UNCONFIRMED C
 grep -qF 'V4.6.11 DISK SPOOL + BACKGROUND SAVE + DISCARD' NERO_V4_Dataset_Recorder.py && grep -qF 'V4.6.11 AUTO TEACH RECORD + SPACE BINDTAG' NERO_V4_Console_Tab.py && grep -qF 'def enter_now' NERO_V462_Teach_Gravity.py || { echo "[FAIL] V4.6.11 markers missing"; exit 1; }
 grep -qF 'V4.6.12 CUPS INSIDE THE OUTLINE + OCCUPIED NEEDS RIM TOP' NERO_V349_Real_Wrist_Camera.py && grep -qF 'V4.6.12 TABLE HEIGHT 15-25 MM WARN WITH TRY HARDER' NERO_V365_Real_Cup_Task.py && test -f tests/data/v4612_real_carton.npz || { echo "[FAIL] V4.6.12 markers missing"; exit 1; }
 grep -qF 'V4.6.13 ADAPTER + WRIST CAMERA COLLISION' NERO_V4613_Tool_Collision.py && grep -qF 'V4.6.13 ADAPTER + WRIST CAMERA TABLE CLEARANCE IN PLANNING' NERO_V365_Real_Cup_Task.py && test -f assets/adapter/SO101_NERO_adapter_v5_PRINT.stl && test -f config/tool_collision.json || { echo "[FAIL] V4.6.13 markers missing"; exit 1; }
+grep -qF 'V4.7 ONE-CLICK PREPARE + EPISODE BROWSER' NERO_V4_Console_Tab.py && grep -qF 'V4.7 EPISODE BROWSER + PLAYER' NERO_V47_VLA_Tools.py || { echo "[FAIL] V4.7 markers missing"; exit 1; }
 grep -qF 'V3.81 YOLOE TRAIN' NERO_V381_Yolo_Train.py && grep -qF 'V3.81 PROFILE FILES + TRAIN PAGE' NERO_V379_Camera_Lab.py && grep -qF 'NERO_V381_Yolo_Train.py' start_nero.sh || { echo "[FAIL] V3.81 train marker missing"; exit 1; }
 grep -qF 'V3.82 FINE-TUNED MODELS' NERO_V347_Yolo_Perception.py && grep -qF 'V3.82 HIGHLIGHTS + GAMMA + LABEL ASSIST' NERO_V379_Camera_Lab.py && grep -qF 'V3.82 APPLY FINE-TUNED + 1280 TRAINING' NERO_V381_Yolo_Train.py || { echo "[FAIL] V3.82 marker missing"; exit 1; }
 grep -qF 'V3.83 MULTI-MODEL DISTRIBUTION' NERO_V347_Yolo_Perception.py && grep -qF 'V3.83 GPU PREFLIGHT' start_nero.sh && grep -qF 'NERO_V383_Gpu_Check.py' start_nero.sh || { echo "[FAIL] V3.83 marker missing"; exit 1; }
@@ -176,4 +177,5 @@ python3 tests/test_v4_6_10.py 2>&1 | tail -1  # V4.6.10 verify by release point,
 python3 tests/test_v4_6_11.py 2>&1 | tail -1  # V4.6.11 disk spool, background save, discard, light refresh, teach enter/exit
 python3 tests/test_v4_6_12.py 2>&1 | tail -1  # V4.6.12 carton fit on the user's real frame, occupied rule, table option A
 python3 tests/test_v4_6_13.py 2>&1 | tail -1  # V4.6.13 printed adapter + wrist camera in the place planner's table clearance
+python3 tests/test_v4_7.py 2>&1 | tail -1     # V4.7 episode video reader, dataset / episode lists, labels
 python3 tests/test_v4_6_1_gui.py | tail -1   # skips without tkinter / DISPLAY

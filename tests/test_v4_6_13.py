@@ -135,7 +135,8 @@ class TestV4613(unittest.TestCase):
         import NERO_V313_Real_Robot as RR
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
-        self.assertEqual((v, C.VERSION, RR.VERSION), ("V4.6.13", "V4.6.13", "V4.6.13"))
+        self.assertEqual((C.VERSION, RR.VERSION), (v, v))
+        self.assertIn(v, ("V4.6.13", "V4.7"))
         self.assertEqual(TC.MARKER, "V4.6.13 ADAPTER + WRIST CAMERA COLLISION")
         self.assertEqual(RT.MARKER_V4613, "V4.6.13 ADAPTER + WRIST CAMERA TABLE CLEARANCE IN PLANNING")
         self.assertTrue(os.path.isfile(TC.STL_PATH))

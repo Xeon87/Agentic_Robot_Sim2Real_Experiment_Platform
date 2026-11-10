@@ -66,6 +66,9 @@ from NERO_V4_Task_Evaluator import TaskEvaluator
 from NERO_V4_VLA_Action_Executor import VLAActionExecutor
 
 
+PREP_STEPS = (("drive", "硬盘"), ("dirs", "目录"), ("env", "环境"), ("model", "模型文件"), ("dataset", "数据集"),
+              ("nero", "NERO"), ("cam", "主相机"), ("wrist", "腕部相机"), ("grip", "夹爪"), ("vla", "SmolVLA"))
+MARKER_V47 = "V4.7 ONE-CLICK PREPARE + EPISODE BROWSER"
 LAMP_COLORS = {"off": "#9e9e9e", "busy": "#ffb300", "ok": "#2e7d32", "warn": "#ef6c00", "bad": "#c62828"}
 
 
@@ -238,6 +241,33 @@ class VLALeRobotTabUI:
         self.pages = pg
 
         # ---------------------------------------------------------------- ① 准备
+        # V4.7 ONE-CLICK PREPARE: one prominent button, the steps in their order as lamps, the result in one line;
+        # the 「① 准备」 tab itself carries a lamp (grey = not checked, green = all ready, yellow = a step needs you)
+        import NERO_V47_VLA_Tools as TL
+        self._tab_imgs = TL.lamp_images(tk)
+        self.sub_nb.tab(pg["prep"], image=self._tab_imgs["off"], compound="left")
+        self.prep_state = "off"
+        pf = ttk.LabelFrame(pg["prep"], text="一键准备：按顺序检查，能自动处理的自动处理（挂载硬盘、建目录、连相机和夹爪、加载模型）")
+        pf.pack(fill="x", pady=(0, 4))
+        pfi = ttk.Frame(pf)
+        pfi.pack(fill="x", padx=6, pady=4)
+        self.btn_prepare = tk.Button(pfi, text="一键准备", command=self.on_prepare_all, bg="#1565c0", fg="white",
+                                     activebackground="#1e88e5", activeforeground="white",
+                                     font=("TkDefaultFont", 13, "bold"), relief="raised", bd=1, padx=18, pady=8)
+        self.btn_prepare.pack(side="left", padx=(0, 12), anchor="n")
+        pr = ttk.Frame(pfi)
+        pr.pack(side="left", fill="x", expand=True)
+        grid = ttk.Frame(pr)
+        grid.pack(fill="x")
+        self.prep_lamps = {}
+        for i, (k, t) in enumerate(PREP_STEPS):
+            cell = ttk.Frame(grid)
+            cell.grid(row=i // 5, column=i % 5, sticky="w", padx=(0, 4), pady=1)
+            self.prep_lamps[k] = StatusLamp(tk, ttk, cell, f"{i + 1} {t}", 17)
+        self.v_prep = tk.StringVar(value="还没检查。顺序：移动硬盘 → 目录 → LeRobot 环境 → 模型文件 → 数据集 → NERO → 主相机 → "
+                                         "腕部相机 → 夹爪 → 加载 SmolVLA（NERO 不会被自动使能）")
+        JC.fixed_label(tk, pr, 1, textvariable=self.v_prep, font=("TkDefaultFont", 9, "bold"), wraplength=1100,
+                       pack={"fill": "x", "pady": (3, 0)})
         drv_f = ttk.LabelFrame(pg["prep"], text=f"移动硬盘 {ST.DRIVE_LABEL}：LeRobot + SmolVLA 环境 / 模型 / 数据集 / 训练文件")
         drv_f.pack(fill="x", pady=2)
         d0 = ttk.Frame(drv_f)                                   # V4.6 STATUS LAMPS
@@ -316,42 +346,82 @@ class VLALeRobotTabUI:
                 tk, ttk, pg["teach"], self.pipe, jpanel=self.jpanel, log=self._log, cam_tab=self.cam_tab,
                 busy_fn=lambda: (f"「{self._run_kind}」正在执行" if self._run_busy.locked() else ""),
                 safe_tab_fn=lambda: self.safe_tab, pack={"fill": "x", "padx": 2, "pady": (0, 2)})
-        rb = ttk.Frame(pg["teach"])
-        rb.pack(fill="x", padx=2, pady=2)
-        self.btn_rec = ttk.Button(rb, text="● 开始示教录制", command=self.on_toggle_record)
-        self.btn_rec.pack(side="left", padx=(0, 2))
+        # V4.7: two columns - left = recording, right = the episode browser (browse / play / replay / delete)
+        body = ttk.Frame(pg["teach"])
+        body.pack(fill="x", padx=2, pady=(0, 2))
+        left = ttk.Frame(body)
+        left.pack(side="left", fill="y", anchor="n")
+        rb = ttk.Frame(left)
+        rb.pack(fill="x", pady=2)
+        self.btn_rec = tk.Button(rb, text="● 开始示教录制", command=self.on_toggle_record, bg="#c62828", fg="white",
+                                 activebackground="#e53935", activeforeground="white",
+                                 font=("TkDefaultFont", 10, "bold"), relief="raised", bd=1, padx=8, pady=2)
+        self.btn_rec.pack(side="left", padx=(0, 4))
         self.btn_discard = ttk.Button(rb, text="✗ 放弃本次（不保存）", command=self.on_discard_record, state="disabled")
-        self.btn_discard.pack(side="left", padx=(0, 6))
-        ttk.Button(rb, text="夹爪示教: 张开", command=lambda: self.on_teach_gripper(True)).pack(side="left", padx=2)
-        ttk.Button(rb, text="夹爪示教: 夹紧", command=lambda: self.on_teach_gripper(False)).pack(side="left", padx=2)
-        self.v_grip_teach = tk.StringVar(value="空格键 = 张开 / 夹紧 切换（录制时双手扶臂也能操作）")
-        ttk.Label(rb, textvariable=self.v_grip_teach, foreground="#1565c0").pack(side="left", padx=6)
-        rb3 = ttk.Frame(pg["teach"])
-        rb3.pack(fill="x", padx=2, pady=2)
-        ttk.Label(rb3, text="Episode#:").pack(side="left")
-        self.v_ep_idx = tk.StringVar(value="0")
-        ttk.Spinbox(rb3, from_=0, to=999, textvariable=self.v_ep_idx, width=4,
-                    command=self._update_ep_info).pack(side="left")
-        ttk.Label(rb3, text=" 回放速度").pack(side="left")
-        self.v_replay_speed = tk.StringVar(value="0.5×")
-        ttk.Combobox(rb3, textvariable=self.v_replay_speed, values=("0.25×", "0.5×", "1×"), width=6,
-                     state="readonly").pack(side="left", padx=2)
-        ttk.Button(rb3, text="回放 Episode", command=self.on_replay_episode).pack(side="left", padx=2)
-        ttk.Button(rb3, text="删除 Episode", command=self.on_delete_episode).pack(side="left", padx=2)
-        self.v_ep_info = tk.StringVar(value="")
-        ttk.Label(rb3, textvariable=self.v_ep_info, foreground="#37474f").pack(side="left", padx=8)
+        self.btn_discard.pack(side="left", padx=(0, 4))
+        rbg = ttk.Frame(left)
+        rbg.pack(fill="x", pady=2)
+        ttk.Label(rbg, text="夹爪：").pack(side="left")
+        ttk.Button(rbg, text="夹爪示教: 张开", command=lambda: self.on_teach_gripper(True)).pack(side="left", padx=2)
+        ttk.Button(rbg, text="夹爪示教: 夹紧", command=lambda: self.on_teach_gripper(False)).pack(side="left", padx=2)
+        self.v_grip_teach = tk.StringVar(value="空格键 = 张开 / 夹紧 切换")
+        ttk.Label(rbg, textvariable=self.v_grip_teach, foreground="#1565c0").pack(side="left", padx=6)
         # V4.6.11: what was recorded so far + the next episode number, always in view on this page
-        rb5 = ttk.Frame(pg["teach"])
-        rb5.pack(fill="x", padx=2, pady=(2, 0))
         self.v_next_ep = tk.StringVar(value="下一个：Episode #0")
-        ttk.Label(rb5, textvariable=self.v_next_ep, font=("TkDefaultFont", 11, "bold"),
-                  foreground="#2e7d32").pack(side="left", padx=(2, 10))
+        ttk.Label(left, textvariable=self.v_next_ep, font=("TkDefaultFont", 12, "bold"),
+                  foreground="#2e7d32").pack(anchor="w", pady=(4, 0))
         self.v_recent_eps = tk.StringVar(value="还没有录制的 Episode")
-        JC.fixed_label(tk, rb5, 2, width=1000, textvariable=self.v_recent_eps, font=("TkDefaultFont", 9),
-                       wraplength=1000, pack={"side": "left", "fill": "x", "expand": True})
+        JC.fixed_label(tk, left, 2, width=560, textvariable=self.v_recent_eps, font=("TkDefaultFont", 9),
+                       wraplength=560, pack={"anchor": "w"})
         self.v_rec_status = tk.StringVar(value="录制 / 回放真机：先在上方选「实机 NERO」后端；「仿真替身」只录 / 回放虚拟机械臂")
-        JC.fixed_label(tk, pg["teach"], 1, textvariable=self.v_rec_status, font=("TkDefaultFont", 9),
-                       wraplength=1150, pack={"fill": "x", "padx": 4})
+        JC.fixed_label(tk, left, 2, width=560, textvariable=self.v_rec_status, font=("TkDefaultFont", 9),
+                       wraplength=560, pack={"anchor": "w"})
+        # ---- V4.7 EPISODE BROWSER
+        epf = ttk.LabelFrame(body, text="Episode 浏览 · 播放 · 回放 · 删除")
+        epf.pack(side="left", fill="both", expand=True, padx=(10, 0))
+        eh = ttk.Frame(epf)
+        eh.pack(fill="x", padx=4, pady=(2, 2))
+        ttk.Label(eh, text="数据集").pack(side="left")
+        self.v_browse_ds = tk.StringVar(value=self.dataset.dataset_name)
+        self.cb_browse_ds = ttk.Combobox(eh, textvariable=self.v_browse_ds, width=22, state="readonly",
+                                         postcommand=self._fill_ds_list)
+        self.cb_browse_ds.pack(side="left", padx=4)
+        self.cb_browse_ds.bind("<<ComboboxSelected>>", lambda _e: self.on_browse_dataset())
+        ttk.Button(eh, text="刷新", command=self.refresh_episode_list).pack(side="left", padx=2)
+        ttk.Button(eh, text="打开文件夹", command=self.on_open_dataset_folder).pack(side="left", padx=2)
+        self.v_browse_info = tk.StringVar(value="")
+        ttk.Label(eh, textvariable=self.v_browse_info, foreground="#607d8b").pack(side="left", padx=6)
+        tvf = ttk.Frame(epf)
+        tvf.pack(fill="x", padx=4)
+        cols = ("ep", "dur", "frames", "state", "saved", "size", "task")
+        self.ep_tree = ttk.Treeview(tvf, columns=cols, show="headings", height=5, selectmode="browse")
+        for c, t, w, anc in (("ep", "Episode", 64, "center"), ("dur", "时长", 62, "e"), ("frames", "帧数", 58, "e"),
+                             ("state", "状态", 64, "center"), ("saved", "保存时间", 120, "center"),
+                             ("size", "大小", 70, "e"), ("task", "任务", 220, "w")):
+            self.ep_tree.heading(c, text=t)
+            self.ep_tree.column(c, width=w, anchor=anc, stretch=(c == "task"))
+        self.ep_tree.tag_configure("bad", foreground="#c62828")
+        self.ep_tree.tag_configure("invalid", foreground="#9e9e9e")
+        ysb = ttk.Scrollbar(tvf, orient="vertical", command=self.ep_tree.yview)
+        self.ep_tree.configure(yscrollcommand=ysb.set)
+        self.ep_tree.pack(side="left", fill="x", expand=True)
+        ysb.pack(side="left", fill="y")
+        self.ep_tree.bind("<<TreeviewSelect>>", lambda _e: self._on_ep_select())
+        self.ep_tree.bind("<Double-1>", lambda _e: self.on_play_episode_video())
+        ea = ttk.Frame(epf)
+        ea.pack(fill="x", padx=4, pady=(3, 3))
+        self.btn_play_video = ttk.Button(ea, text="▶ 播放录像（主相机 + 腕部相机）", command=self.on_play_episode_video)
+        self.btn_play_video.pack(side="left", padx=(0, 6))
+        ttk.Separator(ea, orient="vertical").pack(side="left", fill="y", padx=4)
+        self.v_replay_speed = tk.StringVar(value="0.5×")
+        ttk.Button(ea, text="回放 Episode", command=self.on_replay_episode).pack(side="left", padx=2)
+        ttk.Combobox(ea, textvariable=self.v_replay_speed, values=("0.25×", "0.5×", "1×"), width=6,
+                     state="readonly").pack(side="left", padx=2)
+        ttk.Label(ea, text="（实机后端 = NERO 照着走）", foreground="#607d8b").pack(side="left")
+        ttk.Button(ea, text="删除 Episode", command=self.on_delete_episode).pack(side="right", padx=2)
+        self.v_ep_idx = tk.StringVar(value="0")
+        self.v_ep_info = tk.StringVar(value="")
+        self.players = []
 
         # ---------------------------------------------------------------- ③ 训练
         rb2 = ttk.Frame(pg["train"])
@@ -564,6 +634,210 @@ class VLALeRobotTabUI:
                 self.q.put(("btn_connect_state", "normal"))
 
         threading.Thread(target=_job, daemon=True).start()
+
+    # ------------------------------------------------------------------ V4.7 ONE-CLICK PREPARE
+    def _prep_set(self, key, state, text) -> None:
+        self.q.put(("prep_lamp", (key, state, text)))
+
+    def on_prepare_all(self) -> None:
+        """V4.7: check every link in its logical order (and fix what can be fixed safely: mount the drive, create the
+        folders, connect the cameras / the gripper, load SmolVLA).  NERO itself is never started from here (enabling
+        the arm stays a deliberate step on 「实机NERO调试」).  All ready -> the 「① 准备」 lamp turns green, any problem
+        -> yellow, with the first problem in the result line."""
+        if getattr(self, "_prep_busy", False):
+            self._log("[INFO] [V4.7 PREPARE] 正在准备中，请稍等")
+            return
+        if self.recorder.is_recording or self._run_busy.locked():
+            self._log("[WARN] [V4.7 PREPARE] 正在录制 / 执行任务，先停止再一键准备")
+            return
+        snap = {"backend": self.v_backend.get(), "ckpt": self.v_ckpt.get().strip() or "lerobot/smolvla_base",
+                "task": self.v_task.get()}
+        self._prep_busy = True
+        self.btn_prepare.configure(state="disabled", text="准备中 …")
+        for k, _t in PREP_STEPS:
+            self.prep_lamps[k].set("off", "-")
+        self._set_prep_tab("busy")
+        self.v_prep.set("准备中 …（验证移动硬盘上的 LeRobot 环境第一次可能要 1–2 分钟）")
+        self._log("[INFO] [V4.7 PREPARE] 一键准备开始")
+        threading.Thread(target=lambda: self._prep_job(snap), daemon=True, name="v47_prepare").start()
+
+    def _set_prep_tab(self, state) -> None:
+        self.prep_state = state
+        try:
+            self.sub_nb.tab(self.pages["prep"], image=self._tab_imgs.get(state, self._tab_imgs["off"]))
+        except Exception:
+            pass
+
+    def _wait_for(self, fn, timeout_s, step_s=0.25) -> bool:
+        t_end = time.time() + timeout_s
+        while time.time() < t_end:
+            try:
+                if fn():
+                    return True
+            except Exception:
+                pass
+            time.sleep(step_s)
+        try:
+            return bool(fn())
+        except Exception:
+            return False
+
+    def _prep_job(self, snap) -> None:
+        t0 = time.time()
+        res = {}                                     # key -> (state, short, detail)
+
+        def done(key, state, short, detail=""):
+            res[key] = (state, short, detail)
+            self._prep_set(key, state, short)
+            self._log(f"[{'OK' if state == 'ok' else ('INFO' if state == 'off' else 'WARN')}] [V4.7 PREPARE] "
+                      f"{dict(PREP_STEPS)[key]}：{short}" + (f" —— {detail}" if detail else ""))
+
+        try:
+            # 1. drive (mount it when it is plugged in but not mounted)
+            self._prep_set("drive", "busy", "检测")
+            st = ST.status(probe_venv=False)
+            if not st["drive"].get("found"):
+                r = ST.mount_drive()
+                st = ST.status(probe_venv=False)
+                if not st["drive"].get("found"):
+                    done("drive", "warn", "未挂载", f"插上移动硬盘 {ST.DRIVE_LABEL}（挂载：{r.get('message') or r.get('error')}）")
+            if st["drive"].get("found"):
+                fs = st.get("fs") or {}
+                done("drive", "ok" if fs.get("grade") == "good" else "warn", f"{fs.get('free_gb', '?')} GB",
+                     "" if fs.get("grade") == "good" else "硬盘空间 / 文件系统需要注意（见「硬盘详情」）")
+            st = self._drive_refresh_job(probe=False) or st
+            on_drive = bool(st.get("drive", {}).get("found"))
+            L = st.get("layout") or ST.layout()
+            # 2. folders
+            if not on_drive:
+                done("dirs", "off", "跳过", "先挂载移动硬盘")
+            elif st.get("initialized"):
+                done("dirs", "ok", "就绪")
+            else:
+                r = ST.ensure_layout(L)
+                done("dirs", "ok" if r.get("ok") else "warn", "已建立" if r.get("ok") else "失败", r.get("error") or "")
+            # 3. LeRobot environment on the drive
+            if not on_drive:
+                done("env", "off", "跳过", "先挂载移动硬盘")
+            else:
+                self._prep_set("env", "busy", "验证中")
+                st2 = self._drive_refresh_job(probe=True) or {}
+                v = st2.get("venv") or {}
+                if v.get("ready"):
+                    done("env", "ok" if v.get("cuda") else "warn", "CUDA ✓" if v.get("cuda") else "无 CUDA",
+                         "" if v.get("cuda") else "torch 看不到 GPU，训练会很慢")
+                else:
+                    done("env", "warn", "未就绪", "「硬盘详情」→ 安装 LeRobot+SmolVLA 到移动硬盘" if not v.get("exists")
+                         else ("验证超时，再试一次" if v.get("timeout") else "环境不完整，重新安装"))
+            # 4. model files
+            ck = snap["ckpt"]
+            local = os.path.isdir(os.path.expanduser(ck))
+            have = (ST.has_weights(os.path.expanduser(ck)) if local
+                    else (ck == "lerobot/smolvla_base" and ST.has_weights(L.get("smolvla_base_dir", ""))))
+            if have:
+                done("model", "ok", "在硬盘上" if not local else "本地")
+            else:
+                done("model", "warn", "没有", f"{ck} 不在本地：点「下载 SmolVLA 模型」，或在「③ 训练」用最新训练结果")
+            # 5. dataset folder
+            self.q.put(("repoint_dataset", None))
+            time.sleep(0.4)
+            root = os.path.abspath(self.dataset.root_dir)
+            on_d = bool(on_drive and root.startswith(os.path.abspath(L.get("root", "/nonexistent"))))
+            done("dataset", "ok" if on_d else "warn", "在硬盘上" if on_d else "在本机",
+                 self.dataset.dataset_dir if on_d else f"示教数据会存到本机：{self.dataset.dataset_dir}")
+            # 6-9. real robot side
+            if snap["backend"] != "real":
+                for k in ("nero", "cam", "wrist", "grip"):
+                    done(k, "off", "跳过", "后端是「仿真替身 / MuJoCo」，不检查实机")
+            else:
+                if self.pipe is None:
+                    done("nero", "warn", "无", "没有实机控制管线")
+                else:
+                    import NERO_V313_Real_Robot as RR
+                    lam = {k: self.pipe.lamp(k) for k in RR.STEP_KEYS}
+                    bad = [RR.STEP_LABELS[i] for i, k in enumerate(RR.STEP_KEYS) if lam[k] not in (RR.GREEN, RR.AMBER)]
+                    done("nero", "ok" if not bad else "warn", "就绪" if not bad else "未启动",
+                         "" if not bad else f"先到「实机NERO调试」页一键启动（停在 {bad[0]}）——一键准备不会自动使能机械臂")
+                ct = self.cam_tab
+                for key, attr, fn_name, label in (("cam", "src", "on_connect", "主相机"),
+                                                  ("wrist", "wrist_src", "on_wrist_connect", "腕部相机")):
+                    run = lambda a=attr: getattr(ct, a, None) is not None and getattr(ct, a).running()
+                    if ct is None:
+                        done(key, "warn", "无", "Camera调试 页不可用")
+                        continue
+                    if not run():
+                        self._prep_set(key, "busy", "连接中")
+                        fn = getattr(ct, fn_name, None)
+                        if fn is not None:
+                            self._post(fn)
+                    ok = self._wait_for(run, 15.0)
+                    done(key, "ok" if ok else "warn", "已连接" if ok else "没连上",
+                         "" if ok else f"{label}没有画面：检查 USB，或在 Camera调试 页手动连接")
+                rt = self.rct_tab
+                g = getattr(rt, "grip", None) if rt is not None else None
+                if g is None:
+                    done("grip", "warn", "无", "Agentic实机任务 页不可用")
+                else:
+                    if not getattr(g, "connected", False) and hasattr(rt, "on_grip_connect"):
+                        self._prep_set("grip", "busy", "连接中")
+                        self._post(rt.on_grip_connect)
+                    ok = self._wait_for(lambda: getattr(g, "connected", False), 10.0)
+                    done("grip", "ok" if ok else "warn", "已连接" if ok else "没连上",
+                         "" if ok else "SO-101 没连上：检查 USB（/dev/ttyACM*）和电源，或在 Agentic实机任务 页手动连接")
+            # 10. load SmolVLA + connect the adapter
+            if res["model"][0] != "ok" and not self.vla_policy.is_loaded:
+                done("vla", "off", "跳过", "没有模型文件")
+            else:
+                self._prep_set("vla", "busy", "加载中")
+                ok_l, why = self._load_vla_sync(ck)
+                prof = self.vla_policy.model_profile()
+                if not ok_l:
+                    done("vla", "warn", "加载失败", why)
+                elif snap["backend"] == "real" and not prof.get("real_allowed"):
+                    done("vla", "warn", "不能上实机",
+                         "已加载，但这个模型没为 NERO 训练，「④ 执行」在实机上会被拒绝（示教采集不受影响）："
+                         + "；".join(prof.get("reasons") or []))
+                else:
+                    done("vla", "ok", "已加载")
+        except Exception as exc:
+            self._log(f"[FAIL] [V4.7 PREPARE] 出错：{exc}")
+            res.setdefault("_error", ("warn", "出错", str(exc)))
+        probs = [(k, v) for k, v in res.items() if v[0] not in ("ok", "off")]
+        state = "ok" if not probs else "warn"
+        if probs:
+            k0, v0 = probs[0]
+            text = (f"⚠ {len(probs)} 项需要处理 · 第一项：{dict(PREP_STEPS).get(k0, k0)} —— {v0[2] or v0[1]}"
+                    f"（用时 {time.time() - t0:.0f} s，详情见下方日志）")
+        else:
+            skipped = [dict(PREP_STEPS)[k] for k, v in res.items() if v[0] == "off"]
+            text = (f"✓ 准备就绪（用时 {time.time() - t0:.0f} s）" + (f" · 跳过：{'、'.join(skipped)}" if skipped else ""))
+        self._log(f"[{'OK' if state == 'ok' else 'WARN'}] [V4.7 PREPARE] {text}")
+        self.q.put(("prep_done", (state, text)))
+
+    def _load_vla_sync(self, ckpt) -> tuple:
+        """V4.7: the 「① 加载」 work in the calling (worker) thread -> (ok, error text)"""
+        if self._loading:
+            ok = self._wait_for(lambda: not self._loading, 180.0, 0.5)
+            return (self.vla_policy.is_loaded, "" if ok else "上一次加载还没完成")
+        if self.vla_policy.is_loaded and str(getattr(self.vla_policy, "model_id_or_path", "")) == ckpt and \
+                self.adapter.is_connected:
+            return True, ""
+        self._loading = True
+        self.q.put(("lamp", ("1", "busy", "加载中")))
+        t0 = time.time()
+        try:
+            r = self.vla_policy.load(ckpt)
+            if not self.adapter.is_connected:
+                self.adapter.connect()
+            self._log(f"[OK] [V4.7 PREPARE] SmolVLA 加载完成（{time.time() - t0:.1f} s）：后端={r.get('backend')}")
+            self.q.put(("btn_connect", "① 已加载 & 已连接"))
+            self.q.put(("lamp", ("1", "ok", "已加载")))
+            return True, ""
+        except Exception as exc:
+            self.q.put(("lamp", ("1", "bad", "加载失败")))
+            return False, str(exc)[:200]
+        finally:
+            self._loading = False
 
     def on_check_lerobot_status(self) -> None:
         target = self.v_ckpt.get().strip()
@@ -1075,18 +1349,153 @@ class VLALeRobotTabUI:
         return n
 
     def _update_ep_info(self) -> None:
+        """V4.7: the selected episode in one line (the browser's header)"""
         try:
             idx = int(self.v_ep_idx.get())
-            ep = next((e for e in self.dataset.list_episodes() if int(e.get("episode_index", -1)) == idx), None)
+        except ValueError:
+            idx = None
+        row = next((r for r in getattr(self, "_ep_rows", []) if r["idx"] == idx), None)
+        if row is None:
+            self.v_ep_info.set("（没有选中 Episode）")
+        else:
+            self.v_ep_info.set(f"#{row['idx']} · {row['dur_s']:.1f} s · {row['frames']} 帧 · "
+                               f"{'有效' if row['valid'] else '无效'} · {row['saved_at']}"
+                               + ("" if row["exists"] else " · ⚠ 文件不在了"))
+        try:
+            self.v_browse_info.set(self.v_ep_info.get())
         except Exception:
-            ep = None
-        if ep is None:
-            self.v_ep_info.set("（没有这个 Episode）")
+            pass
+
+    # ------------------------------------------------------------------ V4.7 EPISODE BROWSER
+    def _fill_ds_list(self) -> None:
+        import NERO_V47_VLA_Tools as TL
+        names = TL.list_datasets(self.dataset.root_dir)
+        if self.dataset.dataset_name not in names:
+            names.insert(0, self.dataset.dataset_name)
+        self.cb_browse_ds.configure(values=names)
+
+    def on_browse_dataset(self) -> None:
+        """switch the active dataset (also the one new recordings go to)"""
+        name = self.v_browse_ds.get().strip()
+        if not name or name == self.dataset.dataset_name:
             return
-        fps = float(ep.get("fps") or 20.0)
-        self.v_ep_info.set(f"{ep.get('length')} 帧 · {float(ep.get('length') or 0) / fps:.1f} s · "
-                           f"{'有效' if ep.get('valid') else '无效'} · {ep.get('saved_at', '')} · "
-                           f"{(ep.get('tasks') or [''])[0][:40]}")
+        if self._rec_phase != "idle":
+            self._log("[WARN] [V4.7 EPISODES] 录制 / 保存中，不能切换数据集")
+            self.v_browse_ds.set(self.dataset.dataset_name)
+            return
+        self.dataset = NEROLeRobotDataset(dataset_name=name, root_dir=self.dataset.root_dir)
+        self.recorder.dataset = self.dataset
+        self.v_ds_name.set(name)
+        self._log(f"[INFO] [V4.7 EPISODES] 数据集 → {self.dataset.dataset_dir}")
+        self._refresh_recent_eps()
+
+    def refresh_episode_list(self, select_idx=None) -> None:
+        import NERO_V47_VLA_Tools as TL
+        try:
+            rows = TL.episode_rows(self.dataset)
+        except Exception as exc:
+            rows = []
+            self._log(f"[WARN] [V4.7 EPISODES] 读不了 Episode 列表：{exc}")
+        self._ep_rows = rows
+        tv = self.ep_tree
+        keep = select_idx
+        if keep is None:
+            try:
+                keep = int(self.v_ep_idx.get())
+            except ValueError:
+                keep = None
+        tv.delete(*tv.get_children())
+        for r in rows:
+            tags = () if r["exists"] else ("bad",)
+            if r["exists"] and not r["valid"]:
+                tags = ("invalid",)
+            tv.insert("", "end", iid=str(r["idx"]), tags=tags, values=(
+                f"#{r['idx']}", f"{r['dur_s']:.1f} s", r["frames"],
+                ("有效" if r["valid"] else "无效") if r["exists"] else "文件缺失",
+                r["saved_at"][5:16] if len(r["saved_at"]) >= 16 else r["saved_at"],
+                (f"{r['size_mb']:.0f} MB" if r["size_mb"] >= 10 else f"{r['size_mb']:.1f} MB") if r["exists"] else "-",
+                r["task"]))
+        try:
+            self.v_browse_ds.set(self.dataset.dataset_name)
+        except Exception:
+            pass
+        if rows:
+            want = keep if keep is not None and any(r["idx"] == keep for r in rows) else rows[0]["idx"]
+            tv.selection_set(str(want))
+            tv.see(str(want))
+            self.v_ep_idx.set(str(want))
+        self._update_ep_info()
+        if not rows:
+            self.v_browse_info.set(f"这个数据集还没有 Episode（{self.dataset.data_dir}）")
+
+    def _on_ep_select(self) -> None:
+        sel = self.ep_tree.selection()
+        if sel:
+            self.v_ep_idx.set(sel[0])
+            self._update_ep_info()
+
+    def _selected_row(self):
+        try:
+            idx = int(self.v_ep_idx.get())
+        except ValueError:
+            return None
+        return next((r for r in getattr(self, "_ep_rows", []) if r["idx"] == idx), None)
+
+    def on_open_dataset_folder(self) -> None:
+        d = self.dataset.data_dir
+        self._log(f"[INFO] [V4.7 EPISODES] 文件夹：{d}")
+        try:
+            import subprocess
+            subprocess.Popen(["xdg-open", d], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as exc:
+            self._log(f"[WARN] [V4.7 EPISODES] 打不开文件夹（{exc}）：{d}")
+
+    def _yolo_fn_for_player(self):
+        """(fn(rgb) -> dets, note) with the Agentic tab's YOLOE settings, read here in the Tk thread"""
+        rt = self.rct_tab
+        if rt is None or not hasattr(rt, "yolo_cfg"):
+            return None, "YOLOE 不可用：Agentic实机任务 页没有建立"
+        try:
+            cfg = rt.yolo_cfg()
+        except Exception as exc:
+            return None, f"YOLOE 不可用：{str(exc)[:60]}"
+        if cfg.get("error"):
+            return None, f"YOLOE 不可用：{cfg['error'][:60]}"
+        det = cfg["detector"]
+        prompts = list(cfg.get("prompts") or [])
+        if not prompts or (len(prompts) == 1 and prompts[0].strip().lower() == "cup"):
+            prompts = ["egg", "egg carton"]
+        mode, path, conf = cfg.get("mode", "text"), cfg["path"], float(cfg.get("conf", 0.25))
+
+        def fn(rgb):
+            return det.detect(rgb, mode, path, prompts=prompts, conf=conf)
+        return fn, f"YOLOE：{', '.join(prompts[:3])} · ≥ {conf:.2f}"
+
+    def on_play_episode_video(self) -> None:
+        """V4.7: play the recorded main + wrist camera video of the selected episode (YOLOE labels optional)"""
+        row = self._selected_row()
+        if row is None:
+            self._log("[INFO] [V4.7 EPISODES] 先在列表里选一个 Episode")
+            return
+        if not row["exists"]:
+            self._log(f"[WARN] [V4.7 EPISODES] Episode #{row['idx']} 的文件不在了：{row['file']}")
+            return
+        import NERO_V47_VLA_Tools as TL
+        for pl in list(self.players):
+            if pl.alive and pl.rd.path == row["file"]:
+                pl.win.lift()
+                return
+        yfn, note = self._yolo_fn_for_player()
+        try:
+            pl = TL.EpisodePlayer(self.tk, self.ttk, self.parent.winfo_toplevel(), row["file"],
+                                  title=f"Episode #{row['idx']} 录像 · {self.dataset.dataset_name}", yolo_fn=yfn,
+                                  yolo_note=note, log=self._log,
+                                  on_close=lambda p_: self.players.remove(p_) if p_ in self.players else None)
+        except Exception as exc:
+            self._log(f"[FAIL] [V4.7 EPISODES] 打不开录像：{exc}")
+            return
+        self.players.append(pl)
+        self._log(f"[INFO] [V4.7 EPISODES] 播放 Episode #{row['idx']} 录像（{pl.rd.n} 帧）· {note}")
 
     def _post(self, fn) -> None:
         """run fn in the Tk thread (from any thread)"""
@@ -1100,7 +1509,8 @@ class VLALeRobotTabUI:
         ph = self._rec_phase
         txt = {"idle": "● 开始示教录制", "entering": "进入示教模式中 …", "recording": "■ 停止并保存 Episode",
                "saving": "保存中 …"}[ph]
-        self.btn_rec.configure(text=txt, state="normal" if ph in ("idle", "recording") else "disabled")
+        self.btn_rec.configure(text=txt, state="normal" if ph in ("idle", "recording") else "disabled",
+                               bg={"idle": "#c62828", "recording": "#37474f"}.get(ph, "#9e9e9e"))
         self.btn_discard.configure(state="normal" if ph == "recording" else "disabled")
 
     def on_toggle_record(self) -> None:
@@ -1205,6 +1615,10 @@ class VLALeRobotTabUI:
         except Exception:
             eps = []
         self._n_eps_cache = len(eps)
+        try:
+            self.refresh_episode_list()
+        except Exception:
+            pass
         nxt = (max(int(e["episode_index"]) for e in eps) + 1) if eps else 0
         self.v_next_ep.set(f"下一个：Episode #{nxt}")
         if not eps:
@@ -1264,12 +1678,24 @@ class VLALeRobotTabUI:
         threading.Thread(target=_job, daemon=True).start()
 
     def on_delete_episode(self) -> None:
-        try:
-            idx = int(self.v_ep_idx.get())
-        except ValueError:
+        """V4.7: confirm, close its player, delete the file + the index entry, refresh"""
+        row = self._selected_row()
+        if row is None:
+            self._log("[INFO] [V4.7 EPISODES] 先在列表里选一个 Episode")
             return
-        if self.dataset.delete_episode(idx):
-            self._log(f"[INFO] [V4.2 DATASET] 已删除 Episode #{idx}")
+        if self._rec_phase != "idle":
+            self._log("[WARN] [V4.7 EPISODES] 录制 / 保存中，不能删除")
+            return
+        if not self.ask("删除 Episode", f"删除 Episode #{row['idx']}（{row['dur_s']:.1f} s，{row['frames']} 帧，"
+                                       f"{row['saved_at']}）？\n文件会从硬盘上删掉，不能恢复：\n{row['file']}"):
+            return
+        for pl in list(self.players):
+            if pl.rd.path == row["file"]:
+                pl.close()
+        ok = self.dataset.delete_episode(row["idx"])
+        self._log(f"[{'OK' if ok else 'WARN'}] [V4.7 EPISODES] {'已删除' if ok else '索引已移除（文件本来就不在）'} "
+                  f"Episode #{row['idx']}：{row['file']}")
+        self._refresh_recent_eps()
 
     def on_finetune(self) -> None:
         n = len(self.dataset.list_episodes(split="train", valid_only=True))
@@ -1353,6 +1779,16 @@ class VLALeRobotTabUI:
                     self.toggle_drive_detail(True)
             elif kind == "drive":
                 self.v_drive.set(str(val))
+            elif kind == "prep_lamp":                 # V4.7 one-click prepare
+                k, st_, tx = val
+                if k in self.prep_lamps:
+                    self.prep_lamps[k].set(st_, tx)
+            elif kind == "prep_done":
+                st_, tx = val
+                self._prep_busy = False
+                self.btn_prepare.configure(state="normal", text="一键准备")
+                self.v_prep.set(tx)
+                self._set_prep_tab(st_)
             elif kind == "call":                      # V4.6.11: a function posted by a worker thread
                 try:
                     val()
@@ -1375,6 +1811,10 @@ class VLALeRobotTabUI:
             if self._drive_found_last is not None and found != self._drive_found_last:
                 self._drive_found_last = found
                 self._log(f"[INFO] [V4.4 DRIVE] 移动硬盘 {ST.DRIVE_LABEL} {'已插入' if found else '已拔出'}")
+                if not found and getattr(self, "prep_state", "off") == "ok":     # V4.7: no longer ready
+                    self._set_prep_tab("warn")
+                    self.prep_lamps["drive"].set("warn", "已拔出")
+                    self.v_prep.set("⚠ 移动硬盘已拔出：重新插上后再点「一键准备」")
                 if not found:   # V4.5: closing the worker can wait up to 6 s -> not on the Tk main thread
                     threading.Thread(target=self.vla_policy.close_worker, daemon=True).start()
                 threading.Thread(target=lambda: self._drive_refresh_job(probe=False), daemon=True).start()

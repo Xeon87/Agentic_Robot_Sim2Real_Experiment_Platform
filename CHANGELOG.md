@@ -1,3 +1,11 @@
+## V4.7 (2026-11-10) — Smol VLA 页：一键准备 + Episode 浏览 / 播放 / 回放 / 删除
+- `NERO_V4_Console_Tab.py`（`V4.7 ONE-CLICK PREPARE + EPISODE BROWSER`）：
+  - 「① 准备」：`一键准备`（`on_prepare_all` → 后台线程 `_prep_job`），共 10 项 `PREP_STEPS`。会自动挂载硬盘、建目录，通过 `_post` 在 Tk 线程连接主相机 / 腕部相机 / 夹爪，并用 `_load_vla_sync` 加载 SmolVLA；**不会使能 NERO**。「① 准备」标签带灯（`lamp_images`：灰 / 忙 / 绿 / 黄）；硬盘拔出时绿灯变黄。
+  - 「② 示教采集」：左右两栏；右栏 Episode 浏览区（数据集下拉、Treeview、播放录像、回放 Episode + 速度、删除 Episode、刷新、打开文件夹）；`on_browse_dataset`、`refresh_episode_list`、`on_play_episode_video`（YOLOE 用 `rct_tab.yolo_cfg()`）、`on_delete_episode`（确认 + 关闭对应播放窗口）。录制按钮改为醒目的红色按钮，录制中变深灰。
+- 新 `NERO_V47_VLA_Tools.py`（`V4.7 EPISODE BROWSER + PLAYER`）：`NpzVideoReader`（逐帧从压缩 npz 读取，带小缓存）、`list_datasets`、`episode_rows`、`draw_dets`、`lamp_images`、`EpisodePlayer`（Toplevel 播放窗口，后台线程读帧和识别 YOLOE，按帧缓存）。
+- 测试：新 `tests/test_v4_7.py`（4 项）、`tests/test_v4_7_gui.py`（J1–J6，真实 Tk）。
+- **没有在真实硬件上运行过。**
+
 ## V4.6.13 (2026-11-09) — 打印的转接环 + 腕部相机支架 + ArUco 支架进入放蛋规划的离桌检查
 - 新 `NERO_V4613_Tool_Collision.py`（`V4.6.13 ADAPTER + WRIST CAMERA COLLISION`）：
   - 读取 STL；按 y ≥ 25 mm 分出相机托架，x ≥ 23 mm 分出 ArUco 支架，其余为转接环；各自的包围盒加 `margin_mm`，相机托架再加 `camera_pad_mm`。
