@@ -157,7 +157,8 @@ def episode_rows(dataset) -> List[Dict[str, Any]]:
         rows.append({"idx": idx, "frames": n, "dur_s": n / max(1.0, fps), "fps": fps, "valid": bool(e.get("valid")),
                      "task": (e.get("tasks") or [""])[0], "saved_at": str(e.get("saved_at", "")),
                      "file": p, "exists": exists, "size_mb": (os.path.getsize(p) / 1e6) if exists else 0.0,
-                     "split": e.get("split", "")})
+                     "split": e.get("split", ""), "limit_ok": e.get("limit_ok"),
+                     "limit_report": e.get("limit_report")})
     rows.sort(key=lambda r: -r["idx"])
     return rows
 
@@ -206,6 +207,14 @@ def lamp_images(tk, size: int = 12) -> Dict[str, Any]:
 
 
 # ============================================================================ player window
+def _prompts_of_note(note):
+    """'YOLOE：red block, box · ≥ 0.25' -> 'red block, box'"""
+    t = str(note or "")
+    if "YOLOE：" not in t:
+        return ""
+    return t.split("YOLOE：", 1)[1].split(" · ")[0].strip()
+
+
 class EpisodePlayer:
     """Toplevel player for one episode: both cameras, play / pause / step / slider / speed, YOLOE labels.
     yolo_fn(rgb) -> list of dets (called in a worker thread) or None when YOLOE is off / unavailable."""
@@ -213,7 +222,7 @@ class EpisodePlayer:
     VIEW_W, VIEW_H = 480, 360
 
     def __init__(self, tk, ttk, master, npz_path: str, title: str = "", yolo_fn=None, yolo_note: str = "",
-                 log=None, on_close=None):
+                 log=None, on_close=None, yolo_factory=None):
         import NERO_V325_Camera as CAM
         self.tk, self.ttk, self.CAM = tk, ttk, CAM
         self.log = log or (lambda s: None)
@@ -270,6 +279,19 @@ class EpisodePlayer:
         self._note0 = yolo_note
         self.v_note = tk.StringVar(value=yolo_note)
         ttk.Label(bar, textvariable=self.v_note, foreground="#607d8b").pack(side="left", padx=6)
+        # V4.7.4: what YOLOE looks for, editable (comma separated); 「应用」 re-labels from the current frame
+        self.yolo_factory, self._ygen = yolo_factory, 0
+        self.v_prompts = tk.StringVar(value=_prompts_of_note(yolo_note))
+        if yolo_factory is not None:
+            pbar = ttk.Frame(top)
+            pbar.pack(fill="x", pady=(2, 0))
+            ttk.Label(pbar, text="YOLOE 找：").pack(side="left")
+            self.ent_prompts = ttk.Entry(pbar, textvariable=self.v_prompts, width=44)
+            self.ent_prompts.pack(side="left", padx=2)
+            self.ent_prompts.bind("<Return>", lambda e: (self.apply_prompts(), "break")[1])
+            ttk.Button(pbar, text="应用", command=self.apply_prompts).pack(side="left", padx=2)
+            ttk.Label(pbar, text="（逗号分隔，英文名效果最好，例如 red block, blue block, box）",
+                      foreground="#9e9e9e").pack(side="left", padx=4)
         self.v_pos = tk.StringVar(value="")
         ttk.Label(bar, textvariable=self.v_pos, width=22, anchor="e").pack(side="right")
         self.sl = tk.Scale(top, from_=0, to=max(0, self.rd.n - 1), orient="horizontal", showvalue=False,
@@ -295,6 +317,27 @@ class EpisodePlayer:
         self.win.after(30, self._tick)
 
     # -- Tk thread
+    def apply_prompts(self):
+        """V4.7.4: new YOLOE prompts -> new detector function, labels recomputed"""
+        import NERO_V474_Episode_Tools as ET
+        pr = ET.parse_prompts(self.v_prompts.get())
+        if not pr or self.yolo_factory is None:
+            return
+        fn, note = self.yolo_factory(pr)
+        self._ygen += 1
+        self.dets = {}
+        self.yolo_fn = fn
+        self._note0 = note
+        self.v_note.set(note)
+        if fn is not None:
+            self.chk_yolo.state(["!disabled"])
+            self.v_yolo.set(True)
+            self._yolo_mirror = True
+        self._want_y = self.i
+        self._need_y.set()
+        self._redraw()
+        self.log(f"[INFO] [V4.7.4 EPISODES] 回放 YOLOE 改找：{', '.join(pr)}")
+
     def _on_yolo(self):
         self._yolo_mirror = bool(self.v_yolo.get())
         self._want_y = self.i
@@ -441,12 +484,13 @@ class EpisodePlayer:
             self._need_y.wait(0.2)
             self._need_y.clear()
             i = self._want_y
-            if i is None or self.yolo_fn is None or not self._yolo_flag():
+            fn, gen, dets = self.yolo_fn, self._ygen, self.dets
+            if i is None or fn is None or not self._yolo_flag():
                 continue
             done = False
             for k in CAM_KEYS:
                 key = (k, i)
-                if key in self.dets:
+                if key in dets:
                     continue
                 fr = self.rd.frame(k, i)
                 if fr is None:
@@ -454,15 +498,15 @@ class EpisodePlayer:
                 if first:
                     self.q.put(("note", "YOLOE 计算中（第一次要加载模型）…"))
                 try:
-                    self.dets[key] = self.yolo_fn(np.ascontiguousarray(fr)) or []
+                    dets[key] = fn(np.ascontiguousarray(fr)) or []      # into the dict of ITS prompts (V4.7.4)
                 except Exception as exc:
-                    self.dets[key] = []
+                    dets[key] = []
                     self.q.put(("note", f"YOLOE 出错：{str(exc)[:60]}"))
                 if first:
                     first = False
                     self.q.put(("note", self._note0))
                 done = True
-            if done:
+            if done and gen == self._ygen:
                 self.q.put(("dets", i))
 
     def _yolo_flag(self):

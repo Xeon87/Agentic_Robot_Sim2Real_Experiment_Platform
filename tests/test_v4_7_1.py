@@ -61,7 +61,7 @@ class TestV471(unittest.TestCase):
             v = f.read().strip()
         self.assertEqual(v, C.VERSION)
         self.assertEqual(v, RR.VERSION)
-        self.assertIn(v, ("V4.7.1", "V4.7.2", "V4.7.3"))
+        self.assertIn(v, ("V4.7.1", "V4.7.2", "V4.7.3", "V4.7.4"))
         s = open(os.path.join(HERE, "NERO_V386_Real_Wrist_Camera.py"), encoding="utf-8").read()
         self.assertIn("V4.7.1: ONLY the focal length", s)
 

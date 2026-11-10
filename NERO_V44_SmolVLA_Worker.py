@@ -310,7 +310,8 @@ def download(repo: str, local_dir: str, with_backbone: bool = True) -> int:
 
 
 # ================================================================================================ export
-def read_nero_episodes(src_dir: str, splits: Tuple[str, ...] = ("train",), valid_only: bool = True) -> List[Dict[str, Any]]:
+def read_nero_episodes(src_dir: str, splits: Tuple[str, ...] = ("train",), valid_only: bool = True,
+                       include_over_limit: bool = False) -> List[Dict[str, Any]]:
     """Episode metadata of a NERO V4.2 recorder dataset (meta/episodes.jsonl + data/episode_XXXXXX.npz)."""
     eps = []
     p = os.path.join(src_dir, "meta", "episodes.jsonl")
@@ -323,6 +324,9 @@ def read_nero_episodes(src_dir: str, splits: Tuple[str, ...] = ("train",), valid
             if splits and str(e.get("split", "train")) not in splits:
                 continue
             if valid_only and not e.get("valid", True):
+                continue
+            if not include_over_limit and e.get("limit_ok") is False:      # V4.7.4: J outside the commandable range
+                print(f"[INFO] skip NERO #{e.get('episode_index')}: joints outside the limits", flush=True)
                 continue
             npz = os.path.join(src_dir, "data", f"episode_{int(e['episode_index']):06d}.npz")
             if os.path.isfile(npz):
@@ -372,8 +376,8 @@ def _import_lerobot_dataset():
 
 
 def export(src_dir: str, repo_id: str, out_root: str, fps: float, splits: Tuple[str, ...], overwrite: bool,
-           use_videos: bool = True) -> int:
-    eps = read_nero_episodes(src_dir, splits=splits)
+           use_videos: bool = True, include_over_limit: bool = False) -> int:
+    eps = read_nero_episodes(src_dir, splits=splits, include_over_limit=include_over_limit)
     if not eps:
         print(f"[FAIL] no valid episodes with split {splits} in {src_dir}", flush=True)
         return 2
@@ -439,6 +443,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     e.add_argument("--splits", default="train")
     e.add_argument("--overwrite", action="store_true")
     e.add_argument("--images", action="store_true", help="store PNG images instead of mp4 video")
+    e.add_argument("--include-over-limit", action="store_true", help="V4.7.4: also episodes with joints outside the limits")
     sub.add_parser("env")
     a = ap.parse_args(argv)
     if a.cmd == "serve":
@@ -447,7 +452,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return download(a.repo, a.local_dir, with_backbone=not a.no_backbone)
     if a.cmd == "export":
         return export(a.src, a.repo_id, a.root, a.fps, tuple(x for x in a.splits.split(",") if x), a.overwrite,
-                      use_videos=not a.images)
+                      use_videos=not a.images, include_over_limit=a.include_over_limit)
     if a.cmd == "env":
         print(json.dumps(env_info(), ensure_ascii=False))
         return 0

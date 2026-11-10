@@ -46,7 +46,9 @@ class TestV473(unittest.TestCase):
         import NERO_V47_VLA_Tools as TL
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
-        self.assertEqual((v, C.VERSION, RR.VERSION), ("V4.7.3", "V4.7.3", "V4.7.3"))
+        self.assertEqual(v, C.VERSION)
+        self.assertEqual(v, RR.VERSION)
+        self.assertIn(v, ("V4.7.3", "V4.7.4"))
         self.assertEqual(VT.MARKER_V473, "V4.7.3 READY_TO_WORK BEFORE TEACH RECORDING")
         self.assertTrue(hasattr(TL.EpisodePlayer, "_work_yolo"))
 

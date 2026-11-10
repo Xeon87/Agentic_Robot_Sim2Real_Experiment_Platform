@@ -398,6 +398,12 @@ class VLALeRobotTabUI:
         self.v_rec_status = tk.StringVar(value="录制 / 回放真机：先在上方选「实机 NERO」后端；「仿真替身」只录 / 回放虚拟机械臂")
         JC.fixed_label(tk, left, 2, width=560, textvariable=self.v_rec_status, font=("TkDefaultFont", 9),
                        wraplength=560, pack={"anchor": "w"})
+        # V4.7.4 live joint-limit warning while recording (yellow = close, red = outside the commandable range)
+        self.v_limit_warn = tk.StringVar(value="")
+        self.lbl_limit_warn = JC.fixed_label(tk, left, 1, width=560, textvariable=self.v_limit_warn,
+                                             font=("TkDefaultFont", 10, "bold"), wraplength=560, pack={"anchor": "w"})
+        self._limit_over = set()          # joints outside the range in the current excursion (log + bell once)
+        self._limit_max = {}              # joint -> worst degrees over during this recording
         # ---- V4.7 EPISODE BROWSER
         epf = ttk.LabelFrame(body, text="Episode 浏览 · 播放 · 回放 · 删除")
         epf.pack(side="left", fill="both", expand=True, padx=(10, 0))
@@ -423,8 +429,8 @@ class VLALeRobotTabUI:
             self._ep_style, _rh = _CAM.treeview_style(ttk, tvf, "V473Episodes.Treeview")
         except Exception:
             self._ep_style = "Treeview"
-        self.ep_tree = ttk.Treeview(tvf, columns=cols, show="headings", height=5, selectmode="browse",
-                                    style=self._ep_style)
+        self.ep_tree = ttk.Treeview(tvf, columns=cols, show="headings", height=5, selectmode="extended",
+                                    style=self._ep_style)              # V4.7.4: several for 「修改任务描述」
         for c, t, w, anc in (("ep", "Episode", 64, "center"), ("dur", "时长", 62, "e"), ("frames", "帧数", 58, "e"),
                              ("state", "状态", 64, "center"), ("saved", "保存时间", 120, "center"),
                              ("size", "大小", 70, "e"), ("task", "任务", 220, "w")):
@@ -449,6 +455,13 @@ class VLALeRobotTabUI:
                      state="readonly").pack(side="left", padx=2)
         ttk.Label(ea, text="（实机后端 = NERO 照着走）", foreground="#607d8b").pack(side="left")
         ttk.Button(ea, text="删除 Episode", command=self.on_delete_episode).pack(side="right", padx=2)
+        # V4.7.4 edit the task text of recorded episodes / rename the dataset
+        eb = ttk.Frame(epf)
+        eb.pack(fill="x", padx=4, pady=(0, 3))
+        ttk.Button(eb, text="修改任务描述…", command=self.on_edit_task).pack(side="left", padx=(0, 4))
+        ttk.Button(eb, text="重命名数据集…", command=self.on_rename_dataset).pack(side="left", padx=4)
+        ttk.Label(eb, text="（按住 Ctrl / Shift 可在列表里多选）", foreground="#9e9e9e").pack(side="left", padx=4)
+        self._ds_busy = None              # V4.7.4: "task" while episode files are rewritten in the background
         self.v_ep_idx = tk.StringVar(value="0")
         self.v_ep_info = tk.StringVar(value="")
         self.players = []
@@ -460,6 +473,8 @@ class VLALeRobotTabUI:
         ttk.Button(rb2, text="导出为 LeRobot 数据集", command=self.on_export_lerobot).pack(side="left", padx=2)
         self.v_export_overwrite = tk.BooleanVar(value=True)
         ttk.Checkbutton(rb2, text="覆盖", variable=self.v_export_overwrite).pack(side="left")
+        self.v_export_over_limit = tk.BooleanVar(value=False)          # V4.7.4: skip over-limit episodes
+        ttk.Checkbutton(rb2, text="含超限", variable=self.v_export_over_limit).pack(side="left")
         ttk.Label(rb2, text="步数:").pack(side="left")
         self.v_train_steps = tk.StringVar(value="20000")
         ttk.Entry(rb2, textvariable=self.v_train_steps, width=7).pack(side="left")
@@ -1143,7 +1158,11 @@ class VLALeRobotTabUI:
         out = self._lerobot_export_root(L)
         cmd = [L["venv_python"], "-I", WORKER_PATH, "export", "--src", self.dataset.dataset_dir,
                "--repo-id", f"nero/{self.dataset.dataset_name}", "--root", out, "--fps", str(self.dataset.fps),
-               "--splits", "train"] + (["--overwrite"] if self.v_export_overwrite.get() else [])
+               "--splits", "train"] + (["--overwrite"] if self.v_export_overwrite.get() else []) \
+            + (["--include-over-limit"] if self.v_export_over_limit.get() else [])
+        n_over = [e["episode_index"] for e in self.dataset.list_episodes() if e.get("limit_ok") is False]
+        if n_over and not self.v_export_over_limit.get():
+            self._log(f"[INFO] [V4.7.4 EXPORT] 跳过关节超限的 Episode {n_over}（要包含：勾「含超限」）")
         if self._start_job("export", cmd, meta={"out": out}):
             self._log(f"[INFO] [V4.4 EXPORT] {n_train} 个 train Episode → {out}")
 
@@ -1421,6 +1440,16 @@ class VLALeRobotTabUI:
 
     def refresh_episode_list(self, select_idx=None) -> None:
         import NERO_V47_VLA_Tools as TL
+        import NERO_V474_Episode_Tools as ET
+        if getattr(self, "_rec_phase", "idle") == "idle":   # V4.7.4: older episodes get their joint-limit check once
+            try:
+                done = ET.backfill_limits(self.dataset, self._joint_limits())
+                bad = [e["episode_index"] for e in self.dataset.list_episodes()
+                       if e.get("limit_ok") is False and e["episode_index"] in done]
+                if bad:
+                    self._log(f"[WARN] [V4.7.4 LIMIT] 旧 Episode {bad} 有关节超出可执行范围（列表标红，导出训练时跳过）")
+            except Exception as exc:
+                self._log(f"[WARN] [V4.7.4 LIMIT] 检查旧 Episode 的关节范围失败：{exc}")
         try:
             rows = TL.episode_rows(self.dataset)
         except Exception as exc:
@@ -1439,9 +1468,11 @@ class VLALeRobotTabUI:
             tags = () if r["exists"] else ("bad",)
             if r["exists"] and not r["valid"]:
                 tags = ("invalid",)
+            if r["exists"] and r.get("limit_ok") is False:          # V4.7.4
+                tags = ("bad",)
             tv.insert("", "end", iid=str(r["idx"]), tags=tags, values=(
                 f"#{r['idx']}", f"{r['dur_s']:.1f} s", r["frames"],
-                ("有效" if r["valid"] else "无效") if r["exists"] else "文件缺失",
+                ("超限" if r.get("limit_ok") is False else ("有效" if r["valid"] else "无效")) if r["exists"] else "文件缺失",
                 r["saved_at"][5:16] if len(r["saved_at"]) >= 16 else r["saved_at"],
                 (f"{r['size_mb']:.0f} MB" if r["size_mb"] >= 10 else f"{r['size_mb']:.1f} MB") if r["exists"] else "-",
                 r["task"]))
@@ -1480,8 +1511,9 @@ class VLALeRobotTabUI:
         except Exception as exc:
             self._log(f"[WARN] [V4.7 EPISODES] 打不开文件夹（{exc}）：{d}")
 
-    def _yolo_fn_for_player(self):
-        """(fn(rgb) -> dets, note) with the Agentic tab's YOLOE settings, read here in the Tk thread"""
+    def _yolo_fn_for_player(self, prompts=None, task=""):
+        """(fn(rgb) -> dets, note) with the Agentic tab's YOLOE settings, read here in the Tk thread.
+        V4.7.4: the prompts come from the episode's task text (or the player's text box), not fixed to eggs"""
         rt = self.rct_tab
         if rt is None or not hasattr(rt, "yolo_cfg"):
             return None, "YOLOE 不可用：Agentic实机任务 页没有建立"
@@ -1492,14 +1524,15 @@ class VLALeRobotTabUI:
         if cfg.get("error"):
             return None, f"YOLOE 不可用：{cfg['error'][:60]}"
         det = cfg["detector"]
-        prompts = list(cfg.get("prompts") or [])
-        if not prompts or (len(prompts) == 1 and prompts[0].strip().lower() == "cup"):
-            prompts = ["egg", "egg carton"]
+        if not prompts:
+            import NERO_V474_Episode_Tools as ET
+            prompts = ET.task_prompts(task, fallback=list(cfg.get("prompts") or []) or ["object"])
+        prompts = list(prompts)
         mode, path, conf = cfg.get("mode", "text"), cfg["path"], float(cfg.get("conf", 0.25))
 
         def fn(rgb):
             return det.detect(rgb, mode, path, prompts=prompts, conf=conf)
-        return fn, f"YOLOE：{', '.join(prompts[:3])} · ≥ {conf:.2f}"
+        return fn, f"YOLOE：{', '.join(prompts)} · ≥ {conf:.2f}"
 
     def on_play_episode_video(self) -> None:
         """V4.7: play the recorded main + wrist camera video of the selected episode (YOLOE labels optional)"""
@@ -1515,11 +1548,12 @@ class VLALeRobotTabUI:
             if pl.alive and pl.rd.path == row["file"]:
                 pl.win.lift()
                 return
-        yfn, note = self._yolo_fn_for_player()
+        yfn, note = self._yolo_fn_for_player(task=row.get("task", ""))
         try:
             pl = TL.EpisodePlayer(self.tk, self.ttk, self.parent.winfo_toplevel(), row["file"],
                                   title=f"Episode #{row['idx']} 录像 · {self.dataset.dataset_name}", yolo_fn=yfn,
                                   yolo_note=note, log=self._log,
+                                  yolo_factory=lambda pr: self._yolo_fn_for_player(prompts=pr),
                                   on_close=lambda p_: self.players.remove(p_) if p_ in self.players else None)
         except Exception as exc:
             self._log(f"[FAIL] [V4.7 EPISODES] 打不开录像：{exc}")
@@ -1530,6 +1564,41 @@ class VLALeRobotTabUI:
     def _post(self, fn) -> None:
         """run fn in the Tk thread (from any thread)"""
         self.q.put(("call", fn))
+
+    # ---------------------------------------------------------------- V4.7.4 joint limits
+    def _joint_limits(self):
+        lim = (getattr(self.jpanel, "model", None) or {}).get("limits") if self.jpanel is not None else None
+        return [tuple(x) for x in lim][:7] if lim and len(lim) >= 7 else None
+
+    def _check_live_limits(self) -> None:
+        """the newest recorded joint vector against the commandable range (A): label colour, log + bell once"""
+        import NERO_V474_Episode_Tools as ET
+        fr = getattr(self.recorder, "_frames", None) or []
+        if not fr:
+            return
+        try:
+            q = [float(v) for v in fr[-1]["state"][:7]]
+        except Exception:
+            return
+        hits = ET.check_q(q, self._joint_limits())
+        over = {h["joint"] for h in hits if h["level"] == "over"}
+        for h in hits:
+            if h["level"] == "over":
+                self._limit_max[h["joint"]] = max(self._limit_max.get(h["joint"], 0.0), h["over_deg"])
+        for j in sorted(over - self._limit_over):
+            h = next(x for x in hits if x["joint"] == j)
+            self._log(f"[WARN] [V4.7.4 LIMIT] 录制中 J{j} 到了 {h['deg']:+.1f}°，超出可执行范围"
+                      f"（{h['lo']:+.0f}° ~ {h['hi']:+.0f}°）—— 往回带；这段会被标记，机械臂回放 / 执行不了")
+            try:
+                self.parent.bell()
+            except Exception:
+                pass
+        self._limit_over = over
+        self.v_limit_warn.set(ET.live_text(hits))
+        try:
+            self.lbl_limit_warn.configure(fg="#c62828" if over else ("#ef6c00" if hits else "#2e7d32"))
+        except Exception:
+            pass
 
     def _real_teach_ok(self) -> bool:
         return (self.v_backend.get() == "real" and self.teach_bar is not None
@@ -1635,6 +1704,10 @@ class VLALeRobotTabUI:
         self._start_recording(auto_teach=True)
 
     def _start_recording(self, auto_teach) -> None:
+        self.dataset.joint_limits_rad = self._joint_limits()          # V4.7.4: flags over-limit frames on save
+        self._limit_over, self._limit_max = set(), {}
+        if hasattr(self, "v_limit_warn"):
+            self.v_limit_warn.set("")
         r = self.recorder.start_recording(self.v_task.get().strip(), split="train")
         if not r.get("ok"):
             self._rec_phase = "idle"
@@ -1688,9 +1761,30 @@ class VLALeRobotTabUI:
             ep = res["episode"]
             self.v_ep_idx.set(str(ep["episode_index"]))
             self.v_rec_status.set(f"已保存 Episode #{ep['episode_index']} → {ep.get('file')}")
+            if ep.get("limit_ok") is False:
+                self._ask_over_limit(ep)
         else:
             self.v_rec_status.set(f"保存失败：{res.get('error')}")
         self._update_ep_info()
+        self._refresh_recent_eps()
+
+    def _ask_over_limit(self, ep) -> None:
+        """V4.7.4 (B): an episode with joints outside the commandable range -> keep (marked) or delete"""
+        import NERO_V474_Episode_Tools as ET
+        txt = ET.report_text(ep.get("limit_report") or {})
+        self._log(f"[WARN] [V4.7.4 LIMIT] Episode #{ep['episode_index']} 有关节超出可执行范围：{txt}")
+        if self.ask("Episode 超出关节限位", f"Episode #{ep['episode_index']} 里有关节超出可执行范围：\n{txt}\n\n"
+                    "机械臂回放不了，用它训练出来的模型也会要求机械臂去够不到的位置。\n\n"
+                    "删除这个 Episode 吗？\n是 = 删除（建议，重录一个）\n否 = 保留：列表里标红，导出训练时默认跳过"):
+            for pl in list(self.players):
+                if pl.rd.path == ep.get("file"):
+                    pl.close()
+            ok = self.dataset.delete_episode(int(ep["episode_index"]))
+            self._log(f"[{'OK' if ok else 'WARN'}] [V4.7.4 LIMIT] 已删除超限的 Episode #{ep['episode_index']}")
+            self.v_rec_status.set(f"已删除超限的 Episode #{ep['episode_index']}（没有保存）")
+        else:
+            self._log(f"[INFO] [V4.7.4 LIMIT] 保留 Episode #{ep['episode_index']}（标红；导出训练时默认跳过）")
+        self._n_eps_cache = None
         self._refresh_recent_eps()
 
     def _refresh_recent_eps(self) -> None:
@@ -1761,6 +1855,156 @@ class VLALeRobotTabUI:
             if not r.get("ok") and r.get("error"):
                 self._log(f"[FAIL] [V4.6.9 REPLAY] 回放 Episode #{idx} 失败：{r.get('error')}")
         threading.Thread(target=_job, daemon=True).start()
+
+    # ---------------------------------------------------------------- V4.7.4 edit task / rename dataset
+    def _selected_indices(self):
+        out = []
+        for iid in self.ep_tree.selection():
+            try:
+                out.append(int(iid))
+            except ValueError:
+                pass
+        return sorted(out)
+
+    def _ds_edit_blocked(self):
+        if self._rec_phase != "idle":
+            return "录制 / 保存中"
+        if self._ds_busy:
+            return "上一次修改的录像文件还在后台更新"
+        job = getattr(self, "job", None)
+        if job is not None and job.running():
+            return "导出 / 训练正在运行（它在读这个数据集）"
+        return None
+
+    def on_edit_task(self) -> None:
+        """dialog: the selected episodes or the whole dataset, new task text -> edit_task()"""
+        why = self._ds_edit_blocked()
+        if why:
+            self._log(f"[WARN] [V4.7.4 TASK] 现在不能修改任务描述：{why}")
+            return
+        rows = getattr(self, "_ep_rows", []) or []
+        if not rows:
+            self._log("[INFO] [V4.7.4 TASK] 这个数据集还没有 Episode")
+            return
+        sel = self._selected_indices() or [r["idx"] for r in rows[:1]]
+        first = next((r for r in rows if r["idx"] == sel[0]), rows[0])
+        tk, ttk = self.tk, self.ttk
+        w = tk.Toplevel(self.parent.winfo_toplevel())
+        w.title("修改任务描述")
+        w.transient(self.parent.winfo_toplevel())
+        self._task_dlg = w
+        f = ttk.Frame(w, padding=10)
+        f.pack(fill="both", expand=True)
+        v_scope = tk.StringVar(value="sel")
+        ttk.Radiobutton(f, text=f"选中的 Episode：{', '.join('#' + str(i) for i in sel)}", value="sel",
+                        variable=v_scope).pack(anchor="w")
+        ttk.Radiobutton(f, text=f"整个数据集「{self.dataset.dataset_name}」（{len(rows)} 个 Episode）", value="all",
+                        variable=v_scope).pack(anchor="w")
+        ttk.Label(f, text=f"现在的描述：{first['task']}", foreground="#607d8b", wraplength=640).pack(anchor="w", pady=(6, 2))
+        ttk.Label(f, text="新的描述（训练时模型就是看这句话做事，要和录的动作一致）：").pack(anchor="w")
+        v_new = tk.StringVar(value=first["task"])
+        ent = ttk.Entry(f, textvariable=v_new, width=90)
+        ent.pack(fill="x", pady=2)
+        ent.focus_set()
+        bf = ttk.Frame(f)
+        bf.pack(fill="x", pady=(8, 0))
+
+        def ok():
+            idx = sel if v_scope.get() == "sel" else [r["idx"] for r in rows]
+            new = v_new.get().strip()
+            w.destroy()
+            self._task_dlg = None
+            self.edit_task(idx, new)
+        self._task_dlg_vars = (v_scope, v_new, ok)
+        ttk.Button(bf, text="修改", command=ok).pack(side="right", padx=2)
+        ttk.Button(bf, text="取消", command=lambda: (w.destroy(), setattr(self, "_task_dlg", None))).pack(side="right")
+        w.bind("<Return>", lambda e: ok())
+        w.bind("<Escape>", lambda e: (w.destroy(), setattr(self, "_task_dlg", None)))
+
+    def edit_task(self, indices, new_task) -> bool:
+        """V4.7.4: meta/episodes.jsonl + tasks.jsonl now (after a backup), the copy inside each episode file in the
+        background; every change logged"""
+        import NERO_V474_Episode_Tools as ET
+        why = self._ds_edit_blocked()
+        if why:
+            self._log(f"[WARN] [V4.7.4 TASK] 现在不能修改任务描述：{why}")
+            return False
+        r = ET.set_episode_task(self.dataset, indices, new_task)
+        if not r.get("ok"):
+            self._log(f"[WARN] [V4.7.4 TASK] 没有修改：{r.get('error')}")
+            return False
+        self._log(f"[INFO] [V4.7.4 TASK] 修改前已备份 meta → {r['backup']}")
+        for i, old, new in r["changes"]:
+            self._log(f"[OK] [V4.7.4 TASK] Episode #{i}：「{old}」→「{new}」" if old != new else
+                      f"[INFO] [V4.7.4 TASK] Episode #{i}：描述本来就是「{new}」")
+        self.refresh_episode_list()
+        self._refresh_recent_eps()
+        todo = [(i, p) for (i, _o, _n), p in zip(r["changes"], r["npz"]) if _o != _n]
+        if not todo:
+            return True
+        self._ds_busy = "task"
+        upd = {"tasks": [str(new_task).strip()], "task_index": r["task_index"], "task_id": f"task_{r['task_index']}"}
+        self._log(f"[INFO] [V4.7.4 TASK] 后台更新 {len(todo)} 个录像文件里的描述副本（界面可以继续用；训练导出看的是 "
+                  "meta/episodes.jsonl，已经改好）…")
+
+        def job():
+            bad = []
+            for i, p in todo:
+                res = ET.update_npz_meta(p, upd)
+                if res.get("ok"):
+                    self._log(f"[OK] [V4.7.4 TASK] Episode #{i} 录像文件已更新（{res['seconds']:.1f} s）")
+                else:
+                    bad.append(i)
+                    self._log(f"[WARN] [V4.7.4 TASK] Episode #{i} 录像文件没更新（{res.get('error')}）；"
+                              "不影响训练（导出用 meta/episodes.jsonl），只是播放器标题还是旧描述")
+            self._post(lambda: self._edit_task_done(len(todo), bad))
+        threading.Thread(target=job, daemon=True, name="v474_task_npz").start()
+        return True
+
+    def _edit_task_done(self, n, bad) -> None:
+        self._ds_busy = None
+        self._log(f"[{'OK' if not bad else 'WARN'}] [V4.7.4 TASK] 任务描述修改完成：{n - len(bad)} / {n} 个录像文件已更新")
+
+    def on_rename_dataset(self) -> None:
+        why = self._ds_edit_blocked()
+        if why:
+            self._log(f"[WARN] [V4.7.4 RENAME] 现在不能重命名数据集：{why}")
+            return
+        from tkinter import simpledialog
+        new = simpledialog.askstring("重命名数据集", f"数据集「{self.dataset.dataset_name}」的新名字\n"
+                                     "（英文字母、数字、_ - .；例如 Block_into_boxes_1）：",
+                                     initialvalue=self.dataset.dataset_name, parent=self.parent.winfo_toplevel())
+        if new is None or new.strip() == self.dataset.dataset_name:
+            return
+        self.rename_dataset_to(new.strip())
+
+    def rename_dataset_to(self, new) -> bool:
+        import NERO_V474_Episode_Tools as ET
+        why = self._ds_edit_blocked()
+        if why:
+            self._log(f"[WARN] [V4.7.4 RENAME] 现在不能重命名数据集：{why}")
+            return False
+        old, root = self.dataset.dataset_name, self.dataset.root_dir
+        bad = ET.check_dataset_name(root, new)
+        if bad:
+            self._log(f"[WARN] [V4.7.4 RENAME] 没有重命名：{bad}")
+            return False
+        for pl in list(self.players):
+            if os.path.dirname(os.path.dirname(pl.rd.path)) == self.dataset.dataset_dir:
+                pl.close()
+        r = ET.rename_dataset(root, old, new)
+        if not r.get("ok"):
+            self._log(f"[FAIL] [V4.7.4 RENAME] 重命名失败：{r.get('error')}")
+            return False
+        self.dataset = NEROLeRobotDataset(dataset_name=new, root_dir=root)
+        self.recorder.dataset = self.dataset
+        self.v_ds_name.set(new)
+        self._n_eps_cache = None
+        self._log(f"[OK] [V4.7.4 RENAME] 数据集「{old}」→「{new}」：{r['new']}（以后录的 Episode 也存到这里）。"
+                  "以前导出过的 LeRobot 数据集还是旧名字，训练前请重新「导出为 LeRobot 数据集」")
+        self.refresh_episode_list()
+        self._refresh_recent_eps()
+        return True
 
     def on_delete_episode(self) -> None:
         """V4.7: confirm, close its player, delete the file + the index entry, refresh"""
@@ -1946,6 +2190,7 @@ class VLALeRobotTabUI:
         if hasattr(self, "v_arb_text"):                         # V4.6.9 top bar
             self.v_arb_text.set(f"控制权: {arb['mode']} · {'允许控制' if arb['allow_control'] else '只读'}")
             if hasattr(self, "recorder") and self.recorder.is_recording:
+                self._check_live_limits()
                 n = len(getattr(self.recorder, "_frames", []) or [])
                 self.v_rec_status.set(f"录制中：{n} 帧（{n / max(1.0, self.recorder.fps):.1f} s）· 后端 "
                                       f"{self.v_backend.get()}" + ("" if self.v_backend.get() == "real" else

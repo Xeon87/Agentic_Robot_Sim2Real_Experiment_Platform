@@ -1,3 +1,11 @@
+## V4.7.4 (2026-11-10) — 关节超限 A+B+C1、回放 YOLOE 按任务、修改任务描述、重命名数据集
+- 新 `NERO_V474_Episode_Tools.py`：可执行范围（限位 − 3°）检查（实时 / 整个 Episode）、任务描述 → YOLOE 提示词、`set_episode_task`（先备份 meta）、`update_npz_meta`（流式重写录像文件里的描述副本，数组逐位不变）、`rename_dataset`（修正 episodes.jsonl 里的文件路径）、`backfill_limits`（旧 Episode 补检查）。
+- `NERO_V4_Dataset_Recorder.py`：保存时写 `limit_ok` / `limit_report`；`replay_episode_real` 回放前按真实限位检查，超限不动。
+- `NERO_V44_SmolVLA_Worker.py`：导出默认跳过 `limit_ok=false`（`--include-over-limit` 包含）。
+- `NERO_V4_Console_Tab.py`：录制中超限提示行（橙 / 红 + 日志 + 响一声）；保存后超限弹窗（删除 / 保留）；列表"超限"标红；「含超限」导出选项；Episode 列表可多选；「修改任务描述…」「重命名数据集…」。
+- `NERO_V47_VLA_Tools.py`：播放器 YOLOE 提示词输入框 +「应用」；提示词默认来自任务描述（不再固定 egg / egg carton）。
+- 测试：新 `tests/test_v4_7_4.py`、`tests/test_v4_7_4_gui.py`；版本白名单补 V4.7.4。
+
 ## V4.7.3 (2026-11-10) — Smol VLA 页：Episode 列表行高、带 YOLOE 的录像回放、录制前先到 ready_to_work
 - `NERO_V4_Console_Tab.py`：Episode 表用共用 Treeview 样式（行高 = 字体行高 + 8，原来默认固定行高在缩放屏上重叠）；「开始示教录制」（实机）先问是否移到 ready_to_work（是 / 否 / 取消），是 → 10% 速度 `move_and_settle` → 示教模式 → 录制，移动失败则不进示教、不录制；`ready_to_work_deg()` 姿态库 `ready_to_work` 优先，否则内置用户 2026-11-09 的位姿。
 - `NERO_V47_VLA_Tools.py`：EpisodePlayer 视频线程和 YOLOE 线程分开；不比屏幕上的帧旧的帧都画（原来只画"仍是当前帧"的结果，开 YOLOE 时播放中每帧都被丢掉 → 黑屏、最后一张静止图）；标签取当前帧或前 2 帧。

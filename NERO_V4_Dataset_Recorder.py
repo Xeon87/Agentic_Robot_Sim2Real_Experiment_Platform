@@ -131,6 +131,7 @@ class NEROLeRobotDataset:
         self.data_dir = os.path.join(self.dataset_dir, "data")
         self.fps = float(fps)
         self.image_shape = (int(image_shape[0]), int(image_shape[1]), 3)
+        self.joint_limits_rad = None            # V4.7.4: the arm's limits (rad); None = NERO URDF defaults
         os.makedirs(self.meta_dir, exist_ok=True)
         os.makedirs(self.data_dir, exist_ok=True)
         self._ensure_meta()
@@ -250,7 +251,11 @@ class NEROLeRobotDataset:
         ep_idx = (max(e["episode_index"] for e in existing) + 1) if existing else 0
         task_idx = self._register_task(task_instruction)
 
+        import NERO_V474_Episode_Tools as ET                  # V4.7.4: frames outside the commandable range
+        lim_rep = ET.episode_limit_report(states, self.fps, self.joint_limits_rad)
         ep_meta = {
+            "limit_ok": bool(lim_rep["ok"]),
+            "limit_report": lim_rep,
             "episode_index": ep_idx,
             "task_id": task_id or f"task_{task_idx}",
             "task_index": task_idx,
@@ -765,6 +770,12 @@ def replay_episode_real(dataset, ep_idx, pipe, model, gripper=None, speed=0.5, l
     ep = dataset.load_episode(int(ep_idx))
     states = ep["observation_state"]
     fps = float(ep["meta"].get("fps", 20.0))
+    import NERO_V474_Episode_Tools as ET                      # V4.7.4 (C1): check BEFORE anything moves
+    rep = ET.episode_limit_report(states, fps, model.get("limits") if isinstance(model, dict) else None, margin=0.0)
+    if not rep["ok"]:
+        log(f"[FAIL] [V4.7.4 REPLAY] Episode #{ep_idx} 有超出关节限位的帧，机械臂走不到，没有回放（机械臂没动）："
+            f"{ET.report_text(rep)}。这是示教时手把关节带过了限位；这个 Episode 建议删除重录")
+        return {"ok": False, "error": "outside joint limits", "limit_report": rep}
     segs = plan_real_replay(states, fps, speed=speed)
     if not segs:
         log(f"[FAIL] [V4.6.9 REPLAY] Episode #{ep_idx} 太短，没有可回放的轨迹")
