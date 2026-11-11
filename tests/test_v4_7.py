@@ -107,7 +107,7 @@ class TestV47(unittest.TestCase):
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
         self.assertEqual((C.VERSION, RR.VERSION), (v, v))
-        self.assertIn(v, ("V4.7", "V4.7.1", "V4.7.2", "V4.7.3", "V4.7.4", "V4.8", "V4.8.1", "V4.8.2"))
+        self.assertIn(v, ("V4.7", "V4.7.1", "V4.7.2", "V4.7.3", "V4.7.4", "V4.8", "V4.8.1", "V4.8.2", "V4.8.3"))
         self.assertEqual(TL.MARKER, "V4.7 EPISODE BROWSER + PLAYER")
         self.assertEqual(VT.MARKER_V47, "V4.7 ONE-CLICK PREPARE + EPISODE BROWSER")
         self.assertEqual([k for k, _t in VT.PREP_STEPS],

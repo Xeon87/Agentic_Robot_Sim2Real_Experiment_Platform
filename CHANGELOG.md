@@ -1,3 +1,12 @@
+## V4.8.3 (2026-11-11) — 桌面整理「听懂弦外之音」（原装夹爪 · 7 件物品 / 4 个容器 · 意图层 · 预览 / 提问 · 汇报 · 偏好记忆）
+- 新场景 `tidy_desk`（`NERO_V343_Scenes.py`）：sort_items 的变体（后端、相机进程、技能都走 sort_items 分支），NERO 原装夹爪；`set_sort_layout("tidy" / "sort")` 原地切换物品 / 容器表（V3.72 的 sort_items 不变）。7 件物品（香蕉、苹果、纸团、饼干、积木、马克笔、鼠标）+ 4 个容器（水果盘最多 2 件）（水果盘、垃圾桶、文具盒、玩具箱，带 accepts / capacity）。布局按原装夹爪的可达范围排（TCP 在 155 mm：俯抓只到 x −0.34…−0.46 m；手指只能大致沿 y 合拢）。
+- `NERO_V372_Sort_Skills.py`：原装夹爪对称夹持（`self.sym`：抓取线过物体中心、开口 = 宽度 + 12 mm、≤ 70 mm 行程、手指脚印 56 × 26.5 mm 和邻近物品 / 容器壁的间隙、指尖离桌 ≥ 4 mm、太宽 → `ITEM_TOO_WIDE`）；放置时两指必须在容器内、不碰里面已有的东西；空容器先放远侧；长距离搬运（到机械臂旁边的垃圾桶）走一个 ≥ 0.40 m 的中间点；新工具 `return_item_to_table`；`sync_layout()`；验证钩子 `_measure_after_lift` / `_where_after_place`（实机覆盖）。仿真 RUN TASK 在 tidy 布局下交给意图层。
+- `NERO_V375_Collision_Check.py`：`agx_parts`（原装夹爪本体 / 两指 / 支架 / 相机盒 + link5–7）、`gripper_parts`、`assess(gripper=...)`（原装夹爪时 MoveIt 的夹爪接触也算碰撞）。
+- 新 `NERO_V483_Tidy.py`：意图（孩子 / 客人 / 开会 / 饿了 / 清垃圾 / 下班 / 整理）→ 每件物品 放进哪个容器 / 留着（原因）/ 问你；LLM（JSON）或离线规则；你直接说的话优先（「别动饼干」「把饼干放进水果盘」「纸团扔了」）；校验（正在用的鼠标、容量、行程、已在容器里）；偏好记忆 `NERO_CALIB_DIR/tidy_prefs.json`（按场景 + 通用）；预览确认对话框；执行（挡住的第二轮回安全位姿再试，放不进的放回桌上）；整个桌面检查 + 中文汇报（`tidy_reports/`）；实机适配（YOLOE 物品 + 掩码朝向、`tidy_layout.json` 容器位置、夹爪开口判断夹住、放好后再看一眼）。
+- `NERO_V365_Real_Cup_Task.py`：场景 ④ 桌面整理（只规划 / 悬停 / 执行）、例句、YOLOE 提示词、预览对话框在 Tk 线程；非原装夹爪拦下悬停 / 执行；③ 分类在原装夹爪下提示用 ④。
+- `NERO_V312_Console.py`、`start_nero_sim.sh`：场景列表加 tidy_desk。
+- 测试：新 `tests/test_v4_8_3.py`（10 项）、`tests/test_v4_8_3_gui.py`（预览对话框）、`tests/test_v4_8_3_twin.py`（MuJoCo 孪生，没有 mujoco 时跳过）；`test_v3_61` / `test_v3_92` 场景列表放宽；版本白名单补 V4.8.3。
+
 ## V4.8.2 (2026-11-11) — 原装夹爪限速（默认 40 %，可调）+ 链路检查
 - `NERO_V48_Gripper.py`：`move()` 按速度一步步走（25 Hz；SDK 没有速度参数）；`agx.speed_pct`（默认 40）/ `agx.full_speed_mm_s`（150）；`set_speed_pct` / `speed_text` / `parse_speed`；失能会停止正在进行的开合。
 - `NERO_V48_Gripper_UI.py`、`NERO_V365_Real_Cup_Task.py`：速度选择框（实机NERO调试 → 夹爪；Agentic 夹爪区）。

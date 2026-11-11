@@ -26,8 +26,8 @@ import NERO_V386_Real_Wrist_Camera as RWC
 
 class TestV392Part1CleanPhysicsFixes(unittest.TestCase):
     def test_version_is_v392(self):
-        self.assertIn(RT.VERSION, ("V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4", "V4.6.5", "V4.6.6", "V4.6.8", "V4.6.9", "V4.6.10", "V4.6.11", "V4.6.12", "V4.6.13", "V4.7", "V4.7.1", "V4.7.2", "V4.7.3", "V4.7.4", "V4.8", "V4.8.1", "V4.8.2"))
-        self.assertIn(RWC.VERSION, ("V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4", "V4.6.5", "V4.6.6", "V4.6.8", "V4.6.9", "V4.6.10", "V4.6.11", "V4.6.12", "V4.6.13", "V4.7", "V4.7.1", "V4.7.2", "V4.7.3", "V4.7.4", "V4.8", "V4.8.1", "V4.8.2"))
+        self.assertIn(RT.VERSION, ("V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4", "V4.6.5", "V4.6.6", "V4.6.8", "V4.6.9", "V4.6.10", "V4.6.11", "V4.6.12", "V4.6.13", "V4.7", "V4.7.1", "V4.7.2", "V4.7.3", "V4.7.4", "V4.8", "V4.8.1", "V4.8.2", "V4.8.3"))
+        self.assertIn(RWC.VERSION, ("V3.92", "V3.93", "V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4", "V4.6.5", "V4.6.6", "V4.6.8", "V4.6.9", "V4.6.10", "V4.6.11", "V4.6.12", "V4.6.13", "V4.7", "V4.7.1", "V4.7.2", "V4.7.3", "V4.7.4", "V4.8", "V4.8.1", "V4.8.2", "V4.8.3"))
 
     def test_vision_review_rows_text_includes_depth_height_and_parse_truncated_json(self):
         dets = [
@@ -188,7 +188,7 @@ class TestV392Part2MultiSceneEggAndSort(unittest.TestCase):
         self.assertEqual(RT.parse_task_eggs("Put egg_2 into slot_5"), ("egg_2", "slot_5"))
         self.assertEqual(RT.parse_task_eggs("把鸡蛋放进蛋托"), ("egg_1", "slot_1"))
         scene_keys = [k for k, _ in RT.TASK_SCENES]
-        self.assertEqual(scene_keys, ["stack_cups", "fill_egg_holder", "sort_items"])
+        self.assertEqual(scene_keys[:3], ["stack_cups", "fill_egg_holder", "sort_items"])   # V4.8.3: + tidy_desk
 
 
 

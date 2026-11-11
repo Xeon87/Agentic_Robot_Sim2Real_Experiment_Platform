@@ -188,7 +188,7 @@ class TestV4610(unittest.TestCase):
         self.assertIn("STATUS: UNCONFIRMED", txt)
         self.assertNotIn("STATUS: SUCCESS", txt)
         s = src("NERO_V365_Real_Cup_Task.py")
-        self.assertIn('llm_drives = use_llm and scene not in ("fill_egg_holder", "sort_items")', s)
+        self.assertIn('llm_drives = use_llm and scene not in ("fill_egg_holder", "sort_items"', s)   # V4.8.3: + tidy_desk
         self.assertIn("mode + mode_tag", s)
         self.assertNotIn('mode + (" (LLM)" if use_llm else "")', s)
         self.assertIn('"unconfirmed": bool((res or {}).get("unconfirmed"))', src("NERO_V368_Real_Task_Record.py"))
@@ -230,7 +230,7 @@ class TestV4610(unittest.TestCase):
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
         self.assertEqual((C.VERSION, RR.VERSION), (v, v))
-        self.assertIn(v, ("V4.6.10", "V4.6.11", "V4.6.12", "V4.6.13", "V4.7", "V4.7.1", "V4.7.2", "V4.7.3", "V4.7.4", "V4.8", "V4.8.1", "V4.8.2"))
+        self.assertIn(v, ("V4.6.10", "V4.6.11", "V4.6.12", "V4.6.13", "V4.7", "V4.7.1", "V4.7.2", "V4.7.3", "V4.7.4", "V4.8", "V4.8.1", "V4.8.2", "V4.8.3"))
         self.assertEqual(RT.MARKER_V4610, "V4.6.10 VERIFY BY RELEASE POSITION + TRY HARDER VERIFY + UNCONFIRMED CONTINUE")
         self.assertEqual(C.MARKER_V4610, "V4.6.10 DEPTH DEFAULT 848x480 + DEFAULT")
 

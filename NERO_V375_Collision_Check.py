@@ -156,6 +156,48 @@ def official_gripper_parts(q, opening_mm=None):
     return parts
 
 
+SYM_GRIPPERS = ("official", "agx_gripper", "agx")
+TWIN_OFFICIAL_TIP_FROM_FLANGE_MM = 154.3            # V4.8.3: the twin's official pads end 30 mm past the TCP
+
+
+def agx_parts(q, opening_mm=None, tip_from_flange_mm=None, T_flange_cam=None, arm_links=True):
+    """V4.8.3 TIDY DESK: coarse boxes of the NERO original gripper (NERO_V481_Agx_Geom: housing 75 x 164 x 65 mm, two
+    56 x 26.5 x 76.5 mm fingers at +-opening/2, optional wrist-camera bracket from the hand-eye) + link5..link7"""
+    import NERO_V481_Agx_Geom as AG
+    fr = link_frames(q)
+    T7 = fr["link7"]
+    Tg = T7 @ AG.T_l7_grasp()
+    cam_G = None
+    if T_flange_cam is not None:
+        cam = np.asarray(T_flange_cam, float)[:3, 3]
+        Tl = AG.T_l7_grasp()
+        cam_G = Tl[:3, :3].T @ (cam - Tl[:3, 3])
+    opening = 60.0 if opening_mm is None else float(opening_mm)
+    old = AG.tip_from_flange_mm
+    if tip_from_flange_mm is not None:
+        AG.tip_from_flange_mm = lambda: float(tip_from_flange_mm)
+    try:
+        boxes = AG.boxes_in_G(opening, cam_G, margin_mm=0.0)
+    finally:
+        AG.tip_from_flange_mm = old
+    I3 = np.eye(3)
+    parts = [_local(Tg, f"agx_{n}", c, I3, h) for n, c, h in boxes]
+    if arm_links:
+        for ln, half in (("link5", 0.040), ("link6", 0.040), ("link7", 0.036)):
+            parts.append(_local(fr[ln], ln, [0, 0, 0], I3, [half, half, half]))
+    return parts
+
+
+def gripper_parts(q, opening_mm=None, gripper="so101", **kw):
+    """V4.8.3: the coarse boxes of the mounted gripper (so101 / official / agx_gripper)"""
+    if str(gripper) in SYM_GRIPPERS:
+        tip = kw.get("tip_from_flange_mm")
+        if tip is None and str(gripper) == "official":
+            tip = TWIN_OFFICIAL_TIP_FROM_FLANGE_MM
+        return agx_parts(q, opening_mm, tip, kw.get("T_flange_cam"))
+    return so101_parts(q, opening_mm)
+
+
 def check_parts(parts, world, margin=MARGIN_M):
     out = []
     for p in parts:
@@ -223,12 +265,16 @@ def classify_pairs(pairs, world=None):
     return blocking, model_only
 
 
-def assess(core, q, opening_mm=None, world=None, margin=MARGIN_M, extra_parts=None):
-    """SO-101 coarse geometry + MoveIt at q -> dict(ok, blocking, model_only, so101, moveit_available, moveit_valid)"""
+def assess(core, q, opening_mm=None, world=None, margin=MARGIN_M, extra_parts=None, gripper="so101", **kw):
+    """SO-101 coarse geometry + MoveIt at q -> dict(ok, blocking, model_only, so101, moveit_available, moveit_valid)
+    V4.8.3: gripper "official" / "agx_gripper" -> the original gripper's boxes (key "so101" kept: the mounted
+    gripper's own boxes); MoveIt's model IS that gripper then, so its gripper-link contacts block too"""
     world = world if world is not None else world_boxes()
-    so = check_parts(so101_parts(q, opening_mm) + list(extra_parts or []), world, margin)
+    so = check_parts(gripper_parts(q, opening_mm, gripper, **kw) + list(extra_parts or []), world, margin)
     mv = moveit_contacts(core, q) if core is not None else {"available": False, "valid": None, "pairs": []}
     blocking, model_only = classify_pairs(mv.get("pairs") or [], world)
+    if str(gripper) in SYM_GRIPPERS:
+        blocking, model_only = blocking + model_only, []
     if mv.get("available") and mv.get("valid") is False and not mv.get("pairs"):
         blocking.append(("moveit", mv.get("why") or "invalid"))
     return {"ok": not so and not blocking, "so101": so, "blocking": blocking, "model_only": model_only,

@@ -87,17 +87,22 @@ TASK_SCENES = (
     ("stack_cups", "① 叠杯子 stack_cups"),
     ("fill_egg_holder", "② 鸡蛋入蛋托 fill_egg_holder"),
     ("sort_items", "③ 物品分类 sort_items"),
+    ("tidy_desk", "④ 桌面整理 tidy_desk（听懂弦外之音 · 原装夹爪）"),       # V4.8.3 TIDY DESK
 )
 SCENE_DEFAULT_PROMPTS = {
     "stack_cups": "cup",
     "fill_egg_holder": "egg, egg carton",
     "sort_items": "banana, apple, mouse, marker",
+    "tidy_desk": "banana, apple, crumpled paper, cookie pack, toy block, marker pen, computer mouse",
 }
 SCENE_EXAMPLES = {
     "stack_cups": EXAMPLES,
     "fill_egg_holder": (("egg_1 → slot_1", "Put egg_1 into slot_1"), ("全部入托", "Place all eggs into empty carton slots")),   # V4.6.8: 全部入托 = fill the carton egg by egg
     "sort_items": (("水果→红 其余→蓝", "Put the fruit into the red bin and everything else into the blue bin"),
                    ("item_1 → red", "Put item_1 into red")),
+    # V4.8.3 TIDY DESK: the user describes the situation, the intent layer decides
+    "tidy_desk": (("妈妈要来", "我妈妈一会儿要来"), ("要开会", "等下要开会，帮我腾个地方"),
+                  ("孩子要来", "孩子一会儿来玩"), ("清垃圾", "把垃圾扔了，别的别动")),
 }
 
 
@@ -3029,6 +3034,10 @@ def make_skills(io, knobs=None, skill=None, log=None, scene="stack_cups"):
         io.skills = sk
         return sk
     if scene == "sort_items":
+        import NERO_V343_Scenes as SC
+        import NERO_V372_Sort_Skills as SK72
+        SC.set_sort_layout("sort")                    # V4.8.3: a tidy_desk run before switched the item tables
+        SK72.sync_layout()
         sk = RealSortSkills(io, knobs, skill)
         io.skills = sk
         return sk
@@ -3732,7 +3741,10 @@ class RealCupTaskTabUI:
             + ("\n[场景 ② 鸡蛋入蛋托] 6孔蛋托PCA定位 + 鸡蛋短轴抓角 + 腕部相机复查（egg_1 → slot_1）"
                if getattr(self, "v_task_scene", None) and self.v_task_scene.get() == "fill_egg_holder" else
                ("\n[场景 ③ 物品分类] 桌面物品3D定位 + 顶部抓取放入红/蓝分类盒"
-                if getattr(self, "v_task_scene", None) and self.v_task_scene.get() == "sort_items" else "")))
+                if getattr(self, "v_task_scene", None) and self.v_task_scene.get() == "sort_items" else
+                 ("\n[场景 ④ 桌面整理] 说一句你的情况（如「我妈妈一会儿要来」）-> 意图 + 整理计划 + 预览确认 / 提问 -> "
+                  "原装夹爪逐件收进水果盘 / 垃圾桶 / 文具盒 / 玩具箱 -> 检查整个桌面并汇报；记住你的回答"
+                  if getattr(self, "v_task_scene", None) and self.v_task_scene.get() == "tidy_desk" else ""))))
 
     # ---------------------------------------------------------------- cameras
     def on_cam_connect(self):
@@ -4261,7 +4273,10 @@ class RealCupTaskTabUI:
             if st.get("faults"):
                 bad.append("NERO 原装夹爪有故障：" + "、".join(st["faults"]) + "（实机NERO调试 → 夹爪 → 清除故障）")
         if mode in ("hover", "execute") and self.GG.is_agx() and scene == "sort_items":
-            bad.append("分拣任务还没有按 NERO 原装夹爪适配（V4.8.1 适配了叠杯子和鸡蛋）：只能「只规划」，或切回 SO-101")
+            bad.append("③ 物品分类（红框 / 蓝框）的实机流程还是 SO-101 的：原装夹爪请用 ④ 桌面整理 tidy_desk（V4.8.3），"
+                       "或切回 SO-101")
+        if mode in ("hover", "execute") and scene == "tidy_desk" and not self.GG.is_agx():     # V4.8.3
+            bad.append("④ 桌面整理是按 NERO 原装夹爪做的：请先在夹爪类型里选 NERO 原装夹爪")
         return bad
 
     def on_perceive(self):
@@ -4342,14 +4357,20 @@ class RealCupTaskTabUI:
             source, target = parse_task_eggs(task)
         elif scene == "sort_items":
             source, target = ("item_1", "blue" if "blue" in task.lower() and "red" not in task.lower() else "red")
+        elif scene == "tidy_desk":                          # V4.8.3: the intent layer reads the whole sentence
+            source, target = ("桌面", "容器")
         else:
             source, target = parse_task_cups(task)
         use_llm = bool(self.v_use_llm.get()) and mode == "execute"
         # V4.6.10: egg / sort tasks always run the fixed flow (run_execute) - the summary said "(LLM)" anyway
-        llm_drives = use_llm and scene not in ("fill_egg_holder", "sort_items")
+        llm_drives = use_llm and scene not in ("fill_egg_holder", "sort_items", "tidy_desk")
         mode_tag = (" (LLM)" if llm_drives else
                     (" (固定流程" + (" + Try harder" if try_harder else "") + ")") if mode == "execute" else "")
-        if use_llm and not llm_drives:
+        tidy_llm = bool(self.v_use_llm.get())               # V4.8.3: the intent layer may ask the LLM in every mode
+        if scene == "tidy_desk":
+            self._log("[INFO] [V4.8.3 TIDY] 意图理解：" + ("LLM（失败时用离线规则）" if tidy_llm else "离线规则（没勾 LLM）")
+                      + " · 动作用固定的抓放技能")
+        elif use_llm and not llm_drives:
             self._log("[INFO] [V4.6.10] 鸡蛋 / 分拣任务用固定流程（勾选的 LLM Agent 只用于叠杯子任务）")
         llm = {"provider": next((k for k, v in self.provs.items() if v == self.v_prov.get()), "openai"),
                "model": self.v_model.get().strip(), "api_key": self.v_key.get().strip(),
@@ -4405,7 +4426,7 @@ class RealCupTaskTabUI:
             if perceive_only:
                 if scene == "fill_egg_holder":
                     res = io.perceive_eggs("识别鸡蛋与蛋托")
-                elif scene == "sort_items":
+                elif scene in ("sort_items", "tidy_desk"):     # V4.8.3: the tidy desk uses the same YOLOE items
                     res = io.perceive_sort_items("识别分类物品")
                 else:
                     res = io.perceive("识别杯子")
@@ -4424,7 +4445,13 @@ class RealCupTaskTabUI:
                         + (f"\n⚠ 上次识别的桌面和安全区设定差 {self.last_table_offset_mm:+.0f} mm：手眼标定可能偏了，"
                            "抓取高度会偏同样多（V3.74）" if abs(getattr(self, "last_table_offset_mm", 0) or 0) > 10 else "")
                         + "\n确认周围无人、急停在手边？")
-                if not self.ask("NERO 实机叠杯子", text):
+                if scene == "tidy_desk":                    # V4.8.3 TIDY DESK
+                    text = (f"档位 {'② 悬停预演' if mode == 'hover' else '③ 实机执行'}：桌面整理「{task}」\n速度 {speed_desc}\n"
+                            "先识别桌面、理解你的话，弹出整理预览（可改、会提问），你点「开始整理」后才动。\n"
+                            + ("② 只到每件要收的物品上方约 8 cm，不下探、不合夹爪，然后回起点。" if mode == "hover" else
+                               "③ 会逐件抓起、放进容器，最后检查桌面并汇报。请先跑过 ② 悬停预演。")
+                            + "\n容器要放在 tidy_layout.json 写的位置（相机不识别容器）。\n确认周围无人、急停在手边？")
+                if not self.ask("NERO 实机桌面整理" if scene == "tidy_desk" else "NERO 实机叠杯子", text):
                     self._log("[INFO] [V3.65 REAL] 已取消")
                     return
             rec = None
@@ -4444,7 +4471,9 @@ class RealCupTaskTabUI:
                     self._log(f"[WARN] [V3.69 TASK VIDEO] 录像没开始：{exc}")
                     vid = None
             try:
-                if mode == "plan":
+                if scene == "tidy_desk":                    # V4.8.3 TIDY DESK: intent -> preview -> plan / hover / run
+                    out = self._run_tidy(io, task, mode, llm if tidy_llm else None)
+                elif mode == "plan":
                     out = run_plan_preview(io, source, target, knobs, skill, recorder=rec, scene=scene)
                 elif mode == "hover":
                     out = run_hover(io, source, target, knobs, skill, recorder=rec, scene=scene)
@@ -4512,6 +4541,30 @@ class RealCupTaskTabUI:
             if err is not None:
                 raise err
         self._start(f"实机叠杯子 {mode}", job)
+
+    def _run_tidy(self, io, task, mode, llm):
+        """V4.8.3 TIDY DESK on the real robot (worker thread): the preview dialog runs on the Tk thread"""
+        import threading as _th
+        import NERO_V483_Tidy as TD
+
+        def ask_preview(plan, desk):
+            ev, box = _th.Event(), {}
+
+            def show():
+                try:
+                    box["r"] = TD.TidyPreviewDialog(self.tk._default_root, plan, desk).show()
+                except Exception as exc:
+                    box["e"] = exc
+                finally:
+                    ev.set()
+            self._ui(show)
+            while not ev.wait(0.2):
+                if io.stop_ev.is_set():
+                    return None
+            if "e" in box:
+                raise box["e"]
+            return box.get("r")
+        return TD.run_real_tidy(io, task, mode, llm, ask_preview, log=self._log)
 
     def _apply_overlay(self, res, sk):
         """V3.71 LIVE OVERLAY (Tk thread): contours + labels of this perception, cup names from the skill"""

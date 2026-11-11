@@ -156,7 +156,8 @@ class TestV482(unittest.TestCase):
         import NERO_V313_Real_Robot as RR
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
-        self.assertEqual((v, C.VERSION, RR.VERSION), ("V4.8.2", "V4.8.2", "V4.8.2"))
+        self.assertEqual((v, RR.VERSION), (C.VERSION, C.VERSION))
+        self.assertIn(v, ("V4.8.2", "V4.8.3"))
         self.assertEqual(GG.SPEED_CHOICES, (30, 40, 50, 70, 100))
 
 

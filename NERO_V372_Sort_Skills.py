@@ -77,6 +77,34 @@ HELD_SLOW = 3.0              # time stretch of the rotate / carry / lowering mot
 # tracked with up to 5.6 deg error; the backend trips at 2.9 deg (0.05 rad) beyond a limit.
 HELD_MARGIN_DEG = float(os.environ.get("NERO_V377_HELD_MARGIN_DEG", "10.0"))
 START_CLEAR_Z_M = 0.30       # V3.76 START CLEAR: below this TCP height the task first rises straight up, then goes home
+# V4.8.3 NERO ORIGINAL GRIPPER (two fingers closing symmetrically about the grasp line, official / agx_gripper profile)
+SYM_OPEN_MARGIN_MM = 12.0    # open gap = item width + 2 x 6 mm
+SYM_STROKE_MM = 70.0         # the user's AgxGripper stroke (the twin's official gripper opens 100 mm; capped the same)
+SYM_MIN_FREE_MM = 6.0        # an item needs width + 6 mm <= stroke to be grasped at all
+SYM_TIP_ABOVE_TABLE_M = 0.004
+TWIN_OFFICIAL_TIP_M = 0.030  # twin official pads end 30 mm past the TCP (NERO_V362 _finger_xml)
+SYM_CLAMP_N = 6.0
+VIA_MIN_R_M = 0.40           # carry via point at least this far from the base axis
+SYM_JAW_CLEAR_M = 0.006      # open fingers keep this from every other item (2-D, finger footprints)
+SYM_ABOVE_WALL_M = 0.022     # tidy desk: low containers (30..60 mm) - a lower carry keeps the far side in reach
+SYM_RELEASE_EXTRA_MM = 10.0  # release: open to item width + 10 mm (5 mm per side; the bins are small)
+
+
+def sync_layout():
+    """V4.8.3 TIDY DESK: item ids / boxes / tool enums from the current NERO_V343 layout (sort / tidy)"""
+    global BOXES
+    ITEM_IDS.clear()
+    ITEM_IDS.update({f"item_{i + 1}": n for i, n in enumerate(SC.SORT_ITEM_NAMES)})
+    BODY_ID.clear()
+    BODY_ID.update({v: k for k, v in ITEM_IDS.items()})
+    BOXES = tuple(SC.SORT_BINS)
+    if "_IDS" in globals():
+        _IDS[:] = list(ITEM_IDS)
+        props = SORT_TOOLS[1]["parameters"]["properties"]
+        props["item_id"]["enum"] = list(_IDS)
+        props["box"]["enum"] = list(BOXES) + ["any"]
+        SORT_TOOLS[2]["parameters"]["properties"]["box"]["enum"] = list(BOXES)
+    return SC.sort_layout()
 
 
 def tf_name(body):
@@ -134,20 +162,24 @@ class SortTwinIO(CK.TwinIO):
     """the V3.62 headless twin (SO-101 parts, backend gripper / CONNECT-hold logic, URDF arm kinematics) with the
     sort_items bins + items"""
 
-    def __init__(self, log=None, seed=None, poses=None):
+    def __init__(self, log=None, seed=None, poses=None, gripper=None):
+        sync_layout()
+        if gripper is None:                                # V4.8.3: the tidy layout runs with the official gripper
+            gripper = "official" if SC.sort_layout() == SC.LAYOUT_TIDY else "so101"
         world = SC.sort_world_xml(seed, bare=True, poses=poses)
-        super().__init__(log=log, gripper="so101", world_xml=world, hold_names=SC.SORT_ITEM_NAMES,
-                         soft_pads=True)                    # V3.76 SOFT PADS, like the sorting scene
+        super().__init__(log=log, gripper=gripper, world_xml=world, hold_names=SC.SORT_ITEM_NAMES,
+                         soft_pads=gripper == "so101")      # V3.76 SOFT PADS, like the sorting scene
 
     def object_pose(self, body):
         b = self.d.body(body)
         return [float(v) for v in b.xpos], [float(v) for v in b.xquat]
 
     def state_check(self, q, opening_mm=None, extra_parts=None):
-        """V3.75 COLLISION PRE-CHECK (twin): no MoveIt here - SO-101 + wrist coarse boxes vs table / bins"""
+        """V3.75 COLLISION PRE-CHECK (twin): no MoveIt here - SO-101 (V4.8.3: or official) + wrist coarse boxes vs
+        table / bins"""
         if opening_mm is None:
             opening_mm = self.gripper_state().get("opening_mm")
-        return CC.assess(None, q, opening_mm, CC.world_boxes(SCENE), extra_parts=extra_parts)
+        return CC.assess(None, q, opening_mm, CC.world_boxes(SCENE), extra_parts=extra_parts, gripper=self._gripper)
 
 
 def _own_path_enabled():
@@ -165,7 +197,8 @@ class SortBackendIO(CK.BackendIO):
         return [float(v) for v in p], [float(q[3]), float(q[0]), float(q[1]), float(q[2])]
 
     def gripper_profile(self):
-        return CK.so101_profile()
+        # V4.8.3 TIDY DESK: the tidy_desk variant runs with the official gripper (the backend's own model)
+        return CK.so101_profile() if SC.gripper_variant() == "so101" else CK.OFFICIAL_PROFILE
 
     def pose_mode(self):
         return "truth"
@@ -173,12 +206,14 @@ class SortBackendIO(CK.BackendIO):
     # -- V3.75 COLLISION PRE-CHECK (backend): MoveIt (all contact pairs) + the SO-101 coarse geometry
     @property
     def v375_own_path(self):
-        return _own_path_enabled()
+        # V4.8.3: with the official gripper MoveIt's gripper model is the mounted one - no own path around it
+        return _own_path_enabled() and SC.gripper_variant() == "so101"
 
     def state_check(self, q, opening_mm=None, extra_parts=None):
         if opening_mm is None:
             opening_mm = self.gripper_state().get("opening_mm")
-        return CC.assess(self.core, q, opening_mm, CC.world_boxes(SCENE), extra_parts=extra_parts)
+        return CC.assess(self.core, q, opening_mm, CC.world_boxes(SCENE), extra_parts=extra_parts,
+                         gripper="so101" if SC.gripper_variant() == "so101" else "official")
 
     def move_line(self, label, xyz, quat, speed=0.05, slow=None):
         """V3.75 OWN PATH WHEN ONLY MOVEIT'S GRIPPER MODEL COLLIDES: MoveIt's robot model carries the official AgileX
@@ -270,6 +305,62 @@ class SortSkills(CK.CupSkills):
         self.held_phi = None             # V3.76: closing direction (deg, world) of the current grasp
         self.placed = {}                 # item id -> requested bin
         self.picked_from = {}
+        sync_layout()
+        # V4.8.3 NERO ORIGINAL GRIPPER: two fingers closing symmetrically about the grasp line
+        self.sym = self.prof.name in ("official", "agx_gripper")
+        self.stroke_mm = SYM_STROKE_MM
+        # V4.8.3: lift just high enough for the tallest container wall (+ 50 mm); V3.72: 130 mm for 60 mm walls
+        self.lift_m = (max([float(b["wall_h"]) for b in SC.SORT_BINS.values()] + [0.05]) + 0.05) if self.sym else LIFT_M
+        if self.prof.name == "agx_gripper":
+            import NERO_V481_Agx_Geom as AG
+            self.tip_drop_m = float(AG.tip_drop_m())
+            try:
+                import NERO_V48_Gripper as GG
+                self.stroke_mm = float((GG.load_cfg().get("agx") or {}).get("stroke_mm") or SYM_STROKE_MM)
+            except Exception:
+                pass
+        else:
+            self.tip_drop_m = TWIN_OFFICIAL_TIP_M if self.sym else CK.TIP_BEYOND_GRASP_M
+
+    def _cmd(self, gap_mm):
+        """gripper opening command for a fingertip gap (SO-101: its jaw-angle mapping; original gripper: the gap)"""
+        if self.sym:
+            return float(min(max(float(gap_mm), 0.0), self.stroke_mm))
+        import NERO_V364_SO101_Gripper as G
+        return G.opening_mm_for_tip_gap(gap_mm)
+
+    def _sym_fingers_fit(self, box, iid, slot, R, sp):
+        """V4.8.3: at the release (fingers opened to the release gap around the item centre) both fingers stay inside
+        the bin's inner walls and clear of the items already in it"""
+        import NERO_V481_Agx_Geom as AG
+        b = SC.SORT_BINS[box]
+        cx, cy = b["centre"]
+        ix, iy = b["inner"][0] / 2.0 - 0.002, b["inner"][1] / 2.0 - 0.002
+        gap = self._cmd(sp["width"] * 1000.0 + SYM_RELEASE_EXTRA_MM) / 1000.0
+        t = AG.FINGER_T_MM / 1000.0
+        xG, yG = R[:2, 0], R[:2, 1]
+        ang = math.atan2(float(xG[1]), float(xG[0]))
+        for s_ in (-1.0, 1.0):
+            c = np.asarray(slot, float) + s_ * (gap / 2.0 + t / 2.0) * np.asarray(yG, float)
+            for px, py in CC.rect_corners((float(c[0]), float(c[1])), (AG.FINGER_W_MM / 2000.0, t / 2.0), ang):
+                if abs(px - cx) > ix or abs(py - cy) > iy:
+                    return False
+        inside = [o for k, o in self._items().items() if k != iid and o["in_bin"] == box]
+        return not inside or self._sym_jaw_clear(np.asarray(slot, float), R, gap, inside) >= 0.003
+
+    def _sym_jaw_clear(self, p_a, R, gap_m, others):
+        """V4.8.3: smallest clearance of the two open fingers (56 x 26.5 mm footprints) to the other items"""
+        import NERO_V481_Agx_Geom as AG
+        xG, yG = R[:2, 0], R[:2, 1]
+        ang = math.atan2(float(xG[1]), float(xG[0]))
+        t = AG.FINGER_T_MM / 1000.0
+        best = 1e9
+        for s_ in (-1.0, 1.0):
+            c = np.asarray(p_a[:2], float) + s_ * (gap_m / 2.0 + t / 2.0) * np.asarray(yG, float)
+            fr = ((float(c[0]), float(c[1])), (AG.FINGER_W_MM / 2000.0, t / 2.0), ang)
+            for o in others:
+                best = min(best, CC.rect_dist(fr, SC.sort_item_footprint(o["body"], o["c"][:2], o["yaw_deg"])))
+        return best
 
     # -- helpers
     def _res(self, tool, ok, verification=None, reason=None, nxt=None, warnings=None, **extra):
@@ -308,12 +399,15 @@ class SortSkills(CK.CupSkills):
                                       "height": round(sp["height"] * 1000)},
                           "long_axis_yaw_deg": None if sp["shape"] == "round" else round(_wrap(it["yaw_deg"]), 1),
                           "in_bin": it["in_bin"], "on_table": bool(it["in_bin"] is None and it["c"][2] < sp["cz"] + 0.02),
-                          "held": self.held == iid})
+                          "held": self.held == iid, "name_cn": SC.item_cn(it["body"]),
+                          "attributes": list(sp.get("attrs") or [])})
         bins = []
         for col, b in SC.SORT_BINS.items():
             bins.append({"box": col, "colour": col, "side": b["side"], "centre_xy_m": list(b["centre"]),
                          "inner_size_mm": [round(v * 1000) for v in b["inner"]], "wall_height_mm": round(b["wall_h"] * 1000),
-                         "open_top": True, "contains": [i["id"] for i in items if i["in_bin"] == col]})
+                         "open_top": True, "contains": [i["id"] for i in items if i["in_bin"] == col],
+                         "name_cn": SC.bin_label(col), "accepts": list(b.get("accepts") or []),
+                         "capacity": b.get("capacity")})
         return {"scene": SCENE, "pose_source": "simulator ground truth (TF); labels = the scene's object names",
                 "items": items, "boxes": bins, "held_item": self.held, "tcp_xyz_m": [round(v, 4) for v in tcp],
                 "gripper": g}
@@ -379,16 +473,16 @@ class SortSkills(CK.CupSkills):
         return {"moved": True, "home": bool(r.get("ok", True)), "straight_rise": rose,
                 "rose_to_mm": round(float(self.io.tcp_pose()[0][2]) * 1000)}
 
-    def _v376_placeable(self, it, phi_deg, q_lift, p_grasp, boxes=BOXES):
+    def _v376_placeable(self, it, phi_deg, q_lift, p_grasp, boxes=None):
         """V3.76 PLACEABLE GRASP: in how many bins the item can be laid lengthwise from this grasp - the place planner
         itself (_plan_place, lengthwise angles only) on the state predicted after the lift (the item rigid in the
         gripper, LIFT_M higher)"""
         T_l = self._arm().fk(np.asarray(q_lift, float))
         p_l, R_l = T_l[:3, 3].copy(), T_l[:3, :3].copy()
-        c_l = np.asarray(it["c"], float) + np.array([0.0, 0.0, LIFT_M])
+        c_l = np.asarray(it["c"], float) + np.array([0.0, 0.0, self.lift_m])
         off = R_l.T @ (c_l - p_l)
         n = 0
-        for box in boxes:
+        for box in (boxes or BOXES):
             # V3.77: +2 deg over the held margin - the real lift differs a little from the rigid prediction (test: the
             # predicted placement had >= 10 deg, after the lift the best one had 9.9 deg)
             best, _rej = self._plan_place(box, it["id"], it, q_lift, p_l, R_l, off, phi_deg, float(c_l[2]),
@@ -432,6 +526,12 @@ class SortSkills(CK.CupSkills):
         sp = it["spec"]
         width = float(sp["width"])
         gap_m = (width * 1000.0 + OPEN_MARGIN_MM) / 1000.0
+        self.v375_rejects = []
+        if self.sym:
+            if width * 1000.0 + SYM_MIN_FREE_MM > self.stroke_mm:      # V4.8.3: wider than the stroke allows
+                self.v375_rejects = [{"too_wide_mm": round(width * 1000.0), "stroke_mm": self.stroke_mm}]
+                return None
+            gap_m = min(width * 1000.0 + SYM_OPEN_MARGIN_MM, self.stroke_mm) / 1000.0
         if sp["shape"] == "round":
             phis = list(range(0, 360, 30)) + list(range(15, 360, 30))
         else:
@@ -441,25 +541,29 @@ class SortSkills(CK.CupSkills):
         zg = float(it["c"][2])
         if sp.get("grasp_z") is not None:                # grasp height above the item bottom (flat sides)
             zg = float(it["c"][2]) - float(sp["cz"]) + float(sp["grasp_z"])
-        zg = max(zg, TIP_Z_MIN_M)
+        zg = max(zg, (self.tip_drop_m + SYM_TIP_ABOVE_TABLE_M) if self.sym else TIP_Z_MIN_M)
         # half width at the grasp height (round cross-sections - banana / apple / marker - are narrower off-centre)
         dz = zg - float(it["c"][2])
         half = math.sqrt(max((width / 2.0) ** 2 - dz * dz, (width / 4.0) ** 2))
         import NERO_V364_SO101_Gripper as G
         cands = []
-        self.v375_rejects = []
-        open_v = G.opening_mm_for_tip_gap(gap_m * 1000.0)
-        held_v = G.opening_mm_for_tip_gap(max(2.0, width * 1000.0))
+        open_v = self._cmd(gap_m * 1000.0)
+        held_v = self._cmd(max(2.0, width * 1000.0))
         for ph in phis:
             phi = math.radians(ph)
             R = grasp_R(phi)
             yG = R[:, 1]
-            # grasp frame origin = fixed pad face + WALL_HALF; put the pad face FIXED_PAD_GAP off the item side
-            p_a = np.array([it["c"][0], it["c"][1], zg]) - (half + FIXED_PAD_GAP_M - G.WALL_HALF) * yG
-            clear = self._jaw_clear(it, p_a, yG, gap_m, others)
-            if clear < JAW_CLEAR_M:
+            if self.sym:
+                # V4.8.3: the grasp line through the item centre, both fingers gap/2 off it
+                p_a = np.array([it["c"][0], it["c"][1], zg])
+                clear = self._sym_jaw_clear(p_a, R, gap_m, others)
+            else:
+                # grasp frame origin = fixed pad face + WALL_HALF; put the pad face FIXED_PAD_GAP off the item side
+                p_a = np.array([it["c"][0], it["c"][1], zg]) - (half + FIXED_PAD_GAP_M - G.WALL_HALF) * yG
+                clear = self._jaw_clear(it, p_a, yG, gap_m, others)
+            if clear < (SYM_JAW_CLEAR_M if self.sym else JAW_CLEAR_M):
                 continue
-            pts = {"pregrasp": p_a + [0, 0, PRE_M], "grasp": p_a, "lift": p_a + [0, 0, LIFT_M]}
+            pts = {"pregrasp": p_a + [0, 0, PRE_M], "grasp": p_a, "lift": p_a + [0, 0, self.lift_m]}
             tcp = {k: self.prof.tcp_from_grasp(v, R) for k, v in pts.items()}
             chain = ([("pregrasp", *tcp["pregrasp"])] + CK.segment_points("d", tcp["pregrasp"][0], tcp["grasp"][0],
                                                                           tcp["grasp"][1], 6)
@@ -529,18 +633,22 @@ class SortSkills(CK.CupSkills):
             v["warning_place"] = ("no grasp found from which the item can be laid into "
                                   + (f"the {box} bin" if box in BOXES else "a bin") + " (lengthwise) - placing may fail")
         if plan is None:
-            _v377_rejects(v, getattr(self, "v375_rejects", []))
+            rej = getattr(self, "v375_rejects", [])
+            if rej and "too_wide_mm" in rej[0]:                  # V4.8.3: wider than the gripper stroke
+                v.update(rej[0])
+                return self._res(tool, False, v, reason="ITEM_TOO_WIDE", nxt=["observe_scene", "stop_and_report"])
+            _v377_rejects(v, rej)
             return self._res(tool, False, v, reason="GRASP_UNREACHABLE", nxt=["observe_scene", "stop_and_report"])
         v.update(closing_yaw_deg=plan["phi_deg"], min_joint_margin_deg=plan["margin"], binding=plan["binding"],
                  jaw_clear_mm=plan["jaw_clear_mm"])
         import NERO_V364_SO101_Gripper as G
         z0 = float(it["c"][2])
         try:
-            self.io.gripper_open(G.opening_mm_for_tip_gap(plan["gap_mm"]))
+            self.io.gripper_open(self._cmd(plan["gap_mm"]))
             self._go_joints(f"above {item_id} ({it['spec']['label']})", plan["q"]["pregrasp"])
             p, R = plan["tcp"]["grasp"]
             self._go_line(f"down to {item_id}", p, R, DESCENT_SPEED, q_hint=plan["q"]["grasp"], q_path=plan["q_down"])
-            g = self.io.gripper_clamp(CLAMP_N)
+            g = self.io.gripper_clamp(SYM_CLAMP_N if self.sym else CLAMP_N)
             v["clamp"] = {k: g.get(k) for k in ("contact_left", "contact_right", "hold_active", "opening_mm")}
             p, R = plan["tcp"]["lift"]
             self.held = item_id                     # dip check of the carry fallback while lifting
@@ -554,21 +662,22 @@ class SortSkills(CK.CupSkills):
                 self.held = None
                 res["state_after"]["held_item"] = None
             return res
-        it2 = self._item(item_id)
-        rise = float(it2["c"][2]) - z0
-        st = self.io.gripper_state()
-        v["item_rise_mm"] = round(rise * 1000.0, 1)
-        held = rise >= MIN_RISE_M and (st.get("hold_active") or (st.get("contact_left") and st.get("contact_right")))
-        if not held:
+        m = self._measure_after_lift(item_id, z0, plan)        # V4.8.3: real robot -> the gripper width decides
+        v["item_rise_mm"] = round(m["rise_m"] * 1000.0, 1)
+        v.update(m.get("extra") or {})
+        if not m["held"]:
             self.held = None
-            self.io.gripper_open(G.opening_mm_for_tip_gap(plan["gap_mm"]))
+            self.io.gripper_open(self._cmd(plan["gap_mm"]))
             self._retreat_up(0.05)
-            reason = "ITEM_NOT_LIFTED" if rise < MIN_RISE_M else "NO_TWO_FINGER_CONTACT"
-            return self._res(tool, False, v, reason=reason, nxt=["observe_scene", "pick_object"])
+            return self._res(tool, False, v, reason=m["reason"], nxt=["observe_scene", "pick_object"])
         tcp, qt = self.io.tcp_pose()
-        self.held_off = CK.quat_xyzw_to_R(qt).T @ (it2["c"] - np.asarray(tcp, float))
+        self.held_off = CK.quat_xyzw_to_R(qt).T @ (np.asarray(m["c"], float) - np.asarray(tcp, float))
         self.stage = "HOLDING"
         self.held_phi = float(plan["phi_deg"])
+        # V4.8.3: where it came from - return_item_to_table puts it back there when no container takes it
+        self.held_pick = {"item": item_id, "grasp": plan["tcp"]["grasp"], "lift": plan["tcp"]["lift"],
+                          "q_grasp": plan["q"]["grasp"], "q_lift": plan["q"]["lift"], "gap_mm": plan["gap_mm"],
+                          "q_down": list(reversed(plan["q_up"]))}
         self.picked_from[item_id] = it["in_bin"]
         return self._res(tool, True, v, nxt=["place_in_box"])
 
@@ -624,7 +733,10 @@ class SortSkills(CK.CupSkills):
             def free(f):
                 ys = [py for _px, py in CC.rect_corners(*f[1])]
                 return max(yw[1] - max(ys), min(ys) - yw[0])
-            order = sorted(mid, key=lambda f: (-round(free(f), 3), float(np.hypot(*f[0]))))
+            # V4.8.3: with the original gripper the first item goes to the FAR side (the strip left free is the one
+            # nearer the robot, inside its reach for the next item: its TCP is 155 mm out)
+            far = -1.0 if self.sym else 1.0
+            order = sorted(mid, key=lambda f: (-round(free(f), 3), far * float(np.hypot(*f[0]))))
             if ranked:           # V3.76: the place loop tries them in turn (gripper clear of the walls)
                 return [(float(f[0][0]), float(f[0][1])) for f in order]
             best = order[0]
@@ -637,12 +749,11 @@ class SortSkills(CK.CupSkills):
         sp = it["spec"]
         b = SC.SORT_BINS[box]
         c_rel = sp["cz"] + b["floor_t"] + RELEASE_ABOVE_FLOOR_M
-        c_above = b["wall_h"] + ABOVE_WALL_M + sp["cz"]
-        import NERO_V364_SO101_Gripper as G
+        c_above = b["wall_h"] + (SYM_ABOVE_WALL_M if self.sym else ABOVE_WALL_M) + sp["cz"]
         # V3.75 BIN FIT: the item's long-axis yaw at the release follows the wrist rotation; orientations whose
         # footprint does not fit the (smaller) bin are skipped; the long axis along the bin's long side first
         yaw_item = float(it["yaw_deg"])
-        held_v = G.opening_mm_for_tip_gap(max(2.0, sp["width"] * 1000.0))
+        held_v = self._cmd(max(2.0, sp["width"] * 1000.0))
         long_x = b["inner"][0] >= b["inner"][1]
 
         def yaw_at(Rt_):
@@ -677,7 +788,10 @@ class SortSkills(CK.CupSkills):
                 # wall made it touch the wall (V3.76 twin: the lengthwise banana angles 75 / 255 were rejected) ->
                 # the ranked spots of this angle are tried in turn (IK + collision check of the gripper / item)
                 found = False
-                for slot in self._slot(box, iid, math.radians(ph), yaw_deg=y_rel, ranked=True)[:8]:
+                slots = self._slot(box, iid, math.radians(ph), yaw_deg=y_rel, ranked=True)
+                if self.sym:          # V4.8.3: the open fingers (56 x 26.5 mm each) must fit the bin beside the item
+                    slots = [sl for sl in slots if self._sym_fingers_fit(box, iid, sl, R, sp)]
+                for slot in slots[:8]:
                     sx, sy = slot
                     p_above = np.array([sx, sy, max(c_above, float(item_z))]) - off
                     p_rel = np.array([sx, sy, c_rel]) - off
@@ -694,6 +808,19 @@ class SortSkills(CK.CupSkills):
                     r = CK.ik_chain(chain, q_now)
                     if (not r["ok"] or r["min_margin_deg"] < CK.MIN_MARGIN_RELAXED_DEG) and not rotate_first:
                         r = CK.ik_chain(chain, q_now, start_first=False)
+                    via = None
+                    if (not r["ok"] or r["min_margin_deg"] < CK.MIN_MARGIN_RELAXED_DEG) and self.sym and rotate_first:
+                        # V4.8.3 CARRY VIA: a long carry past the base (e.g. to the trash bin next to the robot) breaks
+                        # the IK branch on a straight line -> two straight lines through a point >= 0.40 m out
+                        via = (np.asarray(p_rot, float) + np.asarray(p_above, float)) / 2.0
+                        rr = float(np.hypot(via[0], via[1]))
+                        if rr < VIA_MIN_R_M:
+                            via[:2] *= VIA_MIN_R_M / max(rr, 1e-6)
+                        via[2] = max(float(p_rot[2]), float(p_above[2]))
+                        chain = ([("rotate", p_rot, Rt)] + CK.segment_points("c", p_rot, via, Rt, 4) + [("via", via, Rt)]
+                                 + CK.segment_points("v", via, p_above, Rt, 4) + [("above", p_above, Rt)]
+                                 + CK.segment_points("l", p_above, p_rel, Rt, 6) + [("release", p_rel, Rt)])
+                        r = CK.ik_chain(chain, q_now)
                     if not r["ok"] or r["min_margin_deg"] < CK.MIN_MARGIN_RELAXED_DEG:
                         continue
                     need = HELD_MARGIN_DEG if need_margin_deg is None else float(need_margin_deg)
@@ -718,7 +845,8 @@ class SortSkills(CK.CupSkills):
                     continue
                 cand = {"phi": ph, "margin": r["min_margin_deg"], "item_yaw_deg": round(_wrap(y_rel), 1), "binding": r["binding"], "q": dict(zip(names, r["q"])),
                         "q_down": r["q"][names.index("above"):], "p_rot": p_rot, "p_above": p_above, "p_rel": p_rel,
-                        "Rt": Rt, "rotate_first": rotate_first, "slot": [round(float(sx), 3), round(float(sy), 3)]}
+                        "Rt": Rt, "rotate_first": rotate_first, "slot": [round(float(sx), 3), round(float(sy), 3)],
+                        "via": via}
                 # V3.76 LENGTHWISE FIRST: alignment with the bin's long side ranks before the joint margin (V3.76 twin:
                 # the banana lay 22 deg off and took the middle of the bin, the apple had no room)
                 cand["align"] = round(pref(ph), 2)
@@ -749,8 +877,6 @@ class SortSkills(CK.CupSkills):
         q_now = self.io.current_q()
         tcp0, _q0 = self.io.tcp_pose()
         R_now = CK.quat_xyzw_to_R(_q0)
-        import NERO_V364_SO101_Gripper as G
-        held_v = G.opening_mm_for_tip_gap(max(2.0, sp["width"] * 1000.0))
         best, self.v375_rejects = self._plan_place(box, iid, it, q_now, tcp0, R_now, self.held_off, self.held_phi,
                                                    float(it["c"][2]))
         if best is None:
@@ -764,6 +890,9 @@ class SortSkills(CK.CupSkills):
                 self._go_line(f"up with {iid}", best["p_rot"], CK.quat_xyzw_to_R(_q0), LIFT_SPEED, slow=HELD_SLOW)
             if best["rotate_first"]:
                 self._go_joints(f"rotate {iid} for the {box} bin", best["q"]["rotate"], slow=HELD_SLOW)
+            if best.get("via") is not None:                # V4.8.3 CARRY VIA
+                self._go_line(f"carry {iid} towards the {box} bin", best["via"], best["Rt"], CK.CARRY_SPEED,
+                              slow=HELD_SLOW, free_fallback=True, q_hint=best["q"]["via"])
             self._go_line(f"carry {iid} over the {box} bin", best["p_above"], best["Rt"], CK.CARRY_SPEED,
                           slow=HELD_SLOW, free_fallback=True, q_hint=best["q"]["above"])
             self.io.sleep(0.5)
@@ -782,7 +911,7 @@ class SortSkills(CK.CupSkills):
                                  warnings=[f"{iid} fell into the {box} bin when the safety stop let go of it - it was not "
                                            "lowered and released normally"])
             return self._res(tool, False, v2, reason="ITEM_DROPPED", nxt=["observe_scene", "pick_object"])
-        self.io.gripper_open(G.opening_mm_for_tip_gap(sp["width"] * 1000.0 + 18.0))
+        self.io.gripper_open(self._cmd(sp["width"] * 1000.0 + (SYM_RELEASE_EXTRA_MM if self.sym else 18.0)))
         self.io.sleep(0.8)
         self.held, self.held_off = None, None
         self.placed[iid] = box
@@ -792,21 +921,63 @@ class SortSkills(CK.CupSkills):
         except self._Abort as e:
             v["retreat"] = f"{e.reason}: {e.info.get('error') or e.info.get('detail')}"
         self.io.sleep(0.5)
-        where = self._item(iid)["in_bin"]
+        where = self._where_after_place(iid, box, best)
         v["now_in_bin"] = where
         self.stage = "PLACED"
         if where != box:
             return self._res(tool, False, v, reason="ITEM_NOT_IN_BOX", nxt=["observe_scene", "pick_object"])
         return self._res(tool, True, v, nxt=["observe_scene", "pick_object", "check_bins"])
 
+    # -- V4.8.3 verification hooks (the real tidy skills measure differently: gripper width / a fresh camera view)
+    def _measure_after_lift(self, item_id, z0, plan):
+        it2 = self._item(item_id)
+        rise = float(it2["c"][2]) - z0
+        st = self.io.gripper_state()
+        held = rise >= MIN_RISE_M and bool(st.get("hold_active") or (st.get("contact_left") and st.get("contact_right")))
+        reason = None if held else ("ITEM_NOT_LIFTED" if rise < MIN_RISE_M else "NO_TWO_FINGER_CONTACT")
+        return {"rise_m": rise, "held": held, "reason": reason, "c": it2["c"]}
+
+    def _where_after_place(self, iid, box, best):
+        return self._item(iid)["in_bin"]
+
+    def return_item_to_table(self, **_):
+        """V4.8.3 TIDY DESK: put the held item back where it was picked (a container refused it: full, no free spot,
+        unreachable) - straight back above the pick point, down to 4 mm above the grasp height, open, retreat up"""
+        tool = "return_item_to_table"
+        self._v376_sync_held()
+        hp = getattr(self, "held_pick", None)
+        if not self.held:
+            return self._res(tool, False, reason="NO_ITEM_HELD", nxt=["observe_scene"])
+        if not hp or hp.get("item") != self.held:
+            return self._res(tool, False, {"item": self.held}, reason="NO_PICK_POSE", nxt=["place_in_box"])
+        iid = self.held
+        v = {"item": iid, "label": self._item(iid)["spec"]["label"]}
+        try:
+            p, R = hp["lift"]
+            self._go_line(f"back above where {iid} was", p, R, CK.CARRY_SPEED, slow=HELD_SLOW, free_fallback=True,
+                          q_hint=hp["q_lift"])
+            p, R = hp["grasp"]
+            self._go_line(f"put {iid} back on the table", np.asarray(p, float) + [0.0, 0.0, 0.004], R, LOWER_SPEED,
+                          slow=HELD_SLOW, q_hint=hp["q_grasp"], q_path=hp["q_down"])
+        except self._Abort as e:
+            return self._abort_result(tool, e, v)
+        self.io.gripper_open(self._cmd(hp["gap_mm"]))
+        self.io.sleep(0.6)
+        self.held, self.held_off, self.held_pick = None, None, None
+        self._retreat_up(0.08)
+        it = self._item(iid)
+        v.update(on_table=it["in_bin"] is None, centre_xy_m=[round(float(c), 3) for c in it["c"][:2]])
+        self.stage = "OBSERVED"
+        return self._res(tool, it["in_bin"] is None, v, nxt=["observe_scene", "pick_object"])
+
     def check_bins(self, **_):
         its = self._items()
         rows = {iid: {"label": it["spec"]["label"], "in_bin": it["in_bin"]} for iid, it in its.items()}
         on_table = [k for k, r in rows.items() if r["in_bin"] is None]
-        return self._res("check_bins", True, {"items": rows, "on_table": on_table,
-                                              "red": [k for k, r in rows.items() if r["in_bin"] == "red"],
-                                              "blue": [k for k, r in rows.items() if r["in_bin"] == "blue"]},
-                         nxt=["finish_and_report"] if not on_table else ["pick_object"])
+        v = {"items": rows, "on_table": on_table}
+        for b in BOXES:                                  # V4.8.3: every container of the layout
+            v[b] = [k for k, r in rows.items() if r["in_bin"] == b]
+        return self._res("check_bins", True, v, nxt=["finish_and_report"] if not on_table else ["pick_object"])
 
     def return_to_safe_pose(self, **_):
         self._v376_sync_held()                         # V3.76: the gripper decides whether an item is held
@@ -823,7 +994,8 @@ class SortSkills(CK.CupSkills):
 
     def _run_tool(self, name, args):
         fn = {"observe_scene": self.observe_scene, "pick_object": self.pick_object, "place_in_box": self.place_in_box,
-              "check_bins": self.check_bins, "return_to_safe_pose": self.return_to_safe_pose}.get(name)
+              "check_bins": self.check_bins, "return_to_safe_pose": self.return_to_safe_pose,
+              "return_item_to_table": self.return_item_to_table}.get(name)
         if fn is None:
             return {"ok": False, "tool": name, "reason": "UNKNOWN_TOOL", "recommended_next_actions": ["observe_scene"]}
         try:
@@ -837,7 +1009,9 @@ class SortSkills(CK.CupSkills):
         out = [self.run_tool("observe_scene", {})]
         for iid, body in ITEM_IDS.items():
             sp = SC.SORT_ITEMS[body]
-            box = (rule or {}).get(sp["label"]) or ("red" if sp["category"] == "fruit" else "blue")
+            box = (rule or {}).get(sp["label"]) or default_box(sp)
+            if box is None:                               # V4.8.3: no container for it (stays on the desk)
+                continue
             r = self.run_tool("pick_object", {"item_id": iid, "box": box})
             out.append(r)
             if not r.get("ok"):
@@ -845,6 +1019,16 @@ class SortSkills(CK.CupSkills):
             out.append(self.run_tool("place_in_box", {"box": box}))
         out.append(self.run_tool("check_bins", {}))
         return out
+
+
+def default_box(spec):
+    """V3.72 rule fruit -> red, rest -> blue; V4.8.3 tidy layout: the container whose "accepts" names the category"""
+    if "red" in SC.SORT_BINS and "blue" in SC.SORT_BINS:
+        return "red" if spec["category"] == "fruit" else "blue"
+    for k, b in SC.SORT_BINS.items():
+        if spec["category"] in (b.get("accepts") or []):
+            return k
+    return None
 
 
 # =============================================================================================== LLM contract
@@ -856,7 +1040,7 @@ SORT_TOOLS = [
                     "ALWAYS call first.",
      "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False}, "strict": True},
     {"type": "function", "name": "pick_object",
-     "description": "Grasp one item from above with the SO-101 gripper (jaws across its width), lift it. Plans the grasp "
+     "description": "Grasp one item from above with the gripper (jaws across its width), lift it. Plans the grasp "
                     "itself (reachable closing direction, joint margins, open jaws clear of the other items) so that the "
                     "item can afterwards be laid into `box` (the bin you decided for it; 'any' if undecided). Verifies "
                     "contact and that the item rose with the gripper.",
@@ -1059,8 +1243,15 @@ def gui_run_task(ctx):
     if not ctx["safety_gate"]():
         log("[FAIL] [V3.72 SORT] RUN TASK blocked: stale physical safety latch was not recovered")
         return
+    sync_layout()
     io = SortBackendIO(ctx)
     skills = SortSkills(io)
+    if SC.sort_layout() == SC.LAYOUT_TIDY:            # V4.8.3 TIDY DESK: the intent layer drives this scene
+        import NERO_V483_Tidy as TD
+        log(f"[V4.8.3 TIDY TASK] scene=tidy_desk | gripper {skills.prof.label} | model={cfg['model']} | "
+            f"said={cfg['task']!r}")
+        TD.gui_run_tidy(ctx, io, skills, cfg)
+        return
     log(f"[V3.72 SORT TASK] scene=sort_items | skill SI Sort Items | gripper {skills.prof.label} | "
         f"model={cfg['model']} | task={cfg['task']!r}")
 
@@ -1075,9 +1266,12 @@ def gui_run_task(ctx):
     ctx["background"]("RUN TASK (sort_items)", _run, lock_motion=True)
 
 
-def twin_episode(log=print, seed=None, rule=None, snapshot=None):
-    """offline: scripted sorting in the headless twin -> (results, {item: bin}, io, skills)"""
-    io = SortTwinIO(log=log, seed=seed)
+def twin_episode(log=print, seed=None, rule=None, snapshot=None, layout=None, gripper=None):
+    """offline: scripted sorting in the headless twin -> (results, {item: bin}, io, skills)
+    V4.8.3: layout "tidy" = the tidy_desk items / containers (official gripper unless gripper= says otherwise)"""
+    if layout is not None:
+        SC.set_sort_layout(layout)
+    io = SortTwinIO(log=log, seed=seed, gripper=gripper)
     sk = SortSkills(io)
     res = sk.scripted_episode(rule)
     state = {iid: it["in_bin"] for iid, it in sk._items().items()}
@@ -1094,7 +1288,8 @@ if __name__ == "__main__":
         seed = None
         if "--seed" in sys.argv:
             seed = int(sys.argv[sys.argv.index("--seed") + 1])
-        res, state, _io, sk = twin_episode(seed=seed)
+        res, state, _io, sk = twin_episode(seed=seed, layout="tidy" if "--tidy" in sys.argv else None,
+                                           gripper=sys.argv[sys.argv.index("--gripper") + 1] if "--gripper" in sys.argv else None)
         print(json.dumps(state, ensure_ascii=False))
         print(final_table(sk))
     else:

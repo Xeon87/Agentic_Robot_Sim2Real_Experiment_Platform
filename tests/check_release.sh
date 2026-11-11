@@ -105,6 +105,7 @@ grep -qF 'V4.7.4 JOINT LIMITS + TASK PROMPTS + EDIT TASK + RENAME DATASET' NERO_
 grep -qF 'V4.8 NERO AGX GRIPPER + GRIPPER SWITCH' NERO_V48_Gripper.py && grep -qF 'V4.8 GRIPPER PANEL: ZERO + FORCE CALIBRATION + TEACH TEST + J7 LIMIT' NERO_V48_Gripper_UI.py && grep -qF 'GripperProxy' NERO_V365_Real_Cup_Task.py && grep -qF 'grip_holder' NERO_V312_Console.py || { echo "[FAIL] V4.8 markers missing"; exit 1; }
 grep -qF 'V4.8.1 AGX GRIPPER GEOMETRY + COLLISION' NERO_V481_Agx_Geom.py && grep -qF 'def agx_real_profile' NERO_V365_Real_Cup_Task.py && grep -qF 'def make_tool_model' NERO_V4613_Tool_Collision.py && grep -qF 'run_all_then_gripper' NERO_V312_Console.py || { echo "[FAIL] V4.8.1 markers missing"; exit 1; }
 grep -qF 'V4.8.2 SPEED LIMIT' NERO_V48_Gripper.py && grep -qF 'def preflight_warnings' NERO_V365_Real_Cup_Task.py && grep -qF 'LAST_LIGHTING = {}' NERO_V379_Camera_Lab.py || { echo "[FAIL] V4.8.2 markers missing"; exit 1; }
+grep -qF 'V4.8.3 TIDY DESK INTENT LAYER' NERO_V483_Tidy.py && grep -qF 'def set_sort_layout' NERO_V343_Scenes.py && grep -qF 'def agx_parts' NERO_V375_Collision_Check.py && grep -qF 'def return_item_to_table' NERO_V372_Sort_Skills.py || { echo "[FAIL] V4.8.3 markers missing"; exit 1; }
 grep -qF 'V3.81 YOLOE TRAIN' NERO_V381_Yolo_Train.py && grep -qF 'V3.81 PROFILE FILES + TRAIN PAGE' NERO_V379_Camera_Lab.py && grep -qF 'NERO_V381_Yolo_Train.py' start_nero.sh || { echo "[FAIL] V3.81 train marker missing"; exit 1; }
 grep -qF 'V3.82 FINE-TUNED MODELS' NERO_V347_Yolo_Perception.py && grep -qF 'V3.82 HIGHLIGHTS + GAMMA + LABEL ASSIST' NERO_V379_Camera_Lab.py && grep -qF 'V3.82 APPLY FINE-TUNED + 1280 TRAINING' NERO_V381_Yolo_Train.py || { echo "[FAIL] V3.82 marker missing"; exit 1; }
 grep -qF 'V3.83 MULTI-MODEL DISTRIBUTION' NERO_V347_Yolo_Perception.py && grep -qF 'V3.83 GPU PREFLIGHT' start_nero.sh && grep -qF 'NERO_V383_Gpu_Check.py' start_nero.sh || { echo "[FAIL] V3.83 marker missing"; exit 1; }
@@ -196,4 +197,7 @@ python3 tests/test_v4_8.py 2>&1 | tail -1     # V4.8 gripper switch, force mappi
 python3 tests/test_v4_8_gui.py | tail -1       # V4.8 实机NERO调试 -> 夹爪: switch, status, zero wizard, force calibration, teach test, J7 limit
 python3 tests/test_v4_8_1.py 2>&1 | tail -1   # V4.8.1 AgxGripper geometry, egg end grasp + upright insert, cups, presets
 python3 tests/test_v4_8_2.py 2>&1 | tail -1   # V4.8.2 gripper speed limit, VLA normalisation, open failure stops, start warnings
+python3 tests/test_v4_8_3.py 2>&1 | tail -1   # V4.8.3 tidy desk: layout, original-gripper grasp, intents, preferences, report, real adapter
+python3 tests/test_v4_8_3_gui.py | tail -1     # V4.8.3 tidy preview dialog (skips without tkinter / DISPLAY)
+python3 tests/test_v4_8_3_twin.py 2>&1 | tail -1  # V4.8.3 tidy desk in the MuJoCo twin (skips without mujoco; minutes)
 python3 tests/test_v4_6_1_gui.py | tail -1   # skips without tkinter / DISPLAY

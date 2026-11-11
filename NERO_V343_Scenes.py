@@ -51,6 +51,12 @@ SCENES = {
     "sort_items": {"label": "sort_items - 物品分类放入红框 / 蓝框 · SO-101 夹爪（香蕉 / 苹果 / 鼠标 / 马克笔）",
                    "summary": "banana, apple, mouse, marker on the table; sort them into the open red / blue bins by the prompt",
                    "gripper": "so101"},
+    # V4.8.3 TIDY DESK: a VARIANT of sort_items (same skills / backend hooks, active_scene() = "sort_items") with
+    # 8 everyday items, 4 containers and the NERO original gripper (AgileX AgxGripper) - the intent-layer demo
+    "tidy_desk": {"label": "tidy_desk - 桌面整理（听懂弦外之音）· NERO 原装夹爪（7 件物品 / 4 个容器）",
+                  "summary": "7 items (fruit, snack, stationery, toy, paper ball, mouse) + fruit bowl / pen box / toy box "
+                             "/ trash bin; the intent layer plans, asks, previews, the robot tidies, then reports",
+                  "base": "sort_items"},
 }
 SCENES_REV = "V3.76"       # VERSION above stays "V3.44" (tests pin it); stack_cups V3.61, stack_cups_so101 V3.64, sort_items V3.72 (bins V3.75)
 HERE = Path(__file__).resolve().parent
@@ -631,6 +637,101 @@ SORT_BINS = {
 SORT_FOOTPRINT = {"obj_banana": (0.1006, -0.017, 0.0474)}
 
 
+# ----------------------------------------------------------------------------- V4.8.3 TIDY DESK LAYOUT
+# 7 items (6 to tidy + the mouse in use) on the middle of the table + 4 open containers left / right.  The official
+# gripper's TCP is 155 mm out: top-down grasps reach x = -0.34 .. -0.46 m at |y| <= 0.18 m, and only with the fingers
+# closing roughly along y (closing along x puts J7 / J6 at their limits) -> items in columns along y, long axes along
+# x, ~100 mm between columns for the open fingers; every item <= 62 mm across its grasp (the AgxGripper: 70 mm stroke).  Item names keep the "obj_" prefix (TF sim_obj_*).
+LAYOUT_SORT, LAYOUT_TIDY = "sort", "tidy"
+SORT_ITEMS_V372 = dict(SORT_ITEMS)
+SORT_BINS_V372 = dict(SORT_BINS)
+SORT_FOOTPRINT_V372 = dict(SORT_FOOTPRINT)
+TIDY_ITEMS = {
+    "obj_banana": dict(SORT_ITEMS_V372["obj_banana"], xy=(-0.43, -0.095), yaw_deg=180.0, cn="香蕉",
+                       attrs=["fruit", "food", "fresh"]),
+    "obj_apple": {"label": "apple", "category": "fruit", "xy": (-0.35, -0.005), "yaw_deg": 0.0, "cz": 0.031,
+                  "width": 0.062, "length": 0.062, "height": 0.062, "shape": "round", "mass": 0.15, "cn": "苹果",
+                  "attrs": ["fruit", "food", "fresh"]},
+    "obj_paper": {"label": "crumpled paper", "category": "trash", "xy": (-0.46, -0.005), "yaw_deg": 0.0, "cz": 0.022,
+                  "width": 0.044, "length": 0.044, "height": 0.044, "shape": "round", "mass": 0.01, "cn": "纸团",
+                  "attrs": ["paper", "maybe_trash", "maybe_note"], "geom": "sphere", "rgba": "0.95 0.95 0.90 1"},
+    "obj_cookies": {"label": "cookie pack", "category": "snack", "xy": (-0.35, 0.095), "yaw_deg": 0.0, "cz": 0.015,
+                    "width": 0.045, "length": 0.080, "height": 0.030, "shape": "long", "mass": 0.08, "cn": "饼干",
+                    "attrs": ["food", "snack", "packaged"], "geom": "box", "rgba": "0.85 0.62 0.30 1"},
+    "obj_block": {"label": "toy block", "category": "toy", "xy": (-0.46, 0.095), "yaw_deg": 0.0, "cz": 0.020,
+                  "width": 0.040, "length": 0.040, "height": 0.040, "shape": "long", "mass": 0.04, "cn": "积木",
+                  "attrs": ["toy", "child"], "geom": "box", "rgba": "0.20 0.70 0.30 1"},
+    "obj_marker": dict(SORT_ITEMS_V372["obj_marker"], xy=(-0.40, 0.17), yaw_deg=0.0, category="stationery",
+                       cn="马克笔", attrs=["stationery", "pen"]),
+    # the mouse is in use: it lies behind the others (outside the reach of top-down grasps - it is never moved)
+    "obj_mouse": dict(SORT_ITEMS_V372["obj_mouse"], xy=(-0.57, 0.0), yaw_deg=90.0, category="desk_tool",
+                      cn="鼠标", attrs=["electronics", "desk_tool", "in_use"]),
+}
+# containers: the robot faces -x, y < 0 is the robot's left.  "accepts" = what the container is for (the intent layer)
+TIDY_BINS = {
+    "fruit_bowl": {"centre": (-0.35, -0.25), "inner": (0.225, 0.17), "wall_h": 0.030, "wall_t": 0.006, "floor_t": 0.004,
+                   "rgba": "0.90 0.42 0.18 1", "side": "left (robot view, y < 0)", "cn": "水果盘",
+                   "accepts": ["fruit"], "capacity": 2},   # 3 do not fit with the 56 mm fingers (twin)
+    "trash_bin": {"centre": (-0.155, -0.285), "inner": (0.12, 0.14), "wall_h": 0.060, "wall_t": 0.006, "floor_t": 0.004,
+                  "rgba": "0.45 0.45 0.48 1", "side": "left front, next to the robot (y < 0)", "cn": "垃圾桶",
+                  "accepts": ["trash"], "capacity": 2},
+    "pen_box": {"centre": (-0.20, 0.27), "inner": (0.15, 0.12), "wall_h": 0.040, "wall_t": 0.006, "floor_t": 0.004,
+                "rgba": "0.12 0.30 0.85 1", "side": "right front (robot view, y > 0)", "cn": "文具盒",
+                "accepts": ["stationery"], "capacity": 3},
+    "toy_box": {"centre": (-0.39, 0.29), "inner": (0.16, 0.12), "wall_h": 0.050, "wall_t": 0.006, "floor_t": 0.004,
+                "rgba": "0.95 0.78 0.10 1", "side": "right back (robot view, y > 0)", "cn": "玩具箱",
+                "accepts": ["toy"], "capacity": 3},
+}
+
+
+def sort_layout():
+    """V4.8.3: "tidy" when the tidy_desk scene is selected (or set_sort_layout("tidy") was called), else "sort" """
+    return _LAYOUT[0]
+
+
+def _layout_from_env():
+    s = (os.environ.get("NERO_SORT_LAYOUT") or "").strip().lower()
+    if s in (LAYOUT_SORT, LAYOUT_TIDY):
+        return s
+    return LAYOUT_TIDY if (scene_from_env() == "tidy_desk"
+                           or (os.environ.get("NERO_V343_ACTIVE_SCENE") or "").strip() == "tidy_desk") else LAYOUT_SORT
+
+
+def set_sort_layout(name):
+    """V4.8.3: switch the sort_items item / container tables in place (every module reads SC.SORT_ITEMS / SORT_BINS /
+    SORT_ITEM_NAMES at call time; NERO_V372_Sort_Skills.sync_layout() refreshes its ids).  -> the previous layout"""
+    global SORT_ITEM_NAMES
+    name = LAYOUT_TIDY if str(name).lower() in (LAYOUT_TIDY, "tidy_desk") else LAYOUT_SORT
+    prev = _LAYOUT[0]
+    items, bins, foot = ((TIDY_ITEMS, TIDY_BINS, {"obj_banana": SORT_FOOTPRINT_V372["obj_banana"]})
+                         if name == LAYOUT_TIDY else (SORT_ITEMS_V372, SORT_BINS_V372, SORT_FOOTPRINT_V372))
+    SORT_ITEMS.clear()
+    SORT_ITEMS.update(items)
+    SORT_BINS.clear()
+    SORT_BINS.update(bins)
+    SORT_FOOTPRINT.clear()
+    SORT_FOOTPRINT.update(foot)
+    SORT_ITEM_NAMES = tuple(SORT_ITEMS)
+    _LAYOUT[0] = name
+    return prev
+
+
+def bin_label(box):
+    b = SORT_BINS.get(box) or {}
+    return b.get("cn") or {"red": "红框", "blue": "蓝框"}.get(box, str(box))
+
+
+def item_cn(name_or_label):
+    it = SORT_ITEMS.get(name_or_label)
+    if it is None:
+        it = next((v for v in SORT_ITEMS.values() if v["label"] == name_or_label), None)
+    return (it or {}).get("cn") or {"banana": "香蕉", "apple": "苹果", "computer mouse": "鼠标",
+                                    "marker pen": "马克笔"}.get((it or {}).get("label", name_or_label), str(name_or_label))
+
+
+_LAYOUT = [LAYOUT_SORT]
+
+
 def sort_item_footprint(spec_or_name, centre_xy, yaw_deg):
     """V3.75 ITEM FOOTPRINT: (rect centre xy, (half along, half across), long-axis angle rad) of an item lying flat"""
     name = spec_or_name if isinstance(spec_or_name, str) else next(
@@ -651,7 +752,8 @@ def sort_item_poses(seed=None):
         return out
     import numpy as np
     rng = np.random.default_rng(int(s))
-    return {n: (x + rng.uniform(-0.015, 0.015), y + rng.uniform(-0.015, 0.015), yaw + rng.uniform(-15, 15))
+    j, a = (0.003, 5.0) if sort_layout() == LAYOUT_TIDY else (0.015, 15.0)   # V4.8.3: the tidy desk is denser
+    return {n: (x + rng.uniform(-j, j), y + rng.uniform(-j, j), yaw + rng.uniform(-a, a))
             for n, (x, y, yaw) in out.items()}
 
 
@@ -746,12 +848,22 @@ def sort_item_body_xml(name, x, y, yaw_deg, free=True):
               f'<geom name="obj_banana_tip1" type="sphere" pos="{_f(pts[-1][0], pts[-1][1], oz)}" size="0.006" '
               f'rgba="0.30 0.22 0.08 1" contype="0" conaffinity="0" mass="0"/>')
         g += _ballast(name, (0.0, -y_arc * (it["mass"] - mb) / mb, oz - 0.010), mb)
+    elif it.get("geom") == "sphere":                    # V4.8.3 TIDY DESK: orange / paper ball
+        r = it["width"] / 2.0
+        g = (f'<geom name="{name}_body" type="sphere" pos="{_f(0, 0, oz)}" size="{r:.4f}" mass="{0.55 * it["mass"]:.4f}" '
+             f'rgba="{it.get("rgba", "0.8 0.8 0.8 1")}" {con}/>'
+             + _ballast(name, (0.0, 0.0, oz - 0.6 * r), 0.45 * it["mass"]))
+    elif it.get("geom") == "box":                       # V4.8.3 TIDY DESK: cookie pack / toy block
+        g = (f'<geom name="{name}_body" type="box" pos="{_f(0, 0, oz)}" '
+             f'size="{_f(it["length"] / 2.0, it["width"] / 2.0, it["height"] / 2.0)}" mass="{0.55 * it["mass"]:.4f}" '
+             f'rgba="{it.get("rgba", "0.8 0.8 0.8 1")}" {con}/>'
+             + _ballast(name, (0.0, 0.0, oz - 0.3 * it["height"]), 0.45 * it["mass"]))
     elif name == "obj_apple":
-        g = (f'<geom name="obj_apple_body" type="sphere" pos="{_f(0, 0, oz)}" size="0.037" mass="{0.55 * it["mass"]:.4f}" '
+        g = (f'<geom name="obj_apple_body" type="sphere" pos="{_f(0, 0, oz)}" size="{it["width"] / 2.0:.4f}" mass="{0.55 * it["mass"]:.4f}" '
              f'rgba="0.78 0.10 0.10 1" {con}/>'
-             f'<geom name="obj_apple_stem" type="cylinder" pos="{_f(0, 0, oz + 0.040)}" size="0.0025 0.007" '
+             f'<geom name="obj_apple_stem" type="cylinder" pos="{_f(0, 0, oz + it["width"] / 2.0 + 0.003)}" size="0.0025 0.007" '
              'rgba="0.35 0.22 0.10 1" contype="0" conaffinity="0" mass="0"/>'
-             + _ballast(name, (0.0, 0.0, oz - 0.022), 0.45 * it["mass"]))
+             + _ballast(name, (0.0, 0.0, oz - 0.6 * it["width"] / 2.0), 0.45 * it["mass"]))
     elif name == "obj_mouse":                           # flat chassis + domed shell, 110 x 62 x 38 mm
         g = (f'<geom name="obj_mouse_base" type="box" pos="{_f(0, 0, oz - 0.009)}" size="0.055 0.031 0.010" '
              f'mass="{0.35 * it["mass"]:.4f}" rgba="0.22 0.23 0.25 1" {con}/>'
@@ -815,7 +927,8 @@ def sort_world_xml(seed=None, bare=False, poses=None):
 
 
 def make_sort_items_xml(original_xml_path, visual_quality=None):
-    """V3.72: same contract as make_store_in_safe_xml for the sort_items scene (SO-101 gripper always)"""
+    """V3.72: same contract as make_store_in_safe_xml for the sort_items scene (SO-101 gripper; V4.8.3 tidy_desk: the
+    tidy layout + the official gripper)"""
     import re
     import numpy as np
     src = Path(original_xml_path).resolve()
@@ -843,15 +956,23 @@ def make_sort_items_xml(original_xml_path, visual_quality=None):
         xml = re.sub(r"(<asset\b[^>]*>)", lambda m: m.group(1) + "\n" + assets, xml, count=1)
     else:
         xml = xml.replace("<worldbody>", "<asset>\n" + assets + "\n</asset>\n\n<worldbody>", 1)
-    print("[V3.72 SCENE] sort_items: banana / apple / computer mouse / marker pen; open red bin (left) + blue bin "
-          "(right), SO-101 gripper", flush=True)
+    tidy = sort_layout() == LAYOUT_TIDY
+    if tidy:                                            # V4.8.3 TIDY DESK
+        print("[V4.8.3 SCENE] tidy_desk: " + " / ".join(SORT_ITEMS[n]["label"] for n in SORT_ITEM_NAMES) + "; "
+              + ", ".join(f"{k} ({b['cn']})" for k, b in SORT_BINS.items()) + ", NERO original gripper", flush=True)
+    else:
+        print("[V3.72 SCENE] sort_items: banana / apple / computer mouse / marker pen; open red bin (left) + blue bin "
+              "(right), SO-101 gripper", flush=True)
     xml = xml.replace("<worldbody>", "<worldbody>\n" + sort_world_xml(), 1)
     if visual_quality is not None:
         xml = visual_quality(xml)
-    import NERO_V364_SO101_Gripper as _G364
-    xml = _G364.insert_into_model_xml(xml, soft_pads=True)          # V3.76 SOFT PADS (sorting scene only)
-    print(f"[V3.72 SCENE] sort_items: SO-101 gripper mounted on link7 {_G364.describe()}", flush=True)
-    print(f"[V3.76 SCENE] sort_items: soft SO-101 pads; bin walls as {len(sort_bin_geoms()) - 2} segments (outside the "
+    if gripper_variant() == "so101":
+        import NERO_V364_SO101_Gripper as _G364
+        xml = _G364.insert_into_model_xml(xml, soft_pads=True)          # V3.76 SOFT PADS (sorting scene only)
+        print(f"[V3.72 SCENE] sort_items: SO-101 gripper mounted on link7 {_G364.describe()}", flush=True)
+    else:                                               # V4.8.3: the backend mounts the official gripper itself
+        print("[V4.8.3 SCENE] tidy_desk: official AgileX gripper (backend model)", flush=True)
+    print(f"[V3.76 SCENE] sort_items: bin walls as {len(sort_bin_geoms()) - len(SORT_BINS)} segments (outside the "
           f"old basket-rim rule: {legacy_rim_hits(sort_bin_geoms()) or 'no wall cut'})", flush=True)
     eq = "\n        ".join(
         f'<connect name="hold_{o}" body1="link7" body2="{o}" anchor="0 0 0" active="false" '
@@ -878,3 +999,6 @@ def item_in_bin(xyz, margin=0.004):
 def sort_task_state(poses):
     """V3.72: {item: bin colour or None} from item centre positions"""
     return {n: item_in_bin(p) for n, p in poses.items()}
+
+
+set_sort_layout(_layout_from_env())                     # V4.8.3 TIDY DESK: the console's scene choice (NERO_SCENE)
