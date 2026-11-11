@@ -113,8 +113,8 @@ assert wait(lambda: panel.busy is None and "夹住了东西" in panel.v_last.get
 assert abs(fake.force_set - 0.5) < 1e-6
 fake.object_mm = None
 panel.on_preset("cup")
-assert wait(lambda: panel.busy is None and abs(fake.width - 95.0) <= 1.0)
-print("[G3] goto 30 mm, clamp (0.5) holds a 22 mm object, cup preset opens to 95 mm")
+assert wait(lambda: panel.busy is None and abs(fake.width - 65.0) <= 1.0)
+print("[G3] goto 30 mm, clamp (0.5) holds a 22 mm object, cup preset opens to 65 mm")
 
 # ---- G4 zero wizard
 fake.zero_offset = 0.0

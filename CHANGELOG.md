@@ -1,3 +1,11 @@
+## V4.8.1 (2026-11-11) — Agentic实机任务适配 NERO 原装夹爪（叠杯子 + 鸡蛋）
+- 新 `NERO_V481_Agx_Geom.py`：官方 URDF 的夹爪几何（TCP 155.3 mm、指尖再 19.7 mm、两指沿 link7 z）、碰撞盒（本体、两指、支架、相机，支架 / 相机按腕部手眼放）、`AgxToolModel`（与 V4.6.13 ToolModel 同接口；离桌面检查不含指尖）、鸡蛋夹法参数。
+- `NERO_V365_Real_Cup_Task.py`：`real_mount` / `real_profile`（新 `agx_real_profile` = 官方夹爪仿真方案 + 实机保护）/ 指尖深度 / 围栏工具点按夹爪切换；鸡蛋：夹蛋的一头（偏离 24 mm，朝远离相机的一侧），竖起来蛋朝下相机朝上，手指离蛋托顶 ≥ 5 mm，旁边站着的蛋做三维检查，夹住判断 30–48 mm，张开 60 mm；分拣任务原装夹爪下只能只规划；设置行 / 说明按夹爪显示。
+- `NERO_V4613_Tool_Collision.py`：`make_tool_model()` 按当前夹爪建模型。
+- `NERO_V312_Console.py`：一键启动后自动连接原装夹爪。
+- `NERO_V48_Gripper(_UI).py`：杯子预设 65 mm；预设超过行程时按行程并提示；「指尖到法兰」输入框（config/gripper.json agx.tip_from_flange_mm）。
+- 测试：新 `tests/test_v4_8_1.py`；`test_v4_8_gui` 杯子预设改 65 mm；`test_v4_6_9` 的源码检查接受按夹爪的长轴阈值；版本白名单补 V4.8.1。
+
 ## V4.8 (2026-11-10) — 第 1 部分：NERO 原装夹爪 AgxGripper + 夹爪切换 + 实机NERO调试 → 夹爪 页
 - 新 `NERO_V48_Gripper.py`：全局夹爪选择（`config/gripper.json`，阻止 / 通知）；`AgxGripper`（与 SO101RealGripper 同接口：connect / status / open_gap / clamp / relax / held）；pyAgxArm 助手进程（`serve`，JSON 行）+ `PyAgxServer`；模拟夹爪 `FakeAgxBackend`；`GripperProxy`；力度换算（N → 0.5–3.0，测力计表插值）；校正归零、全行程检查、空载基线、示教模式测试、J7 控制器限位读写。
 - 新 `NERO_V48_Gripper_UI.py`：「实机NERO调试 → 夹爪」页（状态 / 操作 / ① 校正归零 / ② 力控标定 / ③ 示教模式测试 / ④ J7 控制器限位）。

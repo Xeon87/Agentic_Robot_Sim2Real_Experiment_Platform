@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.8"
+VERSION = "V4.8.1"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -1096,7 +1096,24 @@ def run_console(initial_tab="sim"):
 
     for i, key in enumerate(RR.STEP_KEYS):
         real_step_btns[i].configure(command=lambda key=key: start_job(key, lambda: pipe.run_step(key)))
-    btn_real_all.configure(command=lambda: start_job("一键启动", pipe.run_all))
+    def run_all_then_gripper():
+        """V4.8.1: 一键启动 also connects the NERO AgxGripper (pyAgxArm) when it is the selected gripper"""
+        pipe.run_all()
+        try:
+            import NERO_V48_Gripper as GG
+            if not GG.is_agx() or grip_panel is None:
+                return
+            dev = grip_panel.agx()
+            if dev.connected:
+                return
+            pipe.log("[INFO] [V4.8.1 GRIPPER] 一键启动：连接 NERO 原装夹爪（pyAgxArm）…")
+            ok, msg = dev.connect()
+            pipe.log(f"[{'OK' if ok else 'WARN'}] [V4.8.1 GRIPPER] {msg}"
+                     + ("" if ok else "（也可以在 实机NERO调试 → 夹爪 手动连接）"))
+            grip_panel.q.put(("call", grip_panel._show_conn))
+        except Exception as exc:
+            pipe.log(f"[WARN] [V4.8.1 GRIPPER] 一键启动后没连上夹爪：{exc}")
+    btn_real_all.configure(command=lambda: start_job("一键启动", run_all_then_gripper))
 
     def on_real_stop():
         if pipe.active() and not messagebox.askyesno("全部停止", "停止 RViz / MoveIt / 驱动 / push？\n"

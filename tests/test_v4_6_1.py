@@ -181,7 +181,7 @@ class TestV461(unittest.TestCase):
 
     def test_n7_markers(self):
         with open(os.path.join(HERE, "VERSION")) as f:
-            self.assertIn(f.read().strip(), ("V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4", "V4.6.5", "V4.6.6", "V4.6.8", "V4.6.9", "V4.6.10", "V4.6.11", "V4.6.12", "V4.6.13", "V4.7", "V4.7.1", "V4.7.2", "V4.7.3", "V4.7.4", "V4.8"))
+            self.assertIn(f.read().strip(), ("V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4", "V4.6.5", "V4.6.6", "V4.6.8", "V4.6.9", "V4.6.10", "V4.6.11", "V4.6.12", "V4.6.13", "V4.7", "V4.7.1", "V4.7.2", "V4.7.3", "V4.7.4", "V4.8", "V4.8.1"))
         self.assertEqual(RT.MARKER_V461, "V4.6.1 MEASURED HELD GAP + WRIST LOG ONLY")
         self.assertEqual((RT.STRICT_POS_MM, RT.STRICT_ROT_DEG, RT.STRICT_JOINT_DEG), (2.0, 1.0, 0.5))
 

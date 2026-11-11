@@ -255,7 +255,8 @@ class TestV469(unittest.TestCase):
         import NERO_V365_Real_Cup_Task as RT
         self.assertEqual(RT.EGG_LONG_AXIS_GAP_MM, 36.0)
         s = src("NERO_V365_Real_Cup_Task.py")
-        self.assertIn("float(gap_clamp) > EGG_LONG_AXIS_GAP_MM", s)
+        self.assertTrue("float(gap_clamp) > EGG_LONG_AXIS_GAP_MM" in s
+                        or "float(gap_clamp) > egg_long_axis_gap_mm()" in s)   # V4.8.1: per gripper
         self.assertIn("[WARN] [V4.6.9 EGG PICK]", s)
 
     # ------------------------------------------------------------------ sparse depth
@@ -335,7 +336,7 @@ class TestV469(unittest.TestCase):
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
         self.assertEqual((C.VERSION, RR.VERSION), (v, v))
-        self.assertIn(v, ("V4.6.9", "V4.6.10", "V4.6.11", "V4.6.12", "V4.6.13", "V4.7", "V4.7.1", "V4.7.2", "V4.7.3", "V4.7.4", "V4.8"))
+        self.assertIn(v, ("V4.6.9", "V4.6.10", "V4.6.11", "V4.6.12", "V4.6.13", "V4.7", "V4.7.1", "V4.7.2", "V4.7.3", "V4.7.4", "V4.8", "V4.8.1"))
         self.assertEqual(RT.MARKER_V469, "V4.6.9 VERIFY BY EGG COUNT + LONG-AXIS WARNING + DEPTH COVERAGE")
         self.assertEqual(DR.MARKER_V469_REPLAY, "V4.6.9 REAL REPLAY")
 

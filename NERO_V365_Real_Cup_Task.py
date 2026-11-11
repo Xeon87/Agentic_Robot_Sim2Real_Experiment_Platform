@@ -220,11 +220,25 @@ def gpu_hint(torch=None):
             "（驱动没加载就重启 / 检查 prime-select）") if parts else ""
 
 
+def gripper_is_agx():
+    """V4.8.1: the NERO AgxGripper is the selected gripper (config/gripper.json, all pages)"""
+    try:
+        import NERO_V48_Gripper as GG
+        return GG.is_agx()
+    except Exception:
+        return False
+
+
 def real_mount(cfg=None):
     """V3.67 REAL GRIPPER GEOMETRY: (T_l7_gripper, T_tcp_grasp, mount dict) of the real SO-101 - the NERO_V364 model
     with the measured seat / ring / roll and a fingertip correction (gripper frame) instead of the estimates"""
     import NERO_V364_SO101_Gripper as G
     c = dict(DEFAULT_CFG, **(cfg or {}))
+    if gripper_is_agx():                  # V4.8.1: "gripper frame" = the AgxGripper grasp frame (T_gripper_grasp = I)
+        import NERO_V481_Agx_Geom as AG
+        return AG.T_l7_grasp(), AG.T_tcp_grasp(), {"seat_mm": 31.0, "ring_mm": 6.0, "roll_deg": 0.0,
+                                                  "tip_corr_mm": [0.0, 0.0, 0.0], "gripper": "agx_gripper",
+                                                  "tip_from_flange_mm": AG.tip_from_flange_mm()}
     seat = G.MOUNT["seat_x_m"] * 1000.0 if c.get("seat_mm") is None else float(c["seat_mm"])
     ring = G.MOUNT["ring_m"] * 1000.0 if c.get("ring_mm") is None else float(c["ring_mm"])
     roll = G.MOUNT["roll_deg"] if c.get("roll_deg") is None else float(c["roll_deg"])
@@ -266,6 +280,8 @@ def real_profile(CK, lift_settle_s=0.5, cfg=None):
     """the simulation's SO-101 profile on the real gripper: short settle (no CONNECT hold), and V3.67 real geometry /
     safety: measured mount, clearance (default 8 mm), align-rotate-descend, two-stage descent, wide plan search"""
     c = dict(DEFAULT_CFG, **{k: v for k, v in (cfg or {}).items() if v is not None})
+    if gripper_is_agx():
+        return agx_real_profile(CK, lift_settle_s, c)
     p = CK.so101_profile()
     _T_l7g, T_tg, m = real_mount(c)
     return CK.GripperProfile("so101", T_tg, p.open_mm,
@@ -285,6 +301,27 @@ def real_profile(CK, lift_settle_s=0.5, cfg=None):
                              clear_view_before_verify=True, camera_decides_grip=True,
                              # V3.71: re-check the held cup above the target, stack verify by cluster, perception
                              # retry, recover after a failed motion
+                             recheck_held_before_place=True, stack_by_cluster=True, perception_retries=2,
+                             recover_after_motion_failure=True,
+                             nested_dz_real_mm=(None if c.get("nested_dz_mm") in (None, "") else float(c["nested_dz_mm"])))
+
+
+def agx_real_profile(CK, lift_settle_s=0.5, c=None):
+    """V4.8.1: the OFFICIAL gripper profile of the simulation (V3.61-V3.63 cup stacking was developed with this
+    gripper: symmetric jaws, both pinch flips, vertical approach with the wall tilt) + the same real-arm options as
+    the SO-101 real profile"""
+    import NERO_V481_Agx_Geom as AG
+    c = dict(DEFAULT_CFG, **(c or {}))
+    base = CK.OFFICIAL_PROFILE
+    return CK.GripperProfile("agx_gripper", AG.T_tcp_grasp(), base.open_mm,
+                             f"NERO AgxGripper (official) · pyAgxArm · tips {AG.tip_from_flange_mm():.0f} mm past the flange",
+                             approach_clearance_m=0.0, approach_along_wall=False, flips=base.flips,
+                             release_gap_max_mm=None, lift_settle_s=lift_settle_s, release_tilt_max_deg=0.0,
+                             align_rotate_m=float(c["align_rotate_mm"]) / 1000.0,
+                             descent_stop_above_rim_m=(None if c.get("descent_stop_mm") in (None, "")
+                                                       else float(c["descent_stop_mm"]) / 1000.0),
+                             wide_search_below_deg=8.0, lenient_pick=True, wide_step_deg=30, plan_time_budget_s=15.0,
+                             remember_angles=True, clear_view_before_verify=True, camera_decides_grip=True,
                              recheck_held_before_place=True, stack_by_cluster=True, perception_retries=2,
                              recover_after_motion_failure=True,
                              nested_dz_real_mm=(None if c.get("nested_dz_mm") in (None, "") else float(c["nested_dz_mm"])))
@@ -1112,6 +1149,9 @@ def so101_tip_drop_m():
     around 10 deg of jaw angle (NERO_V364 geometry)."""
     import NERO_V362_Cup_Skills as CK
     import NERO_V364_SO101_Gripper as G
+    if gripper_is_agx():                                           # V4.8.1: both tips at the same depth
+        import NERO_V481_Agx_Geom as AG
+        return AG.tip_drop_m()
     fixed_tip_z = G.PAD_FIXED_CENTRE[2] - G.PAD_HALF[2]                 # gripper frame (z up the gripper, tips < 0)
     h = np.asarray(G.HINGE_POS, float)
     r = np.array([-G.PAD_FACE_X, 0.0, fixed_tip_z]) - h
@@ -1126,7 +1166,7 @@ def so101_tip_drop_m():
 def so101_tip_tool_T(T_l7g):
     """link7 -> lowest fingertip point (grasp frame shifted along its approach axis z_G by so101_tip_drop_m())."""
     import NERO_V364_SO101_Gripper as G
-    T = np.asarray(T_l7g, float) @ G.T_gripper_grasp()
+    T = np.asarray(T_l7g, float) @ (np.eye(4) if gripper_is_agx() else G.T_gripper_grasp())   # V4.8.1
     S = np.eye(4)
     S[2, 3] = so101_tip_drop_m()
     return T @ S
@@ -1152,6 +1192,21 @@ def conservative_table_z(obs, try_harder=False):
         return max(zc, zf), "不一致", (f"相机测得的桌面比安全区 z_table {'高' if zc > zf else '低'} {abs(zc - zf) * 1000:.0f} mm"
                                        f"（> {TABLE_DISAGREE_MAX_M * 1000:.0f} mm）：手眼标定或安全区桌面高度有问题，先复核再夹蛋")
     return max(zc, zf), ("相机桌面" if zc >= zf else "安全区 z_table") + f"（两者差 {abs(zc - zf) * 1000:.1f} mm，取较高者）", None
+
+
+def egg_open_mm():
+    """V4.8.1: the egg pre-grasp opening (SO-101: virtual mm of the simulation; AgxGripper: real mm)"""
+    if gripper_is_agx():
+        import NERO_V481_Agx_Geom as AG
+        return AG.EGG_OPEN_MM
+    return EGG_OPEN_MM
+
+
+def egg_long_axis_gap_mm():
+    if gripper_is_agx():
+        import NERO_V481_Agx_Geom as AG
+        return AG.EGG_LONG_AXIS_GAP_MM
+    return EGG_LONG_AXIS_GAP_MM
 
 
 def egg_place_grasp_origin(tip_target, R_rel_g, egg_in_G, half_len_m):
@@ -1212,6 +1267,9 @@ class RealEggSkills:
         self.SK72 = SK72
         self.io = io
         self.prof = io.gripper_profile()
+        import NERO_V481_Agx_Geom as AG                              # V4.8.1 NERO AgxGripper: end grasp + upright insert
+        self.AG = AG
+        self.agx = getattr(self.prof, "name", "") == "agx_gripper"
         self.skill = skill or {"code": "EG", "short_name": "Egg Into Holder (SO-101)", "source": "real_v43"}
         self.knobs = dict(knobs or CK.CUP_KNOB_DEFAULTS)
         self.stage = "IDLE"
@@ -1261,6 +1319,14 @@ class RealEggSkills:
         st = dict(state_res if state_res is not None else (self.io.gripper_state() or {}))
         cl = dict(clamp_res or {})
         gap_mm = st.get("gap_mm") if st.get("gap_mm") is not None else cl.get("gap_mm")
+        if gap_mm is not None and self.agx:                            # V4.8.1: the AgxGripper reads the egg width
+            g = float(gap_mm)
+            lo, hi = self.AG.EGG_HELD_GAP_MM
+            if g < lo:
+                return False, g, f"两指开口 {g:.1f} mm < {lo:.0f} mm（鸡蛋宽约 42 mm：空夹 / 没夹到）"
+            if g > hi:
+                return False, g, f"两指开口 {g:.1f} mm > {hi:.0f} mm（没合拢到鸡蛋上）"
+            return True, g, f"两指开口 {g:.1f} mm 在鸡蛋夹持范围 [{lo:.0f}, {hi:.0f}] mm"
         if gap_mm is not None:
             g = float(gap_mm)
             if g < EGG_MIN_HELD_GAP_MM:
@@ -1328,7 +1394,7 @@ class RealEggSkills:
         if not hasattr(self, "_tool_cache"):
             try:
                 import NERO_V4613_Tool_Collision as TC
-                self._tool_cache = TC.ToolModel()
+                self._tool_cache = TC.make_tool_model()             # V4.8.1: SO-101 adapter or AgxGripper + bracket
                 self.io.emit(f"[{'INFO' if self._tool_cache.ok else 'WARN'}] [V4.6.13 TOOL] {self._tool_cache.note}")
             except Exception as exc:
                 self._tool_cache = None
@@ -1524,10 +1590,17 @@ class RealEggSkills:
         tip_drop = so101_tip_drop_m()
         cands = []
         self._last_grasp_reject = None
-        for dyaw in (0.0, 180.0, -30.0, 30.0, 90.0, -90.0):
+        # V4.8.1 AgxGripper: the 56 mm wide pads must hold only the egg's upper END (long axis = x_G, egg centre
+        # EGG_OFFSET_MM along x_G, on the side away from the wrist camera) so the lower part sticks out below the
+        # pads into the cell while the camera bracket points up -> long axis aligned
+        dyaws = (0.0, 180.0, -12.0, 12.0, 168.0, -168.0) if self.agx else (0.0, 180.0, -30.0, 30.0, 90.0, -90.0)
+        for dyaw in dyaws:
             gyaw = (yaw0 + dyaw + 180.0) % 360.0 - 180.0
             R_gr = self.SK72.grasp_R(math.radians(float(gyaw)))
-            p_a = p_egg - (half_w + self.SK72.FIXED_PAD_GAP_M - self.G.WALL_HALF) * R_gr[:, 1]   # grasp origin
+            if self.agx:                      # pads on the egg's end; the egg sticks out AWAY from the camera side
+                p_a = p_egg - self.AG.egg_side() * (self.AG.EGG_OFFSET_MM / 1000.0) * R_gr[:, 0]
+            else:
+                p_a = p_egg - (half_w + self.SK72.FIXED_PAD_GAP_M - self.G.WALL_HALF) * R_gr[:, 1]   # grasp origin
             p_g, R_g = self.prof.tcp_from_grasp(p_a, R_gr)
             tip_z = float(p_a[2]) - tip_drop                         # z_G points straight down
             if tip_z < float(zt) + TIP_PLAN_CLEAR_M - 1e-6:
@@ -1577,7 +1650,7 @@ class RealEggSkills:
         # V4.5: aim the egg's LOWER TIP at the slot centre (same release height as V4.3 for a vertical egg)
         tip_target = p_slot - np.array([0.0, 0.0, float(half_len_m)])
         if egg_in_G is None:
-            egg_in_G = np.array([0.0, EGG_HELD_CENTER_Y_M, 0.0])
+            egg_in_G = self.AG.egg_in_G_for_pick() if self.agx else np.array([0.0, EGG_HELD_CENTER_Y_M, 0.0])
         a1 = math.atan2(float(p_slot[1]), float(p_slot[0]))
         a1 = a1 + math.pi if a1 < 0 else a1 - math.pi
         # Prioritize elbow-up seeds in the same J1/J2 branch as q_from (`q_lift`) so J1 never flips 165 deg and link3 stays inward
@@ -1589,6 +1662,9 @@ class RealEggSkills:
         # V4.5: truly vertical first (-90 / +90), then progressively more tilt; the tilt is compensated anyway because
         # the lower tip (not the centre) is aimed at the slot
         pitch_order = EGG_PITCH_ORDER
+        if self.agx:                          # V4.8.1: the part sticking out (+x_G) must point DOWN -> pitch < 0
+            pitch_order = tuple(p for p in EGG_PITCH_ORDER if p < 0) if float(egg_in_G[0]) >= 0 else \
+                tuple(p for p in EGG_PITCH_ORDER if p > 0)
         yaw_order = (150.0, 180.0, 135.0, 120.0) if float(p_slot[1]) >= 0.0 else (-150.0, 180.0, -135.0, -120.0)
         # V4.6.8 FILL CARTON: eggs already standing next to this slot -> the jaws must not point at them
         occ_xy = self._occupied_xy(exclude=slot)
@@ -1598,9 +1674,10 @@ class RealEggSkills:
         why = {}                                      # V4.6.13: pitch sign -> rejection counts
 
         def _rej(pitch, key, extra=None):
-            d = why.setdefault("+" if pitch > 0 else "-", {"ik": 0, "joint": 0, "fence": 0, "tool": 0, "tool_min": None})
+            d = why.setdefault("+" if pitch > 0 else "-", {"ik": 0, "joint": 0, "fence": 0, "tool": 0, "carton": 0,
+                                                           "tool_min": None})
             d[key] += 1
-            if key == "tool" and extra is not None and (d["tool_min"] is None or extra[0] > d["tool_min"][0]):
+            if key in ("tool", "carton") and extra is not None and (d["tool_min"] is None or extra[0] > d["tool_min"][0]):
                 d["tool_min"] = extra
         yaw_orders = [yaw_order, tuple(float(a) for a in range(-165, 181, 15))]   # V4.6.13: 2nd pass every 15 deg
         for yaw_order in yaw_orders:
@@ -1614,13 +1691,20 @@ class RealEggSkills:
 
     def _log_place_choice(self, slot, cands, why, pitch_order):
         """V4.6.13: one line - which pitch was used and why the other one was refused"""
-        cn = {"ik": "IK 无解 / 分支不对", "joint": "关节限位", "fence": "围栏", "tool": "相机 / 支架离桌面太近"}
+        cn = {"ik": "IK 无解 / 分支不对", "joint": "关节限位", "fence": "围栏", "tool": "相机 / 支架离桌面太近",
+              "carton": "手指会碰到蛋托（离蛋托顶不够 5 mm）"}
         parts = []
         for sgn, d in sorted(why.items()):
-            items = [f"{cn[k]} {d[k]}" for k in ("ik", "joint", "fence", "tool") if d[k]]
-            if d.get("tool_min"):
-                import NERO_V4613_Tool_Collision as TC
-                items[-1 if d["tool"] else 0] += f"（最好的一次 {TC.PART_CN.get(d['tool_min'][1], d['tool_min'][1])} 离桌面 {d['tool_min'][0]:.0f} mm）"
+            import NERO_V4613_Tool_Collision as TC
+            items = []
+            for k in ("ik", "joint", "fence", "tool", "carton"):
+                if not d[k]:
+                    continue
+                t = f"{cn[k]} {d[k]}"
+                if k in ("tool", "carton") and d.get("tool_min"):
+                    t += (f"（最好的一次 {TC.PART_CN.get(d['tool_min'][1], d['tool_min'][1])} 离"
+                          f"{'蛋托顶' if k == 'carton' else '桌面'} {d['tool_min'][0]:.0f} mm）")
+                items.append(t)
             if items:
                 parts.append(f"俯仰 {sgn}：" + "、".join(items))
         sid = next((k for k, v in self.cam.items() if v is slot), "slot")
@@ -1638,9 +1722,17 @@ class RealEggSkills:
             for pyaw in yaw_order:
                 R_rel_g = self._slot_vertical_grasp_R(pyaw, pitch_deg)
                 p_a_rel = egg_place_grasp_origin(tip_target, R_rel_g, egg_in_G, half_len_m)
-                if occ_xy and not self._jaws_clear(p_a_rel, R_rel_g, egg_in_G, occ_xy):
+                if occ_xy and not self.agx and not self._jaws_clear(p_a_rel, R_rel_g, egg_in_G, occ_xy):
                     continue
                 p_rel, R_rel = self.prof.tcp_from_grasp(p_a_rel, R_rel_g)
+                if occ_xy and self.agx and not self._agx_neighbours_clear(p_rel, R_rel, occ_xy, zt):
+                    continue
+                if self.agx:                      # V4.8.1: the fingers stay above the carton while the egg goes in
+                    low = self._agx_finger_low(p_rel, R_rel)
+                    top = float(zt) + self.AG.CARTON_TOP_ABOVE_TABLE_M + self.AG.PAD_ABOVE_CARTON_M
+                    if low < top:
+                        _rej(pitch_deg, "carton", (round((low - top + self.AG.PAD_ABOVE_CARTON_M) * 1000.0, 1), "finger_a"))
+                        continue
                 p_above = p_rel + np.array([0.0, 0.0, 0.065])
                 for sd in seeds:
                     r1 = self._fast.ik([sd], p_above, R_rel, iters=30)
@@ -1691,6 +1783,35 @@ class RealEggSkills:
                     break
             if cands:
                 break
+
+    def _agx_neighbours_clear(self, p_tcp, R_tcp, occ_xy, zt, egg_r_m=0.022, clear_m=0.004):
+        """V4.8.1: fingers / housing / bracket / camera vs the eggs already standing in the carton (each a vertical
+        column of radius egg_r up to table + 65 mm)"""
+        tm = getattr(self, "_agx_full", None)
+        if tm is None:
+            tm = self._agx_full = self.AG.AgxToolModel(opening_mm=44.0)
+        T = np.eye(4)
+        T[:3, :3], T[:3, 3] = R_tcp, p_tcp
+        Tl7 = T @ np.linalg.inv(self.CK.T_L7_TCP)
+        boxes = [(Tl7[:3, :3] @ c + Tl7[:3, 3], Tl7[:3, :3] @ R, h) for _n, c, R, h in tm.boxes]
+        for q in occ_xy:
+            for z in np.linspace(float(zt) + 0.030, float(zt) + 0.065, 6):
+                pt = np.array([float(q[0]), float(q[1]), float(z)])
+                for c, R, h in boxes:
+                    d = np.maximum(np.abs(R.T @ (pt - c)) - h, 0.0)
+                    if float(np.linalg.norm(d)) < egg_r_m + clear_m:
+                        return False
+        return True
+
+    def _agx_finger_low(self, p_tcp, R_tcp):
+        """V4.8.1: lowest finger point (m, base z) for a TCP pose, egg-holding opening"""
+        tm = getattr(self, "_agx_fingers", None)
+        if tm is None:
+            tm = self._agx_fingers = self.AG.AgxToolModel(opening_mm=44.0, T_flange_cam=np.eye(4))
+        T = np.eye(4)
+        T[:3, :3], T[:3, 3] = R_tcp, p_tcp
+        z, _n = tm.lowest_of(T @ np.linalg.inv(self.CK.T_L7_TCP), ("finger_a", "finger_b"))
+        return z
 
     # ------------------------------------------------------------------ V4.6.8 helpers
     def _pitch_m(self):
@@ -1933,9 +2054,12 @@ class RealEggSkills:
 
     # ------------------------------------------------------------------ V4.6 camera agreement helpers
     def _egg_cfg(self):
-        """V4.6.1: config/egg_carton.json (read only)"""
+        """V4.6.1: config/egg_carton.json (read only).  V4.8.1 AgxGripper: a clamped egg reads its width (~42 mm)"""
         import NERO_V349_Real_Wrist_Camera as W49
-        return W49.egg_task_config()
+        c = W49.egg_task_config()
+        if getattr(self, "agx", False):
+            c = dict(c, held_gap_mm=float(c.get("held_gap_mm_agx", 42.0)), offcentre_margin_mm=8.0)
+        return c
 
     def _wrist_frame(self):
         ws_fn = getattr(self.io, "wrist_snapshot", None)
@@ -2099,7 +2223,7 @@ class RealEggSkills:
                     return self._res("pick_egg", False, r.get("physical_verification"), reason="REPLAN_AFTER_SLOT_LOOK_FAILED",
                                      nxt=["observe_scene"])
         W, Q = self.plan["_wps"], self.plan["_q"]
-        self.io.gripper_open(EGG_OPEN_MM)
+        self.io.gripper_open(egg_open_mm())
         r = self.io.move_joints(f"V4.3 pregrasp {source_egg}", Q["pregrasp"])
         if not r.get("ok"):
             return self._res("pick_egg", False, r, reason="MOTION_FAILED", nxt=["return_to_safe_pose"])
@@ -2140,7 +2264,7 @@ class RealEggSkills:
             held_clamp, gap_clamp, why_clamp = self._is_egg_held(clamp, st_at_clamp)
             if not held_clamp:
                 self.io.emit(f"[FAIL] [V4.3 EGG PICK] 下探合拢后未抓到鸡蛋：{why_clamp} → 立即张开夹爪并退回安全高度，中止后续平移与插槽")
-                self.io.gripper_open(EGG_OPEN_MM)
+                self.io.gripper_open(egg_open_mm())
                 self.io.move_line(f"V4.3 abort retreat {source_egg}", W["pregrasp"][0],
                                   self.CK.R_to_quat_xyzw(W["pregrasp"][1]), 0.035)
                 self.held = None
@@ -2154,8 +2278,8 @@ class RealEggSkills:
                 self.io.emit(f"[INFO] [V4.6.1 EGG PICK] 夹紧读数 {float(gap_clamp):.1f} mm（基准 {base:.1f} mm，"
                              f"差 {float(gap_clamp) - base:+.1f} mm；判夹偏阈值 < {base - marg:.1f} mm）")
             offc = gap_clamp is not None and float(gap_clamp) < base - marg
-            if gap_clamp is not None and float(gap_clamp) > EGG_LONG_AXIS_GAP_MM:   # V4.6.9
-                self.io.emit(f"[WARN] [V4.6.9 EGG PICK] 夹紧读数 {float(gap_clamp):.1f} mm > {EGG_LONG_AXIS_GAP_MM:.0f} mm（正常夹住短轴时 "
+            if gap_clamp is not None and float(gap_clamp) > egg_long_axis_gap_mm():   # V4.6.9
+                self.io.emit(f"[WARN] [V4.6.9 EGG PICK] 夹紧读数 {float(gap_clamp):.1f} mm > {egg_long_axis_gap_mm():.0f} mm（正常夹住短轴时 "
                              "约 26.5 mm）：很可能夹到了鸡蛋的长轴（鸡蛋朝向识别反了 90°）或空夹标定不对 → 放蛋时鸡蛋不会竖直；"
                              "请看主相机画面里鸡蛋的方向，并重做「空夹标定」")
             if offc and not ecfg["offcentre_regrasp"]:
@@ -2166,7 +2290,7 @@ class RealEggSkills:
                 self.io.emit(f"[WARN] [V4.6.1 EGG PICK] 夹偏：读数 {float(gap_clamp):.1f} mm < 基准 {base:.1f} − "
                              f"{marg:.0f} mm → 松开、抬起、重新看"
                              + ("、再夹一次" if attempt == 1 else "；已经重试过一次，停止"))
-                self.io.gripper_open(EGG_OPEN_MM)
+                self.io.gripper_open(egg_open_mm())
                 self.io.sleep(0.3)
                 self.io.move_line(f"V4.6 regrasp retreat {source_egg}", W["pregrasp"][0],
                                   self.CK.R_to_quat_xyzw(W["pregrasp"][1]), 0.035)
@@ -2185,7 +2309,7 @@ class RealEggSkills:
         held_lift, gap_lift, why_lift = self._is_egg_held(clamp, st)
         if not held_lift:
             self.io.emit(f"[FAIL] [V4.3 EGG PICK] 抬升后检测到鸡蛋滑落：{why_lift} → 立即张开夹爪，中止后续平移与插槽")
-            self.io.gripper_open(EGG_OPEN_MM)
+            self.io.gripper_open(egg_open_mm())
             self.held = None
             return self._res("pick_egg", False, {"gripper": st, "clamp": clamp, "gap_mm": gap_lift, "detail": why_lift},
                              reason="EGG_NOT_HELD", nxt=["observe_scene"])
@@ -2295,7 +2419,7 @@ class RealEggSkills:
         held_now, gap_now, why_now = self._is_egg_held()
         if not held_now:
             self.io.emit(f"[FAIL] [V4.3 EGG ORIENT] 调整角度前检测到夹爪中无鸡蛋：{why_now} → 中止插槽")
-            self.io.gripper_open(EGG_OPEN_MM)
+            self.io.gripper_open(egg_open_mm())
             self.held = None
             self.stage = "OBSERVED"
             return self._res("orient_for_slot", False, {"gap_mm": gap_now, "detail": why_now},
@@ -2316,7 +2440,7 @@ class RealEggSkills:
         held_after, gap_after, why_after = self._is_egg_held()
         if not held_after:
             self.io.emit(f"[FAIL] [V4.3 EGG ORIENT] 旋转立蛋后鸡蛋脱落：{why_after} → 立即中止下插")
-            self.io.gripper_open(EGG_OPEN_MM)
+            self.io.gripper_open(egg_open_mm())
             self.held = None
             self.stage = "OBSERVED"
             return self._res("orient_for_slot", False, {"gap_mm": gap_after, "detail": why_after},
@@ -2345,7 +2469,7 @@ class RealEggSkills:
         held_pre_ins, gap_pre_ins, why_pre_ins = self._is_egg_held()
         if not held_pre_ins:
             self.io.emit(f"[FAIL] [V4.3 EGG PLACE] 下插蛋槽前检测到鸡蛋不在夹爪中：{why_pre_ins} → 中止下插")
-            self.io.gripper_open(EGG_OPEN_MM)
+            self.io.gripper_open(egg_open_mm())
             self.held = None
             self.stage = "OBSERVED"
             return self._res("place_egg_into_slot", False, {"gap_mm": gap_pre_ins, "detail": why_pre_ins},
@@ -2368,7 +2492,7 @@ class RealEggSkills:
                                   [float(v) for v in np.asarray(self.cam[target_slot]["rim"], float)[:2]]),
                            "source_xy": ([float(v) for v in np.asarray(src_e["rim"], float)[:2]]
                                          if src_e.get("rim") is not None else None)}
-        self.io.gripper_open(EGG_OPEN_MM)
+        self.io.gripper_open(egg_open_mm())
         self.io.sleep(0.25)
         r = self.io.move_line(f"V4.3 retreat from {target_slot}", W["above_target"][0],
                               self.CK.R_to_quat_xyzw(W["above_target"][1]), 0.04)
@@ -2611,7 +2735,7 @@ class RealEggSkills:
     def return_to_safe_pose(self, **_):
         if self.held:
             return self._res("return_to_safe_pose", False, reason="EGG_STILL_HELD", nxt=["place_egg_into_slot"])
-        self.io.gripper_open(EGG_OPEN_MM)
+        self.io.gripper_open(egg_open_mm())
         r = self.io.go_home("V4.3 egg task end")
         return self._res("return_to_safe_pose", bool(r.get("ok", True)), {"detail": r.get("error")})
 
@@ -2684,7 +2808,7 @@ class RealEggSkills:
                 return False
             self.io.emit(f"[INFO] [V4.6.8 TRY HARDER] 夹取失败（{r.get('reason')}）→ 张开、退回、重新识别、重新规划后再夹"
                          f"（第 {k + 2} 次）")
-            self.io.gripper_open(EGG_OPEN_MM)
+            self.io.gripper_open(egg_open_mm())
             self.io.go_home("V4.6.8 try harder: back before a new pick")
             r2 = self._observe(out, try_harder)
             if not r2.get("ok") or not self.source_eggs():
@@ -3571,7 +3695,13 @@ class RealCupTaskTabUI:
         p = real_profile(CK, cfg=geo)
         _T, _Tg, m = real_mount(geo)
         tq = self.GR.clamp_torque_pct(knobs["cup_clamp_force_n"], self._so101().cfg)
-        if hasattr(self, "v_geo"):
+        if hasattr(self, "v_geo") and self.GG.is_agx():               # V4.8.1
+            import NERO_V481_Agx_Geom as AG
+            self.v_geo.set(geo_err or (
+                f"NERO 原装夹爪：两指对称，指尖在法兰外 {AG.tip_from_flange_mm():.0f} mm（config/gripper.json "
+                f"agx.tip_from_flange_mm），抓杯张开 {p.open_mm:.0f} mm，两种夹法（里外）都试\n抓取前：先到预抓取点上方 "
+                f"{p.align_rotate_m * 1000:.0f} mm → 原地转腕 → 竖直降到预抓取点；鸡蛋：夹住蛋的一头，竖起来时蛋朝下、相机朝上"))
+        elif hasattr(self, "v_geo"):
             self.v_geo.set(geo_err or (
                 f"安装：座面 {m['seat_mm']:.1f} mm + 转接环 {m['ring_mm']:.1f} mm · 偏转 {m['roll_deg']:+.1f}° · 指尖修正 "
                 f"{m['tip_corr_mm']} mm（夹爪坐标系）\n抓取前：先到预抓取点上方 {p.align_rotate_m * 1000:.0f} mm → 原地转腕到抓取角度"
@@ -4103,6 +4233,9 @@ class RealCupTaskTabUI:
         if mode == "execute" and not self.grip.connected:
             bad.append(f"{self.GG.SHORT[self.GG.active_type()]} 夹爪没有连接"
                        + ("（实机NERO调试 → 夹爪 → 连接）" if self.GG.is_agx() else ""))
+        scene = self.v_task_scene.get() if hasattr(self, "v_task_scene") else "stack_cups"
+        if mode in ("hover", "execute") and self.GG.is_agx() and scene == "sort_items":
+            bad.append("分拣任务还没有按 NERO 原装夹爪适配（V4.8.1 适配了叠杯子和鸡蛋）：只能「只规划」，或切回 SO-101")
         return bad
 
     def on_perceive(self):
@@ -4185,8 +4318,15 @@ class RealCupTaskTabUI:
         io.on_perception = lambda res, io_=io: self._ui(lambda: self._apply_overlay(res, getattr(io_, "skills", None)))
         touch_ok = bool(self._so101().cfg.get("touch_calibrated")) or self.GG.is_agx()
         geo = {k: mc.get(k) for k in ("roll_deg", "clearance_mm", "seat_mm", "ring_mm")}
-        setup = (f"skill [{skill.get('code')}] · SO-101 偏转 {geo['roll_deg']:+.0f}° · 离杯壁 {geo['clearance_mm']:.0f} mm · "
-                 f"空夹标定 {'已做' if touch_ok else '未做'} · 关节 {mc['joint_vmax_deg_s']} °/s · 直线 "
+        if self.GG.is_agx():                                           # V4.8.1
+            import NERO_V481_Agx_Geom as AG
+            z = self.GG.load_cfg().get("zero")
+            grip_txt = (f"NERO 原装夹爪 · 指尖在法兰外 {AG.tip_from_flange_mm():.0f} mm · 校正归零 "
+                        f"{'已做' if z else '未做'}")
+        else:
+            grip_txt = (f"SO-101 偏转 {geo['roll_deg']:+.0f}° · 离杯壁 {geo['clearance_mm']:.0f} mm · "
+                        f"空夹标定 {'已做' if touch_ok else '未做'}")
+        setup = (f"skill [{skill.get('code')}] · {grip_txt} · 关节 {mc['joint_vmax_deg_s']} °/s · 直线 "
                  f"{mc['line_vmax_mm_s']} mm/s（{mult:g}X）· " + (f"LLM {llm['model']}" if use_llm else "固定流程"))
 
         def snap():

@@ -81,6 +81,11 @@ class GripperPanelUI:
         self.btn_conn = ttk.Button(top, text="连接", command=self.on_connect, width=8)
         self.btn_conn.pack(side="left")
         ttk.Button(top, text="断开", command=self.on_disconnect, width=8).pack(side="left", padx=4)
+        ttk.Label(top, text="指尖到法兰").pack(side="left", padx=(14, 2))     # V4.8.1: measured, used by the planners
+        self.v_tip = tk.StringVar(value=f"{float(self.cfg['agx'].get('tip_from_flange_mm') or 144.0):.0f}")
+        ttk.Entry(top, textvariable=self.v_tip, width=5).pack(side="left")
+        ttk.Label(top, text="mm").pack(side="left", padx=(2, 4))
+        ttk.Button(top, text="保存", command=self.on_tip_save, width=5).pack(side="left")
         self.v_note = tk.StringVar(value="")
         ttk.Label(top, textvariable=self.v_note, foreground=C_TXT2).pack(side="left", padx=10)
 
@@ -383,6 +388,21 @@ class GripperPanelUI:
                 self.sc_goal.configure(to=self.agx().stroke_mm)
         self._run("连接", fn, done)
 
+    def on_tip_save(self):
+        """V4.8.1: flange face -> fingertips (mm), measured with a ruler; the cup / egg planners use it"""
+        try:
+            v = float(self.v_tip.get())
+        except ValueError:
+            self.log("[WARN] [V4.8.1 GRIPPER] 指尖到法兰要是数字（mm）")
+            return
+        if not 120.0 <= v <= 170.0:
+            self.log(f"[WARN] [V4.8.1 GRIPPER] {v:.0f} mm 不合理（官方模型 144 mm，允许 120–170 mm）")
+            return
+        c = GG.load_cfg()
+        c["agx"]["tip_from_flange_mm"] = v
+        GG.save_cfg(c)
+        self.log(f"[OK] [V4.8.1 GRIPPER] 指尖到法兰 = {v:.0f} mm（官方模型 144 mm）→ 叠杯子 / 鸡蛋任务下次规划起生效")
+
     def on_disconnect(self):
         if self.busy:
             return
@@ -421,6 +441,11 @@ class GripperPanelUI:
             return
         p = GG.load_cfg()["presets"].get(k, {})
         mm, f = float(p.get("open_mm", 60.0)), float(p.get("force", 1.0))
+        stroke = self.agx().stroke_mm
+        if mm > stroke:                                   # V4.8.1: the 70 mm version cannot open to 95 mm
+            self.log(f"[WARN] [V4.8.1 GRIPPER] {dict(GG.PRESET_KEYS)[k]}预设 {mm:.0f} mm 超过这个夹爪的行程 "
+                     f"{stroke:.0f} mm → 按 {stroke:.0f} mm；请在 ② 力控标定 → C 改预设")
+            mm = stroke
         self._set_force(f)
         self.v_goal.set(mm)
         self.v_goal_txt.set(f"{mm:.0f}")

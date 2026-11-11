@@ -244,7 +244,9 @@ class TestV48(unittest.TestCase):
         import NERO_V48_Gripper_UI as GUI
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
-        self.assertEqual((v, C.VERSION, RR.VERSION), ("V4.8", "V4.8", "V4.8"))
+        self.assertEqual(v, C.VERSION)
+        self.assertEqual(v, RR.VERSION)
+        self.assertIn(v, ("V4.8", "V4.8.1"))
         self.assertEqual(GG.MARKER, "V4.8 NERO AGX GRIPPER + GRIPPER SWITCH")
         self.assertEqual(GUI.MARKER, "V4.8 GRIPPER PANEL: ZERO + FORCE CALIBRATION + TEACH TEST + J7 LIMIT")
         self.assertEqual(GG.AGX["mass_kg"], 0.5)

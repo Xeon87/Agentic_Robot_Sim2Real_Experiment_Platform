@@ -60,9 +60,10 @@ FAULTS = (("voltage_too_low", "电压过低"), ("motor_overheating", "电机过�
 PRESET_KEYS = (("egg", "鸡蛋"), ("cup", "纸杯 / 塑料杯"), ("block", "方块"))
 DEFAULTS = {
     "type": "so101",
-    "agx": {"channel": "can0", "fw": "v111", "backend": "pyagxarm", "default_force": 1.0},
+    "agx": {"channel": "can0", "fw": "v111", "backend": "pyagxarm", "default_force": 1.0,
+            "tip_from_flange_mm": 144.0},       # V4.8.1: measured flange face -> fingertips (official URDF: 6 + 138)
     # per-object open width (mm) + force level; starting values, tune them on the real objects (力控标定 ③)
-    "presets": {"egg": {"open_mm": 60.0, "force": 0.5}, "cup": {"open_mm": 95.0, "force": 1.0},
+    "presets": {"egg": {"open_mm": 60.0, "force": 0.5}, "cup": {"open_mm": 65.0, "force": 1.0},
                 "block": {"open_mm": 60.0, "force": 1.5}},
     "force_table": [],             # [[setting, measured_N], ...] from 力控标定 ② (gauge); empty = linear guess
     "baseline": None,              # 力控标定 ①: {"max_force", "threshold", "saved"}

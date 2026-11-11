@@ -199,4 +199,18 @@ class ToolModel:
         return dz >= float(self.cfg["clearance_mm"]), round(dz, 1), name
 
 
-PART_CN = {"ring": "转接环", "aruco_plate": "ArUco 支架", "camera_cradle": "腕部相机 / 支架", "camera_head": "腕部相机镜头"}
+PART_CN = {"ring": "转接环", "aruco_plate": "ArUco 支架", "camera_cradle": "腕部相机 / 支架", "camera_head": "腕部相机镜头",
+           "housing": "夹爪本体", "finger_a": "手指", "finger_b": "手指", "bracket": "相机支架"}
+
+
+def make_tool_model(**kw):
+    """V4.8.1: the model of the gripper in use - NERO AgxGripper + bracket, or the SO-101 printed adapter"""
+    try:
+        import NERO_V48_Gripper as GG
+        agx = GG.is_agx()
+    except Exception:
+        agx = False
+    if agx:
+        import NERO_V481_Agx_Geom as AG
+        return AG.AgxToolModel(clearance_mm=load_cfg()["clearance_mm"])
+    return ToolModel(**kw)
