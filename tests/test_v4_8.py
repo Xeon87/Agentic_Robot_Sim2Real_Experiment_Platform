@@ -108,6 +108,7 @@ class TestV48(unittest.TestCase):
         g.move(10, force=9.0)
         self.assertEqual(be.force_set, 3.0)                      # clipped
         self.assertFalse(g.calibrate_zero()["ok"])                # enabled -> no ack
+        g.open_gap(0.0)                                           # (the user closes the fingers fully before zeroing)
         self.assertTrue(g.relax()[0])
         self.assertFalse(be.enabled)
         self.assertTrue(g.calibrate_zero()["ok"])
@@ -246,7 +247,7 @@ class TestV48(unittest.TestCase):
             v = f.read().strip()
         self.assertEqual(v, C.VERSION)
         self.assertEqual(v, RR.VERSION)
-        self.assertIn(v, ("V4.8", "V4.8.1"))
+        self.assertIn(v, ("V4.8", "V4.8.1", "V4.8.2"))
         self.assertEqual(GG.MARKER, "V4.8 NERO AGX GRIPPER + GRIPPER SWITCH")
         self.assertEqual(GUI.MARKER, "V4.8 GRIPPER PANEL: ZERO + FORCE CALIBRATION + TEACH TEST + J7 LIMIT")
         self.assertEqual(GG.AGX["mass_kg"], 0.5)

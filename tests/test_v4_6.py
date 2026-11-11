@@ -426,7 +426,7 @@ class TestV46Egg(unittest.TestCase):
 
     def test_e6_markers(self):
         with open(os.path.join(HERE, "VERSION")) as f:
-            self.assertTrue(f.read().strip().startswith(("V4.6", "V4.7", "V4.8", "V4.8.1")))
+            self.assertTrue(f.read().strip().startswith(("V4.6", "V4.7", "V4.8", "V4.8.1", "V4.8.2")))
         self.assertEqual(RT.MARKER_V46, "V4.6 EGG CAMERA AGREEMENT + STRICT ARRIVAL")
         self.assertEqual(RWC.MARKER_V46_SLOT, "V4.6 WRIST SLOT CAVITY DETECTOR")
         self.assertEqual((RT.STRICT_POS_MM, RT.STRICT_ROT_DEG, RT.STRICT_JOINT_DEG), (2.0, 1.0, 0.5))

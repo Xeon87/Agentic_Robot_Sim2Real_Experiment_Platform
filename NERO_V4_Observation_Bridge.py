@@ -237,14 +237,18 @@ class ObservationBridge:
         gap_mm: Optional[float] = None,
         gripper_norm: Optional[float] = None,
         ts_ns: Optional[int] = None,
+        max_gap_mm: Optional[float] = None,
     ) -> None:
+        """V4.8.2: max_gap_mm = the real gripper's full opening (AgxGripper: its stroke 70 / 100 mm; before every
+        AgxGripper opening above 45 mm was recorded as 1.0)"""
+        mx = float(max_gap_mm) if max_gap_mm else GRIPPER_MAX_GAP_MM
         with self.lock:
             if gripper_norm is not None:
                 self._gripper_norm = float(np.clip(gripper_norm, 0.0, 1.0))
-                self._gripper_gap_mm = gripper_norm_to_mm(self._gripper_norm) if gap_mm is None else float(gap_mm)
+                self._gripper_gap_mm = gripper_norm_to_mm(self._gripper_norm, mx) if gap_mm is None else float(gap_mm)
             elif gap_mm is not None:
                 self._gripper_gap_mm = float(gap_mm)
-                self._gripper_norm = gripper_mm_to_norm(self._gripper_gap_mm)
+                self._gripper_norm = gripper_mm_to_norm(self._gripper_gap_mm, mx)
             self._gripper_ts_ns = int(ts_ns if ts_ns is not None else time.monotonic_ns())
 
     def set_task_instruction(self, instruction: str) -> None:
@@ -269,7 +273,8 @@ class ObservationBridge:
                     self._grip_read_t = now_m
                     st = gripper.status()
                 if st and st.get("gap_mm") is not None:
-                    self.update_gripper_state(gap_mm=float(st["gap_mm"]), ts_ns=now_ns)
+                    self.update_gripper_state(gap_mm=float(st["gap_mm"]), ts_ns=now_ns,
+                                              max_gap_mm=st.get("stroke_mm"))   # V4.8.2 (AgxGripper reports it)
             if cam_tab is not None:
                 src = getattr(cam_tab, "src", None)
                 if src is not None and src.running():

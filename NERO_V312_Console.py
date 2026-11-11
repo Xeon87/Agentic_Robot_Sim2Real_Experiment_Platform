@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.8.1"
+VERSION = "V4.8.2"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -1014,6 +1014,10 @@ def run_console(initial_tab="sim"):
         import NERO_V48_Gripper_UI as GUI
         g_proxy = rct_tab.grip if (rct_tab is not None and isinstance(getattr(rct_tab, "grip", None), GG.GripperProxy)) \
             else GG.GripperProxy(None, log=lambda line: log_append(real_log, line))
+        try:                                     # V4.8.2: the helper speaks the arm's firmware version too
+            g_proxy.devices["agx_gripper"].cfg["fw"] = (real_cfg() or {}).get("fw_version") or "v111"
+        except Exception:
+            pass
         grip_panel = GUI.GripperPanelUI(tk, ttk, grip_holder, g_proxy, log=lambda line: log_append(real_log, line),
                                         ask=lambda t, m: bool(messagebox.askyesno(t, m)),
                                         visible_fn=lambda: (nb.select() == str(real_outer)

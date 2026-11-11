@@ -56,6 +56,15 @@ DEFAULT_DATASET_ROOT = ST.default_dataset_root()
 VALID_SPLITS = ("train", "val", "test")
 
 
+def _gripper_name():
+    """V4.8.2: which gripper recorded this episode (episodes of the two grippers must not be mixed for training)"""
+    try:
+        import NERO_V48_Gripper as GG
+        return "AgxGripper" if GG.is_agx() else "SO-101"
+    except Exception:
+        return "SO-101"
+
+
 def inspect_episode_quality(
     frames: List[Dict[str, Any]],
     target_fps: float = 20.0,
@@ -267,7 +276,7 @@ class NEROLeRobotDataset:
             "fps": self.fps,
             "calib_version": calib_version,
             "recorder_version": VERSION,
-            "hardware_cfg": hardware_cfg or {"arm": "NERO_7DOF", "gripper": "SO-101"},
+            "hardware_cfg": hardware_cfg or {"arm": "NERO_7DOF", "gripper": _gripper_name()},
             "quality": qual,
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }

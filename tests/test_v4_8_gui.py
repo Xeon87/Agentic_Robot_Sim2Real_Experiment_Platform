@@ -183,6 +183,16 @@ assert wait(lambda: panel.busy is None and "已恢复" in panel.v_j7.get())
 assert abs(fake.j_limits[7][1] - 1.5708) < 1e-3
 print("[G7] J7: read -90..90, write -87..87 (read back), drag test 95 deg -> not held, restored")
 
+# ---- G9 (V4.8.2) finger speed: the box shows the global default, a choice is saved, rubbish is refused
+assert panel.v_speed.get() == "40%", panel.v_speed.get()
+panel.v_speed.set("30%")
+panel.on_speed()
+assert GG.load_cfg()["agx"]["speed_pct"] == 30.0 and logs("开合速度 = 30%")
+panel.v_speed.set("fast")
+panel.on_speed()
+assert GG.load_cfg()["agx"]["speed_pct"] == 30.0 and panel.v_speed.get() == "30%"
+print("[G9] speed box: default 40%, 30% saved for all pages, invalid input refused")
+
 # ---- G8 layout + no emoji
 root.update()
 
@@ -203,7 +213,7 @@ for w in walk(root):
         if any(ord(c) >= 0x1F000 or 0x2600 <= ord(c) <= 0x27BF for c in v):
             bad.append(v)
 assert not bad, bad
-for w in (panel.btn_conn, panel.sc_goal, panel.nb, panel.btn_zero):
+for w in (panel.btn_conn, panel.sc_goal, panel.nb, panel.btn_zero, panel.cb_speed):
     x, y = w.winfo_rootx() + w.winfo_width(), w.winfo_rooty() + w.winfo_height()
     assert w.winfo_ismapped() and x <= 1400 + root.winfo_rootx() and y <= 900 + root.winfo_rooty(), (w, x, y)
 for k in range(4):

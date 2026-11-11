@@ -710,7 +710,12 @@ class RealIO:
             return {"opening_mm": round(float(mm), 1), "skipped": True}
         if self._agx():                       # V4.8: the backend's opening mm IS the AgxGripper's opening
             r = self.grip.open_gap(float(mm))
-            return {"opening_mm": r.get("gap_mm"), "gap_mm": r.get("gap_mm"), "ok": r.get("ok"), "error": r.get("error")}
+            g = r.get("gap_mm")
+            # V4.8.2: a gripper that did not open stops the task (the egg pick used to descend with closed fingers)
+            if r.get("error") or g is None or float(g) < min(float(mm), float(getattr(self.grip, "stroke_mm", 100.0))) - 5.0:
+                raise RuntimeError(f"NERO 原装夹爪没有张开到 {float(mm):.0f} mm（{r.get('error') or f'只到 {g} mm'}）"
+                                   "→ 任务停止，机械臂不再下探")
+            return {"opening_mm": g, "gap_mm": g, "ok": r.get("ok"), "error": r.get("error")}
         r = self.grip.open_deg(GR.open_deg_for_virtual_mm(mm))
         a = r.get("open_deg")
         return {"opening_mm": round(GR.virtual_mm_for_open_deg(a), 1) if a is not None else None,
@@ -3484,6 +3489,14 @@ class RealCupTaskTabUI:
         ttk.Button(self.agx_row, text="张到最大", command=lambda: self.on_grip("gap", 100.0)).pack(side="left", padx=2)
         ttk.Button(self.agx_row, text="夹紧测试", command=lambda: self.on_grip("clamp", None)).pack(side="left", padx=2)
         ttk.Button(self.agx_row, text="失能", command=lambda: self.on_grip("relax", None)).pack(side="left", padx=2)
+        ttk.Label(self.agx_row, text="  速度").pack(side="left")             # V4.8.2 finger speed (global)
+        self.v_agx_speed = tk.StringVar(value=self.GG.speed_text())
+        cbs = ttk.Combobox(self.agx_row, textvariable=self.v_agx_speed, width=5,
+                           values=[f"{v}%" for v in self.GG.SPEED_CHOICES],
+                           postcommand=lambda: self.v_agx_speed.set(self.GG.speed_text()))
+        cbs.pack(side="left", padx=2)
+        cbs.bind("<<ComboboxSelected>>", lambda _e: self.on_agx_speed())
+        cbs.bind("<Return>", lambda _e: self.on_agx_speed())
         ttk.Label(self.agx_row, text="归零 / 力控标定：实机NERO调试 → 夹爪", foreground="#607d8b").pack(side="left", padx=6)
         self.so101_rows = []
         g = self._so101().cfg
@@ -4006,6 +4019,15 @@ class RealCupTaskTabUI:
                                   "夹爪 · SO-101（STS3215 舵机 · 180° = 夹紧，正角度 = 张开）")
         self.v_grip_type.set(self.GG.LABELS[self.GG.active_type()])
 
+    def on_agx_speed(self):
+        v = self.GG.parse_speed(self.v_agx_speed.get())
+        if v is None:
+            self.v_agx_speed.set(self.GG.speed_text())
+            return
+        v = self.GG.set_speed_pct(v)
+        self.v_agx_speed.set(self.GG.speed_text(v))
+        self._log(f"[OK] [V4.8.2 GRIPPER] 夹爪开合速度 = {v:.0f}%（实机NERO调试 / 任务同一个设置）")
+
     def on_gripper_type(self):
         want = next((t for t in self.GG.TYPES if self.GG.LABELS[t] == self.v_grip_type.get()), None)
         if want is None or want == self.GG.active_type():
@@ -4234,6 +4256,10 @@ class RealCupTaskTabUI:
             bad.append(f"{self.GG.SHORT[self.GG.active_type()]} 夹爪没有连接"
                        + ("（实机NERO调试 → 夹爪 → 连接）" if self.GG.is_agx() else ""))
         scene = self.v_task_scene.get() if hasattr(self, "v_task_scene") else "stack_cups"
+        if mode == "execute" and self.GG.is_agx() and self.grip.connected:          # V4.8.2: gripper faults block
+            st = self.grip.last or {}
+            if st.get("faults"):
+                bad.append("NERO 原装夹爪有故障：" + "、".join(st["faults"]) + "（实机NERO调试 → 夹爪 → 清除故障）")
         if mode in ("hover", "execute") and self.GG.is_agx() and scene == "sort_items":
             bad.append("分拣任务还没有按 NERO 原装夹爪适配（V4.8.1 适配了叠杯子和鸡蛋）：只能「只规划」，或切回 SO-101")
         return bad
@@ -4259,6 +4285,34 @@ class RealCupTaskTabUI:
             pass
         self._log("[WARN] [V3.65 REAL] 停止：当前运动已取消，任务在下一步前结束（紧急情况请按急停）")
 
+    def preflight_warnings(self, mode):
+        """V4.8.2: things that do not block but the user should know before a run (new gripper / new room)"""
+        w = []
+        try:
+            import NERO_V379_Camera_Lab as CL
+            L = getattr(CL, "LAST_LIGHTING", {}) or {}
+            if L.get("bad"):
+                w.append(f"主相机光照和保存参数时不同（亮度 {L['ref_mean']:.0f} → {L['mean']:.0f}，{L['change_pct']:+d} %）："
+                         "鸡蛋 / 杯子可能认不出来 → Camera调试 → 相机信息 → 相机高级测试 → ① 相机参数 → 一键调参")
+        except Exception:
+            pass
+        if self.GG.is_agx() and mode in ("hover", "execute"):
+            c = self.GG.load_cfg()
+            if not c.get("zero"):
+                w.append("NERO 原装夹爪还没在这个版本文件夹里做过「校正归零」：开口读数可能不准（实机NERO调试 → 夹爪 → ①）")
+            st = self.grip.last or {}
+            if st and not st.get("homed", True):
+                w.append("夹爪报告「未归零」")
+            try:
+                import NERO_V4613_Tool_Collision as TC
+                T, _src = TC.find_handeye()
+                if T is None:
+                    w.append("没有腕部手眼标定：碰撞检查里没有相机支架 → 先做腕部手眼标定")
+            except Exception:
+                pass
+            w.append(f"夹爪开合速度 {self.GG.speed_text()}（实机NERO调试 → 夹爪 / 本页夹爪区可改）")
+        return w
+
     def _run_mode(self, mode, perceive_only=False):
         if self.busy():
             self._log("[WARN] [V3.65 REAL] 上一个任务还在运行")
@@ -4268,6 +4322,8 @@ class RealCupTaskTabUI:
         if bad:
             self._log("[FAIL] [V3.65 REAL] 不能开始：" + "；".join(bad))
             return
+        for t in self.preflight_warnings(mode):
+            self._log(f"[{'INFO' if t.startswith('夹爪开合速度') else 'WARN'}] [V4.8.2 REAL] {t}")
         try:
             mc = self.motion_cfg()
             steps = int(self.v_steps.get())

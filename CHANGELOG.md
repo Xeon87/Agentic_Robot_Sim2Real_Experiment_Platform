@@ -1,3 +1,13 @@
+## V4.8.2 (2026-11-11) — 原装夹爪限速（默认 40 %，可调）+ 链路检查
+- `NERO_V48_Gripper.py`：`move()` 按速度一步步走（25 Hz；SDK 没有速度参数）；`agx.speed_pct`（默认 40）/ `agx.full_speed_mm_s`（150）；`set_speed_pct` / `speed_text` / `parse_speed`；失能会停止正在进行的开合。
+- `NERO_V48_Gripper_UI.py`、`NERO_V365_Real_Cup_Task.py`：速度选择框（实机NERO调试 → 夹爪；Agentic 夹爪区）。
+- `NERO_V365_Real_Cup_Task.py`：原装夹爪没张开到位 → 任务停止；夹爪故障拦下「执行」；任务开始时的提醒（光照变化、未归零、没有腕部手眼、速度）。
+- `NERO_V379_Camera_Lab.py`：光照检查结果保存在 `LAST_LIGHTING`，给任务用。
+- `NERO_V4_Observation_Bridge.py`：夹爪值按夹爪自己的行程归一化（原装夹爪 70 / 100 mm）；`NERO_V4_Dataset_Recorder.py`：Episode 记录夹爪类型。
+- `NERO_V312_Console.py`：pyAgxArm 助手用实机设置的固件版本。
+- 归零后清掉旧的开口读数（换了参照）；`test_v4_8` 归零前先合拢（真实流程就是手动合拢后归零）。
+- 测试：新 `tests/test_v4_8_2.py`；`test_v4_8_gui` 加 G9；版本白名单补 V4.8.2。
+
 ## V4.8.1 (2026-11-11) — Agentic实机任务适配 NERO 原装夹爪（叠杯子 + 鸡蛋）
 - 新 `NERO_V481_Agx_Geom.py`：官方 URDF 的夹爪几何（TCP 155.3 mm、指尖再 19.7 mm、两指沿 link7 z）、碰撞盒（本体、两指、支架、相机，支架 / 相机按腕部手眼放）、`AgxToolModel`（与 V4.6.13 ToolModel 同接口；离桌面检查不含指尖）、鸡蛋夹法参数。
 - `NERO_V365_Real_Cup_Task.py`：`real_mount` / `real_profile`（新 `agx_real_profile` = 官方夹爪仿真方案 + 实机保护）/ 指尖深度 / 围栏工具点按夹爪切换；鸡蛋：夹蛋的一头（偏离 24 mm，朝远离相机的一侧），竖起来蛋朝下相机朝上，手指离蛋托顶 ≥ 5 mm，旁边站着的蛋做三维检查，夹住判断 30–48 mm，张开 60 mm；分拣任务原装夹爪下只能只规划；设置行 / 说明按夹爪显示。

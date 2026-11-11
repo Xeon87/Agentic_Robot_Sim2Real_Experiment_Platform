@@ -314,6 +314,9 @@ def autotune(set_eg, measure, power_hz=50, gain_range=(0, 128), exp_min=1, log=p
     return res, trace
 
 
+LAST_LIGHTING = {}                           # V4.8.2: the last lighting_check result (empty = not checked)
+
+
 def lighting_check(src, meta, log=print, wait_s=6.0):
     """after a connect: compare the work-area brightness with the one saved with the profile"""
     t0 = time.time()
@@ -327,7 +330,11 @@ def lighting_check(src, meta, log=print, wait_s=6.0):
     ref = meta["ref"]
     st = roi_stats(rgb, meta.get("roi") or ref.get("roi"))
     ch = (st["mean"] - ref["mean"]) / max(1.0, ref["mean"])
-    if abs(ch) > LIGHT_CHANGE or st.get("sat_large_pct", st["sat_pct"]) >= SAT_MAX:
+    bad = abs(ch) > LIGHT_CHANGE or st.get("sat_large_pct", st["sat_pct"]) >= SAT_MAX
+    LAST_LIGHTING.clear()                    # V4.8.2: the tasks warn at their start (before: only this log line)
+    LAST_LIGHTING.update({"t": time.time(), "bad": bool(bad), "ref_mean": float(ref["mean"]), "mean": float(st["mean"]),
+                          "change_pct": round(ch * 100.0), "sat_pct": st["sat_pct"]})
+    if bad:
         log(f"[WARN] [V3.80 camera lab] 光照和保存参数时不同（工作区亮度 {ref['mean']:.0f} → {st['mean']:.0f}，"
             f"{ch * 100:+.0f} %，过曝 {st['sat_pct']} %）：到「相机信息 → 相机高级测试 → ① 相机参数」重新一键调参")
     else:

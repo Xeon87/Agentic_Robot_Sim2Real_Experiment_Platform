@@ -190,7 +190,9 @@ class TestV481(unittest.TestCase):
         import NERO_V313_Real_Robot as RR
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
-        self.assertEqual((v, C.VERSION, RR.VERSION), ("V4.8.1", "V4.8.1", "V4.8.1"))
+        self.assertEqual(v, C.VERSION)
+        self.assertEqual(v, RR.VERSION)
+        self.assertIn(v, ("V4.8.1", "V4.8.2"))
         self.assertEqual(AG.MARKER, "V4.8.1 AGX GRIPPER GEOMETRY + COLLISION")
 
 

@@ -54,6 +54,9 @@ AGX = {
     "speed_mm_s": 80.0,            # for timeouts only (the SDK has no speed parameter)
     "can_ids": (0x51A, 0x52A),     # ID 10 (NERO); 0x517 / 0x518 = old ID 7: not usable
 }
+SPEED_DEFAULT_PCT, SPEED_MIN_PCT = 40.0, 10.0
+SPEED_CHOICES = (30, 40, 50, 70, 100)
+RAMP_HZ = 25.0
 BRACKET = {"mass_kg": 0.06, "aruco_plate_mm": (40.0, 40.0)}     # the user's printed wrist-camera bracket (V7.1)
 FAULTS = (("voltage_too_low", "电压过低"), ("motor_overheating", "电机过热"), ("driver_overcurrent", "驱动过流"),
           ("driver_overheating", "驱动过热"), ("sensor_status", "传感器异常"), ("driver_error_status", "驱动错误"))
@@ -61,7 +64,9 @@ PRESET_KEYS = (("egg", "鸡蛋"), ("cup", "纸杯 / 塑料杯"), ("block", "方�
 DEFAULTS = {
     "type": "so101",
     "agx": {"channel": "can0", "fw": "v111", "backend": "pyagxarm", "default_force": 1.0,
-            "tip_from_flange_mm": 144.0},       # V4.8.1: measured flange face -> fingertips (official URDF: 6 + 138)
+            "tip_from_flange_mm": 144.0,        # V4.8.1: measured flange face -> fingertips (official URDF: 6 + 138)
+            "speed_pct": 40.0,                  # V4.8.2: finger speed, % of full_speed_mm_s (100 = no limit)
+            "full_speed_mm_s": 150.0},          # V4.8.2: what "100 %" means (the gripper's own top speed, estimate)
     # per-object open width (mm) + force level; starting values, tune them on the real objects (力控标定 ③)
     "presets": {"egg": {"open_mm": 60.0, "force": 0.5}, "cup": {"open_mm": 65.0, "force": 1.0},
                 "block": {"open_mm": 60.0, "force": 1.5}},
@@ -177,6 +182,27 @@ def todo_after_switch(t: str) -> List[str]:
                 "示教模式负载：约 0.56 kg（夹爪 0.50 + 支架 / 相机 0.06）"]
     return ["实机NERO调试：重新执行第 5/6 步", "Agentic实机任务 → SO-101 夹爪：连接",
             "腕部 / 主相机手眼标定换回 SO-101 的那一套（各自单独保存）"]
+
+
+def set_speed_pct(pct) -> float:
+    """V4.8.2: save the AgxGripper finger speed (%) -> the value saved"""
+    v = min(100.0, max(SPEED_MIN_PCT, float(pct)))
+    c = load_cfg()
+    c["agx"]["speed_pct"] = v
+    save_cfg(c)
+    return v
+
+
+def speed_text(pct=None) -> str:
+    v = float(load_cfg()["agx"].get("speed_pct", SPEED_DEFAULT_PCT)) if pct is None else float(pct)
+    return f"{v:.0f}%"
+
+
+def parse_speed(text) -> Optional[float]:
+    try:
+        return float(str(text).strip().rstrip("%").strip())
+    except ValueError:
+        return None
 
 
 def force_level(force_n: float, table=None) -> float:
@@ -384,6 +410,7 @@ class AgxGripper:
         self.held = False
         self.last_clamp = None
         self.stroke_mm = AGX["stroke_mm"]
+        self._stop_ramp = False
 
     # -- connection
     @property
@@ -438,16 +465,48 @@ class AgxGripper:
              "faults": [cn for k, cn in FAULTS if foc.get(k)], "is_ok": bool(r.get("is_ok")), "fps": r.get("fps"),
              "stroke_mm": self.stroke_mm, "load_pct": None, "current_ma": None}
         s["errors"] = list(s["faults"])
+        s["_t"] = time.time()
         self.last = s
         return s
 
     # -- motion
-    def move(self, width_mm, force=None):
+    def speed_pct(self):
+        """V4.8.2: the global finger speed (%), read fresh (the panel / Agentic tab change it)"""
+        try:
+            v = float(load_cfg()["agx"].get("speed_pct", SPEED_DEFAULT_PCT))
+        except Exception:
+            v = SPEED_DEFAULT_PCT
+        return min(100.0, max(SPEED_MIN_PCT, v))
+
+    def move(self, width_mm, force=None, speed_pct=None):
+        """V4.8.2 SPEED LIMIT: the SDK has no finger speed (CAN 0x159 = width, force, mode only) -> below 100 % the
+        target is walked there in RAMP_HZ steps of speed x 1/RAMP_HZ (the gripper is position-controlled and follows);
+        blocks until the last step is sent (callers run in worker threads)"""
+        if self.backend is None:
+            return {"ok": False, "error": "夹爪没有连接"}
         f = float(self.cfg.get("default_force", AGX["force_default"]) if force is None else force)
         f = min(AGX["force_max"], max(AGX["force_min"], f))
         w = min(self.stroke_mm, max(0.0, float(width_mm)))
-        return self.backend.request({"cmd": "move", "width_m": w / 1000.0, "force": f}) if self.backend else \
-            {"ok": False, "error": "夹爪没有连接"}
+        pct = self.speed_pct() if speed_pct is None else min(100.0, max(SPEED_MIN_PCT, float(speed_pct)))
+        st = self.last if (self.last and time.time() - float(self.last.get("_t", 0.0)) < 0.5) else self.status()
+        w0 = None if st is None else st.get("gap_mm")
+        self._stop_ramp = False
+        if pct < 100.0 and w0 is not None and abs(w - w0) > 1.0:
+            try:
+                full = float(load_cfg()["agx"].get("full_speed_mm_s", 150.0))
+            except Exception:
+                full = 150.0
+            step = max(0.2, full * pct / 100.0 / RAMP_HZ)
+            n = int(math.ceil(abs(w - w0) / step))
+            for k in range(1, n):
+                if self._stop_ramp:
+                    return {"ok": False, "error": "停止"}
+                wk = w0 + (w - w0) * k / n
+                r = self.backend.request({"cmd": "move", "width_m": wk / 1000.0, "force": f})
+                if not r.get("ok"):
+                    return r
+                time.sleep(1.0 / RAMP_HZ)
+        return self.backend.request({"cmd": "move", "width_m": w / 1000.0, "force": f})
 
     def _wait(self, goal_mm, timeout_s, tol_mm=0.8, stall_s=0.3):
         t_end = time.time() + timeout_s
@@ -512,6 +571,7 @@ class AgxGripper:
     def relax(self):
         """disable the driver (fingers free) -> (ok, msg) like the SO-101 bus write"""
         self.held = False
+        self._stop_ramp = True
         if self.backend is None:
             return False, "夹爪没有连接"
         r = self.backend.request({"cmd": "disable"})
@@ -531,6 +591,7 @@ class AgxGripper:
         r = self.backend.request({"cmd": "calibrate", "timeout": 1.0})
         if not r.get("ok") or not r.get("acked"):
             return {"ok": False, "error": r.get("error") or "夹爪没有确认归零（先失能、手动合拢）"}
+        self.last = None                          # V4.8.2: the old reading is in the old reference (speed ramp start)
         return {"ok": True}
 
     def stroke_check(self):

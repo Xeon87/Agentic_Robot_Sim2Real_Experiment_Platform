@@ -144,9 +144,18 @@ class GripperPanelUI:
         self.v_force_txt = tk.StringVar(value=f"{f0:.2f}")
         ttk.Label(c2, textvariable=self.v_force_txt, width=6).grid(row=3, column=1)
         fb = ttk.Frame(c2)
-        fb.grid(row=4, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        fb.grid(row=4, column=0, columnspan=3, sticky="w", pady=(2, 0))      # (+ the speed box on the right)
         for t, v in (("轻 0.5", 0.5), ("中 1.0", 1.0), ("重 2.0", 2.0)):
             ttk.Button(fb, text=t, width=7, command=lambda v_=v: self._set_force(v_)).pack(side="left", padx=(0, 4))
+        sb = ttk.Frame(c2)                                        # V4.8.2 finger speed (global, all pages + tasks)
+        sb.grid(row=4, column=0, columnspan=3, sticky="e")
+        ttk.Label(sb, text="开合速度").pack(side="left", padx=(0, 4))
+        self.v_speed = tk.StringVar(value=GG.speed_text())
+        self.cb_speed = ttk.Combobox(sb, textvariable=self.v_speed, values=[f"{v}%" for v in GG.SPEED_CHOICES], width=6,
+                                     postcommand=lambda: self.v_speed.set(GG.speed_text()))
+        self.cb_speed.pack(side="left")
+        self.cb_speed.bind("<<ComboboxSelected>>", lambda _e: self.on_speed())
+        self.cb_speed.bind("<Return>", lambda _e: self.on_speed())
         ob = ttk.Frame(c2)
         ob.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(12, 0))
         for i, (t, fn) in enumerate((("张到最大", lambda: self.on_goto(stroke=True)), ("夹紧（用上面的力度）", self.on_clamp),
@@ -387,6 +396,16 @@ class GripperPanelUI:
             if r.get("ok"):
                 self.sc_goal.configure(to=self.agx().stroke_mm)
         self._run("连接", fn, done)
+
+    def on_speed(self):
+        v = GG.parse_speed(self.v_speed.get())
+        if v is None:
+            self.log("[WARN] [V4.8.2 GRIPPER] 速度要是数字（%）")
+            self.v_speed.set(GG.speed_text())
+            return
+        v = GG.set_speed_pct(v)
+        self.v_speed.set(GG.speed_text(v))
+        self.log(f"[OK] [V4.8.2 GRIPPER] 夹爪开合速度 = {v:.0f}%（所有页面和任务都用这个速度；100% = 不限速）")
 
     def on_tip_save(self):
         """V4.8.1: flange face -> fingertips (mm), measured with a ruler; the cup / egg planners use it"""
