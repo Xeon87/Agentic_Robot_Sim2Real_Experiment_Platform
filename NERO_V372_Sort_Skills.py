@@ -337,12 +337,13 @@ class SortSkills(CK.CupSkills):
         cx, cy = b["centre"]
         ix, iy = b["inner"][0] / 2.0 - 0.002, b["inner"][1] / 2.0 - 0.002
         gap = self._cmd(sp["width"] * 1000.0 + SYM_RELEASE_EXTRA_MM) / 1000.0
-        t = AG.FINGER_T_MM / 1000.0
+        f_w, f_t = AG.finger_footprint_mm(None if self.prof.name == "agx_gripper" else "stock")   # V4.8.4 Softfin
+        t = f_t / 1000.0
         xG, yG = R[:2, 0], R[:2, 1]
         ang = math.atan2(float(xG[1]), float(xG[0]))
         for s_ in (-1.0, 1.0):
             c = np.asarray(slot, float) + s_ * (gap / 2.0 + t / 2.0) * np.asarray(yG, float)
-            for px, py in CC.rect_corners((float(c[0]), float(c[1])), (AG.FINGER_W_MM / 2000.0, t / 2.0), ang):
+            for px, py in CC.rect_corners((float(c[0]), float(c[1])), (f_w / 2000.0, t / 2.0), ang):
                 if abs(px - cx) > ix or abs(py - cy) > iy:
                     return False
         inside = [o for k, o in self._items().items() if k != iid and o["in_bin"] == box]
@@ -353,11 +354,12 @@ class SortSkills(CK.CupSkills):
         import NERO_V481_Agx_Geom as AG
         xG, yG = R[:2, 0], R[:2, 1]
         ang = math.atan2(float(xG[1]), float(xG[0]))
-        t = AG.FINGER_T_MM / 1000.0
+        f_w, f_t = AG.finger_footprint_mm(None if self.prof.name == "agx_gripper" else "stock")   # V4.8.4 Softfin
+        t = f_t / 1000.0
         best = 1e9
         for s_ in (-1.0, 1.0):
             c = np.asarray(p_a[:2], float) + s_ * (gap_m / 2.0 + t / 2.0) * np.asarray(yG, float)
-            fr = ((float(c[0]), float(c[1])), (AG.FINGER_W_MM / 2000.0, t / 2.0), ang)
+            fr = ((float(c[0]), float(c[1])), (f_w / 2000.0, t / 2.0), ang)
             for o in others:
                 best = min(best, CC.rect_dist(fr, SC.sort_item_footprint(o["body"], o["c"][:2], o["yaw_deg"])))
         return best

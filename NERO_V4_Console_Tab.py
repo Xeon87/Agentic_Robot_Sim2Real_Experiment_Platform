@@ -384,12 +384,12 @@ class VLALeRobotTabUI:
         rbg = ttk.Frame(left)
         rbg.pack(fill="x", pady=2)
         import NERO_V48_Gripper as GG                                 # V4.8 gripper switch (global, all pages)
-        self.v_grip_kind = tk.StringVar(value=GG.SHORT[GG.active_type()])
-        self.cb_grip_kind = ttk.Combobox(rbg, textvariable=self.v_grip_kind, values=[GG.SHORT[t] for t in GG.TYPES],
-                                         width=9, state="readonly")
+        self.v_grip_kind = tk.StringVar(value=GG.CHOICE_SHORT[GG.current_choice()])          # V4.8.4 + Softfin
+        self.cb_grip_kind = ttk.Combobox(rbg, textvariable=self.v_grip_kind,
+                                         values=[GG.CHOICE_SHORT[t] for t in GG.CHOICES], width=15, state="readonly")
         self.cb_grip_kind.pack(side="left")
         self.cb_grip_kind.bind("<<ComboboxSelected>>", lambda _e: self.on_gripper_kind())
-        GG.add_listener(lambda t: self._post(lambda: self.v_grip_kind.set(GG.SHORT[t])))
+        GG.add_listener(lambda t: self._post(lambda: self.v_grip_kind.set(GG.CHOICE_SHORT[GG.current_choice()])))
         GG.add_blocker(lambda: "Smol VLA 正在录制 / 保存" if getattr(self, "_rec_phase", "idle") != "idle" else None)
         ttk.Button(rbg, text="夹爪示教: 张开", command=lambda: self.on_teach_gripper(True)).pack(side="left", padx=2)
         ttk.Button(rbg, text="夹爪示教: 夹紧", command=lambda: self.on_teach_gripper(False)).pack(side="left", padx=2)
@@ -1343,15 +1343,15 @@ class VLALeRobotTabUI:
     def on_gripper_kind(self) -> None:
         """V4.8: the same global gripper choice as 实机NERO调试 / Agentic实机任务"""
         import NERO_V48_Gripper as GG
-        want = next((t for t in GG.TYPES if GG.SHORT[t] == self.v_grip_kind.get()), None)
-        if want is None or want == GG.active_type():
+        want = GG.choice_from_label(self.v_grip_kind.get())               # V4.8.4: + Softfin
+        if want is None or want == GG.current_choice():
             return
-        r = GG.set_active(want)
+        r = GG.set_choice(want)
         if not r.get("ok"):
             self._log(f"[WARN] [V4.8 GRIPPER] {r.get('error')}")
-            self.v_grip_kind.set(GG.SHORT[GG.active_type()])
+            self.v_grip_kind.set(GG.CHOICE_SHORT[GG.current_choice()])
             return
-        self._log(f"[OK] [V4.8 GRIPPER] 夹爪切换为 {GG.LABELS[want]}。接下来：" + "；".join(
+        self._log(f"[OK] [V4.8 GRIPPER] 夹爪切换为 {GG.CHOICE_LABELS[want]}。接下来：" + "；".join(
             f"{i + 1}. {t}" for i, t in enumerate(r.get("todo") or [])))
 
     def on_teach_gripper(self, open_: bool) -> None:

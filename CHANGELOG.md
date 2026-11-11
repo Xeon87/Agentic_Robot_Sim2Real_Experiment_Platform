@@ -1,3 +1,12 @@
+## V4.8.4 (2026-11-11) — NERO 原装夹爪-Softfin + 鸡蛋任务修正
+- `NERO_V48_Gripper.py`：`agx.fingers`（stock / softfin）、`agx.softfin_tip_from_flange_mm`（205.4）；`CHOICES` / `CHOICE_LABELS` / `set_choice` / `current_choice` / `is_softfin` / `tip_from_flange_mm`。
+- `NERO_V481_Agx_Geom.py`：`SOFTFIN` 尺寸（用户 CAD）、`variant()`、Softfin 的抓取线（指尖内 25 mm）、碰撞盒（指尖段 / 指根段 / 转接座）、`pad_half_width_m`、`finger_footprint_mm`、`egg_held_gap_mm`、`egg_offset_needed_mm`。
+- `NERO_V375_Collision_Check.py`：`agx_parts(v=...)`（孪生的 official 仍是原装）；`NERO_V372_Sort_Skills.py`：手指占地按装的手指。
+- `NERO_V365_Real_Cup_Task.py`：夹爪选择三项；鸡蛋：最小端距、松手点 +6 mm（原装）、大头（`egg_blunt_dir`）、搬运时鸡蛋扫掠检查 + 高处中转（`_egg_sweep_ok` / `_plan_transit`，`orient_for_slot` 执行）、围栏检查包含起始段且加密；精调模型找不到的 WARN；Softfin 文字。
+- `NERO_V366_Real_Cup_Yolo.py`：`missing_finetuned`，`describe_cfg` 写出找不到的个数。
+- `NERO_V4_Console_Tab.py`、`NERO_V48_Gripper_UI.py`：选择框加 Softfin；指尖到法兰按装的手指保存。`NERO_V4_Dataset_Recorder.py`：AgxGripper-Softfin。
+- 测试：新 `tests/test_v4_8_4.py`；版本白名单补 V4.8.4；`test_v4_8_1` 的 24 mm 断言按新规则放宽。
+
 ## V4.8.3 (2026-11-11) — 桌面整理「听懂弦外之音」（原装夹爪 · 7 件物品 / 4 个容器 · 意图层 · 预览 / 提问 · 汇报 · 偏好记忆）
 - 新场景 `tidy_desk`（`NERO_V343_Scenes.py`）：sort_items 的变体（后端、相机进程、技能都走 sort_items 分支），NERO 原装夹爪；`set_sort_layout("tidy" / "sort")` 原地切换物品 / 容器表（V3.72 的 sort_items 不变）。7 件物品（香蕉、苹果、纸团、饼干、积木、马克笔、鼠标）+ 4 个容器（水果盘最多 2 件）（水果盘、垃圾桶、文具盒、玩具箱，带 accepts / capacity）。布局按原装夹爪的可达范围排（TCP 在 155 mm：俯抓只到 x −0.34…−0.46 m；手指只能大致沿 y 合拢）。
 - `NERO_V372_Sort_Skills.py`：原装夹爪对称夹持（`self.sym`：抓取线过物体中心、开口 = 宽度 + 12 mm、≤ 70 mm 行程、手指脚印 56 × 26.5 mm 和邻近物品 / 容器壁的间隙、指尖离桌 ≥ 4 mm、太宽 → `ITEM_TOO_WIDE`）；放置时两指必须在容器内、不碰里面已有的东西；空容器先放远侧；长距离搬运（到机械臂旁边的垃圾桶）走一个 ≥ 0.40 m 的中间点；新工具 `return_item_to_table`；`sync_layout()`；验证钩子 `_measure_after_lift` / `_where_after_place`（实机覆盖）。仿真 RUN TASK 在 tidy 布局下交给意图层。

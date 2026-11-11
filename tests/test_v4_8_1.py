@@ -112,7 +112,7 @@ class TestV481(unittest.TestCase):
             r = sk.plan_egg_place(source_egg="egg_1", target_slot=slot)
             self.assertTrue(r["ok"], (slot, r, [s for s in io.logs if "PLACE" in s][-1:]))
             pl = sk.plan
-            self.assertAlmostEqual(pl["egg_in_G_m"][0], -0.024, places=4)
+            self.assertTrue(-0.0245 <= pl["egg_in_G_m"][0] <= -0.004, pl["egg_in_G_m"])   # V4.8.4: smallest offset
             self.assertGreater(pl["place_pitch_deg"], 0.0)
             zt = float(pl.get("table_z_m", 0.0))
             low = finger_low(sk, pl["_q"]["release"])
@@ -192,7 +192,7 @@ class TestV481(unittest.TestCase):
             v = f.read().strip()
         self.assertEqual(v, C.VERSION)
         self.assertEqual(v, RR.VERSION)
-        self.assertIn(v, ("V4.8.1", "V4.8.2", "V4.8.3"))
+        self.assertIn(v, ("V4.8.1", "V4.8.2", "V4.8.3", "V4.8.4"))
         self.assertEqual(AG.MARKER, "V4.8.1 AGX GRIPPER GEOMETRY + COLLISION")
 
 

@@ -60,7 +60,9 @@ def _gripper_name():
     """V4.8.2: which gripper recorded this episode (episodes of the two grippers must not be mixed for training)"""
     try:
         import NERO_V48_Gripper as GG
-        return "AgxGripper" if GG.is_agx() else "SO-101"
+        if GG.is_agx():                       # V4.8.4: Softfin fingers = another gripper for training
+            return "AgxGripper-Softfin" if GG.is_softfin() else "AgxGripper"
+        return "SO-101"
     except Exception:
         return "SO-101"
 

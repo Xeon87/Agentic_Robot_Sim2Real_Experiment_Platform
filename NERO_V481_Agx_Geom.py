@@ -34,68 +34,145 @@ MARGIN_MM = 3.0
 CAMERA_HEAD_MM = 30.0
 # the egg is gripped by its upper end so the lower part sticks out below the pads into the carton cell
 EGG_OFFSET_MM = 24.0                               # egg centre along x_G from the pad centre (overlap 31.5 mm, equator inside)
+EGG_OFFSET_MIN_MM, EGG_OFFSET_MAX_MM = 4.0, 28.0   # V4.8.4: the planner takes the smallest offset the carton allows
 EGG_HELD_GAP_MM = (30.0, 48.0)                     # a clamped egg reads its width (40-44 mm)
 EGG_LONG_AXIS_GAP_MM = 50.0
 EGG_OPEN_MM = 60.0
 CARTON_TOP_ABOVE_TABLE_M = 0.030                   # the user's carton: 30 mm high
 PAD_ABOVE_CARTON_M = 0.002                         # + the 3 mm box margin: fingers >= 5 mm above the carton top
 
+# V4.8.4 SOFTFIN: the user's printed adapter (PETG) + XLeRobot TPU Fin-Ray fingers (NERO_SoftFin_Adapter, CAD in the
+# URDF gripper_link1 frame: y along the finger, z opening, x width; carriage top y = -70 = gripper_base z 68).
+#   fin: 25.8 wide (x), root face y = -62 (base z 76) -> tip y = +61.4 (base z 199.4, stock jaw tip 138);
+#        back of the fin 40 mm deep at the root, tapering to ~0 at the tip (Fin-Ray triangle); gripping face at the
+#        stock jaw face (fins touch at reading 0, face gap = reading, stroke unchanged)
+#   adapter: 36.2 wide, base z 67 .. 122.5 (plate + cheeks), up to 42.5 deep behind the face
+# grasp origin: SOFTFIN_GRASP_FROM_TIP_MM inside the fin tips (the compliant lower part wraps the object)
+SOFTFIN = {"fin_w_mm": 25.8, "fin_root_base_z_mm": 76.0, "fin_tip_base_z_mm": 199.4, "fin_root_depth_mm": 40.0,
+           "fin_tip_part_mm": 60.0, "fin_tip_depth_mm": 24.0, "adapter_w_mm": 36.2,
+           "adapter_base_z_mm": (67.0, 122.5), "adapter_depth_mm": 42.5, "mass_kg": 0.15}
+SOFTFIN_GRASP_FROM_TIP_MM = 25.0
+SOFTFIN_EGG_HELD_GAP_MM = (8.0, 46.0)              # the fins wrap the egg: the reading drops well below its width
 
-def tip_from_flange_mm() -> float:
+
+def variant(v=None) -> str:
+    """'stock' / 'softfin': the fingers on the AgxGripper (NERO_V48_Gripper agx.fingers)"""
+    if v in ("stock", "softfin"):
+        return v
     try:
         import NERO_V48_Gripper as GG
-        v = GG.load_cfg()["agx"].get("tip_from_flange_mm")
-        return float(v) if v not in (None, "") else 144.0
+        return GG.fingers()
+    except Exception:
+        return "stock"
+
+
+def tip_from_flange_mm(v=None) -> float:
+    if variant(v) == "softfin":
+        try:
+            import NERO_V48_Gripper as GG
+            a = GG.load_cfg()["agx"]
+            x = a.get("softfin_tip_from_flange_mm")
+            return float(x) if x not in (None, "") else 205.4
+        except Exception:
+            return 205.4
+    try:
+        import NERO_V48_Gripper as GG
+        x = GG.load_cfg()["agx"].get("tip_from_flange_mm")
+        return float(x) if x not in (None, "") else 144.0
     except Exception:
         return 144.0
 
 
-def tip_drop_m() -> float:
+def grasp_base_z_mm(v=None) -> float:
+    """grasp origin in gripper_base z: stock = the URDF TCP (118.3); Softfin = 25 mm inside the fin tips"""
+    if variant(v) == "softfin":
+        return tip_from_flange_mm(v) - 6.0 - SOFTFIN_GRASP_FROM_TIP_MM
+    return TCP_BASE_Z_MM
+
+
+def tip_drop_m(v=None) -> float:
     """fingertips beyond the grasp origin along the approach axis z_G"""
-    return (31.0 + tip_from_flange_mm() - 155.3) / 1000.0
+    return (tip_from_flange_mm(v) - 6.0 - grasp_base_z_mm(v)) / 1000.0
 
 
-def T_tcp_grasp() -> np.ndarray:
+def T_tcp_grasp(v=None) -> np.ndarray:
+    """V4.8.4: Softfin -> the grasp origin also moves along the approach axis (z_TCP) to inside the fin tips"""
     T = np.eye(4)
     T[1, 3] = CLAMP_CENTRE_Y_M
+    T[2, 3] = (grasp_base_z_mm(v) - TCP_BASE_Z_MM) / 1000.0
     return T
 
 
-def T_l7_grasp() -> np.ndarray:
-    return T_L7_TCP @ T_tcp_grasp()
+def T_l7_grasp(v=None) -> np.ndarray:
+    return T_L7_TCP @ T_tcp_grasp(v)
 
 
-def T_l7_tip() -> np.ndarray:
+def finger_footprint_mm(v=None):
+    """(width along x_G, thickness outside the opening along y_G) of the low part of one finger - the 2-D footprint
+    the sort planner keeps clear of the neighbouring items"""
+    if variant(v) == "softfin":
+        return SOFTFIN["fin_w_mm"], SOFTFIN["fin_tip_depth_mm"]
+    return FINGER_W_MM, FINGER_T_MM
+
+
+def pad_half_width_m(v=None) -> float:
+    """half of the finger width along x_G (the egg's long axis when held)"""
+    return (SOFTFIN["fin_w_mm"] if variant(v) == "softfin" else FINGER_W_MM) / 2000.0
+
+
+def egg_held_gap_mm(v=None):
+    return SOFTFIN_EGG_HELD_GAP_MM if variant(v) == "softfin" else EGG_HELD_GAP_MM
+
+
+def T_l7_tip(v=None) -> np.ndarray:
     """link7 -> fingertip point (centre between the two tips) - the fence / table tool point"""
     S = np.eye(4)
-    S[2, 3] = tip_drop_m()
-    return T_l7_grasp() @ S
+    S[2, 3] = tip_drop_m(v)
+    return T_l7_grasp(v) @ S
 
 
-def _zg(base_z_mm):
-    return (float(base_z_mm) - TCP_BASE_Z_MM) / 1000.0
+def _zg(base_z_mm, v=None):
+    return (float(base_z_mm) - grasp_base_z_mm(v)) / 1000.0
 
 
-def boxes_in_G(opening_mm: float = 60.0, cam_G: Optional[np.ndarray] = None, margin_mm: float = MARGIN_MM):
-    """[(name, centre(3), half(3))] axis-aligned in the grasp frame (m)"""
+def boxes_in_G(opening_mm: float = 60.0, cam_G: Optional[np.ndarray] = None, margin_mm: float = MARGIN_MM, v=None,
+               tip_mm: Optional[float] = None):
+    """[(name, centre(3), half(3))] axis-aligned in the grasp frame (m); V4.8.4: v = 'stock' / 'softfin',
+    tip_mm overrides the flange -> fingertip length (stock only: the twin's longer pads)"""
+    v = variant(v)
     m = margin_mm / 1000.0
-    tip_base = tip_from_flange_mm() - 6.0
+    tip_base = (tip_from_flange_mm(v) if tip_mm is None else float(tip_mm)) - 6.0
     out = []
     (x0, x1), (y0, y1), (z0, z1) = HOUSING_MM
-    out.append(("housing", np.array([(x0 + x1) / 2000.0, (y0 + y1) / 2000.0 - CLAMP_CENTRE_Y_M, (_zg(z0) + _zg(z1)) / 2]),
-                np.array([(x1 - x0) / 2000.0 + m, (y1 - y0) / 2000.0 + m, (_zg(z1) - _zg(z0)) / 2 + m])))
+    out.append(("housing", np.array([(x0 + x1) / 2000.0, (y0 + y1) / 2000.0 - CLAMP_CENTRE_Y_M,
+                                     (_zg(z0, v) + _zg(z1, v)) / 2]),
+                np.array([(x1 - x0) / 2000.0 + m, (y1 - y0) / 2000.0 + m, (_zg(z1, v) - _zg(z0, v)) / 2 + m])))
     g = max(0.0, float(opening_mm)) / 1000.0
-    zc = (_zg(tip_base - FINGER_L_MM) + _zg(tip_base)) / 2
-    hz = FINGER_L_MM / 2000.0 + m
-    for name, s in (("finger_a", -1.0), ("finger_b", 1.0)):
-        yc = s * (g / 2 + FINGER_T_MM / 2000.0)
-        out.append((name, np.array([0.0, yc, zc]), np.array([FINGER_W_MM / 2000.0 + m, FINGER_T_MM / 2000.0 + m, hz])))
+    if v == "softfin":                                 # V4.8.4: fin tip part, fin root part, adapter (each side)
+        S_ = SOFTFIN
+        z_tip, z_root = tip_base, S_["fin_root_base_z_mm"]
+        z_mid = z_tip - S_["fin_tip_part_mm"]
+        parts = (("finger", z_mid, z_tip, S_["fin_w_mm"], S_["fin_tip_depth_mm"]),
+                 ("finger_root", z_root, z_mid, S_["fin_w_mm"], S_["fin_root_depth_mm"]),
+                 ("adapter", S_["adapter_base_z_mm"][0], S_["adapter_base_z_mm"][1], S_["adapter_w_mm"],
+                  S_["adapter_depth_mm"]))
+        for side, s in (("a", -1.0), ("b", 1.0)):
+            for nm, za, zb, w, d in parts:
+                yc = s * (g / 2 + d / 2000.0)
+                out.append((f"{nm}_{side}", np.array([0.0, yc, (_zg(za, v) + _zg(zb, v)) / 2]),
+                            np.array([w / 2000.0 + m, d / 2000.0 + m, (zb - za) / 2000.0 + m])))
+    else:
+        zc = (_zg(tip_base - FINGER_L_MM, v) + _zg(tip_base, v)) / 2
+        hz = FINGER_L_MM / 2000.0 + m
+        for name, s in (("finger_a", -1.0), ("finger_b", 1.0)):
+            yc = s * (g / 2 + FINGER_T_MM / 2000.0)
+            out.append((name, np.array([0.0, yc, zc]), np.array([FINGER_W_MM / 2000.0 + m, FINGER_T_MM / 2000.0 + m, hz])))
     if cam_G is not None:
         c = np.asarray(cam_G, float)
         # bracket: from the housing front-top (mount plate) to the camera, ArUco plate sideways (both sides: unknown)
         top = x1 / 1000.0 if c[0] >= 0 else x0 / 1000.0
         xa, xb = sorted((top - 0.018 * (1 if c[0] >= 0 else -1), c[0] + 0.025 * (1 if c[0] >= 0 else -1)))
-        za, zb = _zg(z1) - 0.002, c[2] + 0.020
+        za, zb = _zg(z1, v) - 0.002, c[2] + 0.020
         out.append(("bracket", np.array([(xa + xb) / 2, 0.0, (za + zb) / 2]),
                     np.array([(xb - xa) / 2 + m, 0.062 + m, abs(zb - za) / 2 + m])))
         hh = CAMERA_HEAD_MM / 2000.0 + m
@@ -107,26 +184,31 @@ class AgxToolModel:
     """same API as NERO_V4613_Tool_Collision.ToolModel: .ok .note .boxes [(name, centre, R, half)] in link7,
     lowest(T_base_l7), clear_of_table(T_base_l7, z_table) + lowest_of(T_base_l7, names)"""
 
-    def __init__(self, opening_mm=60.0, T_flange_cam=None, clearance_mm=8.0, calib_dir=None):
+    def __init__(self, opening_mm=60.0, T_flange_cam=None, clearance_mm=8.0, calib_dir=None, v=None):
         import NERO_V4613_Tool_Collision as TC
+        self.variant = v = variant(v)
         self.clearance_mm = float(clearance_mm)
         src = None
         if T_flange_cam is None:
             T_flange_cam, src = TC.find_handeye(calib_dir)
         self.handeye_path = src
-        T_l7G = T_l7_grasp()
+        T_l7G = T_l7_grasp(v)
         cam_G = None
         if T_flange_cam is not None:
             cam = np.asarray(T_flange_cam, float)[:3, 3]
             cam_G = T_l7G[:3, :3].T @ (cam - T_l7G[:3, 3])
         self.cam_G = cam_G
         self.boxes = []
-        for name, c, h in boxes_in_G(opening_mm, cam_G):
+        for name, c, h in boxes_in_G(opening_mm, cam_G, v=v):
             self.boxes.append((name, T_l7G[:3, :3] @ c + T_l7G[:3, 3], T_l7G[:3, :3].copy(), h))
         self.ok = True
         self.cfg = {"clearance_mm": self.clearance_mm}
-        self.note = ("NERO 原装夹爪 + 腕部相机支架已装到 link7 上：指尖在法兰外 "
-                     f"{tip_from_flange_mm():.0f} mm" + (f"，相机（腕部手眼）在夹爪坐标 ({cam_G[0] * 1000:+.0f}, "
+        self.FINGERS = tuple(n for n, _c, _R, _h in self.boxes if n.startswith(("finger", "adapter")))
+        if v == "softfin":                       # V4.8.4: the adapters keep the body clearance too
+            self.BODY = AgxToolModel.BODY + ("adapter_a", "adapter_b")
+        self.note = (("NERO 原装夹爪-Softfin" if v == "softfin" else "NERO 原装夹爪")
+                     + " + 腕部相机支架已装到 link7 上：指尖在法兰外 "
+                     f"{tip_from_flange_mm(v):.0f} mm" + (f"，相机（腕部手眼）在夹爪坐标 ({cam_G[0] * 1000:+.0f}, "
                                                           f"{cam_G[1] * 1000:+.0f}, {cam_G[2] * 1000:+.0f}) mm"
                                                           if cam_G is not None else "，没有腕部手眼：不含支架")
                      + f"；规划时离桌面至少 {self.clearance_mm:.0f} mm")
@@ -156,7 +238,9 @@ class AgxToolModel:
         return dz >= self.clearance_mm, round(dz, 1), name
 
 
-PART_CN = {"housing": "夹爪本体", "finger_a": "手指", "finger_b": "手指", "bracket": "相机支架", "camera_head": "腕部相机"}
+PART_CN = {"housing": "夹爪本体", "finger_a": "手指", "finger_b": "手指", "bracket": "相机支架", "camera_head": "腕部相机",
+           "finger_root_a": "Softfin 指根", "finger_root_b": "Softfin 指根", "adapter_a": "Softfin 转接座",
+           "adapter_b": "Softfin 转接座"}
 
 
 def camera_side(cam_G=None) -> float:
@@ -175,7 +259,18 @@ def egg_side(cam_G=None) -> float:
     return -camera_side(cam_G)
 
 
-def egg_in_G_for_pick(cam_G=None) -> np.ndarray:
+def egg_in_G_for_pick(cam_G=None, offset_mm=None) -> np.ndarray:
     """where the egg centre sits in the grasp frame after an end grasp (z: 0 = pad line; the planner adds the
     measured height difference)"""
-    return np.array([egg_side(cam_G) * EGG_OFFSET_MM / 1000.0, 0.0, 0.0])
+    off = EGG_OFFSET_MM if offset_mm is None else float(offset_mm)
+    return np.array([egg_side(cam_G) * off / 1000.0, 0.0, 0.0])
+
+
+def egg_offset_needed_mm(slot_egg_centre_z, zt, v=None, slack_mm=2.0):
+    """V4.8.4 GRIP NEARER THE MIDDLE: the smallest end-grasp offset (egg centre -> pad centre along the long axis)
+    that keeps the fingers >= PAD_ABOVE_CARTON + margin above the carton top when the egg stands in the cell
+    (egg centre at slot_egg_centre_z): pad lower edge = centre + offset - pad half width - box margin.
+    V4.8.1 used a fixed 24 mm (pads mostly on the egg's end, the reading ~38 mm on a 42 mm egg)."""
+    need = (float(zt) + CARTON_TOP_ABOVE_TABLE_M + PAD_ABOVE_CARTON_M - float(slot_egg_centre_z)
+            + pad_half_width_m(v) + MARGIN_MM / 1000.0) * 1000.0 + float(slack_mm)
+    return float(min(max(need, EGG_OFFSET_MIN_MM), EGG_OFFSET_MAX_MM))

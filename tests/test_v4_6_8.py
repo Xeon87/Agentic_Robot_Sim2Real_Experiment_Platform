@@ -185,7 +185,10 @@ class TestV468(unittest.TestCase):
         scene = Scene()
         sk, io = make(scene)
         out = sk.fill_carton_episode(try_harder=False)
-        self.assertEqual({k: sk.fill_result[k] for k in ("placed", "fails")}, {"placed": ["slot_6", "slot_3", "slot_5"], "fails": 0})
+        # V4.8.4: slot_5 (egg tilted 25 deg next to two standing eggs) is refused by the held-egg sweep -> slot_1
+        self.assertEqual(sk.fill_result["fails"], 0)
+        self.assertEqual(sk.fill_result["placed"][:2], ["slot_6", "slot_3"])
+        self.assertIn(sk.fill_result["placed"][2], ("slot_5", "slot_1"))
         self.assertEqual(sum(1 for r in out if r["tool"] == "observe_scene"), 4)     # 3 rounds + the empty table
         self.assertEqual(sum(1 for r in out if r["tool"] == "verify_egg_in_slot" and r["ok"]), 3)
         self.assertEqual(scene.eggs, [])
@@ -260,7 +263,8 @@ class TestV468(unittest.TestCase):
             res = RT.run_execute(io, "egg_1", "slot_1", scene="fill_egg_holder", fill_all=True)
         finally:
             RT.make_skills = RT_make
-        self.assertEqual(res["fill"]["placed"], ["slot_6", "slot_3", "slot_5"])
+        self.assertEqual(res["fill"]["placed"][:2], ["slot_6", "slot_3"])                # V4.8.4: 3rd slot_5 or slot_1
+        self.assertIn(res["fill"]["placed"][2], ("slot_5", "slot_1"))
         self.assertTrue(res["ok"])
 
     def test_f8_labels(self):
@@ -290,7 +294,7 @@ class TestV468(unittest.TestCase):
         import NERO_V313_Real_Robot as RR
         v = open(os.path.join(HERE, "VERSION")).read().strip()
         self.assertEqual((C.VERSION, RR.VERSION), (v, v))
-        self.assertIn(v, ("V4.6.8", "V4.6.9", "V4.6.10", "V4.6.11", "V4.6.12", "V4.6.13", "V4.7", "V4.7.1", "V4.7.2", "V4.7.3", "V4.7.4", "V4.8", "V4.8.1", "V4.8.2", "V4.8.3"))
+        self.assertIn(v, ("V4.6.8", "V4.6.9", "V4.6.10", "V4.6.11", "V4.6.12", "V4.6.13", "V4.7", "V4.7.1", "V4.7.2", "V4.7.3", "V4.7.4", "V4.8", "V4.8.1", "V4.8.2", "V4.8.3", "V4.8.4"))
         self.assertEqual(RT.MARKER_V468, "V4.6.8 FILL CARTON + VERIFY BY RISE + TRY HARDER")
 
 

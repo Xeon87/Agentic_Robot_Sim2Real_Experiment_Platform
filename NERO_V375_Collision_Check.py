@@ -160,26 +160,22 @@ SYM_GRIPPERS = ("official", "agx_gripper", "agx")
 TWIN_OFFICIAL_TIP_FROM_FLANGE_MM = 154.3            # V4.8.3: the twin's official pads end 30 mm past the TCP
 
 
-def agx_parts(q, opening_mm=None, tip_from_flange_mm=None, T_flange_cam=None, arm_links=True):
+def agx_parts(q, opening_mm=None, tip_from_flange_mm=None, T_flange_cam=None, arm_links=True, v=None):
     """V4.8.3 TIDY DESK: coarse boxes of the NERO original gripper (NERO_V481_Agx_Geom: housing 75 x 164 x 65 mm, two
-    56 x 26.5 x 76.5 mm fingers at +-opening/2, optional wrist-camera bracket from the hand-eye) + link5..link7"""
+    56 x 26.5 x 76.5 mm fingers at +-opening/2, optional wrist-camera bracket from the hand-eye) + link5..link7.
+    V4.8.4: v = 'stock' / 'softfin' (None = the fingers that are on: NERO_V48_Gripper agx.fingers)"""
     import NERO_V481_Agx_Geom as AG
+    v = AG.variant(v)
     fr = link_frames(q)
     T7 = fr["link7"]
-    Tg = T7 @ AG.T_l7_grasp()
+    Tl = AG.T_l7_grasp(v)
+    Tg = T7 @ Tl
     cam_G = None
     if T_flange_cam is not None:
         cam = np.asarray(T_flange_cam, float)[:3, 3]
-        Tl = AG.T_l7_grasp()
         cam_G = Tl[:3, :3].T @ (cam - Tl[:3, 3])
     opening = 60.0 if opening_mm is None else float(opening_mm)
-    old = AG.tip_from_flange_mm
-    if tip_from_flange_mm is not None:
-        AG.tip_from_flange_mm = lambda: float(tip_from_flange_mm)
-    try:
-        boxes = AG.boxes_in_G(opening, cam_G, margin_mm=0.0)
-    finally:
-        AG.tip_from_flange_mm = old
+    boxes = AG.boxes_in_G(opening, cam_G, margin_mm=0.0, v=v, tip_mm=tip_from_flange_mm)
     I3 = np.eye(3)
     parts = [_local(Tg, f"agx_{n}", c, I3, h) for n, c, h in boxes]
     if arm_links:
@@ -194,7 +190,9 @@ def gripper_parts(q, opening_mm=None, gripper="so101", **kw):
         tip = kw.get("tip_from_flange_mm")
         if tip is None and str(gripper) == "official":
             tip = TWIN_OFFICIAL_TIP_FROM_FLANGE_MM
-        return agx_parts(q, opening_mm, tip, kw.get("T_flange_cam"))
+        # the twin's "official" gripper = the stock jaws (with its own pad length); agx_gripper = what is mounted
+        return agx_parts(q, opening_mm, tip, kw.get("T_flange_cam"),
+                         v="stock" if str(gripper) == "official" else kw.get("v"))
     return so101_parts(q, opening_mm)
 
 

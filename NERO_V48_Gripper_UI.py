@@ -67,9 +67,9 @@ class GripperPanelUI:
         top = ttk.Frame(self.parent, padding=(6, 4))
         top.pack(fill="x")
         ttk.Label(top, text="当前夹爪", font=("TkDefaultFont", 10, "bold")).pack(side="left")
-        self.v_type = tk.StringVar(value=GG.LABELS[GG.active_type()])
-        self.cb_type = ttk.Combobox(top, textvariable=self.v_type, values=[GG.LABELS[t] for t in GG.TYPES], width=28,
-                                    state="readonly")
+        self.v_type = tk.StringVar(value=GG.CHOICE_LABELS[GG.current_choice()])             # V4.8.4 + Softfin
+        self.cb_type = ttk.Combobox(top, textvariable=self.v_type, values=[GG.CHOICE_LABELS[t] for t in GG.CHOICES],
+                                    width=32, state="readonly")
         self.cb_type.pack(side="left", padx=(6, 12))
         self.cb_type.bind("<<ComboboxSelected>>", lambda _e: self.on_type())
         self.lamp_conn = Lamp(tk, top, "未连接", 14)
@@ -82,7 +82,7 @@ class GripperPanelUI:
         self.btn_conn.pack(side="left")
         ttk.Button(top, text="断开", command=self.on_disconnect, width=8).pack(side="left", padx=4)
         ttk.Label(top, text="指尖到法兰").pack(side="left", padx=(14, 2))     # V4.8.1: measured, used by the planners
-        self.v_tip = tk.StringVar(value=f"{float(self.cfg['agx'].get('tip_from_flange_mm') or 144.0):.0f}")
+        self.v_tip = tk.StringVar(value=f"{GG.tip_from_flange_mm():.1f}")       # V4.8.4: stock / Softfin value
         ttk.Entry(top, textvariable=self.v_tip, width=5).pack(side="left")
         ttk.Label(top, text="mm").pack(side="left", padx=(2, 4))
         ttk.Button(top, text="保存", command=self.on_tip_save, width=5).pack(side="left")
@@ -344,20 +344,21 @@ class GripperPanelUI:
 
     # ================================================================== top bar
     def on_type(self):
-        want = next((t for t in GG.TYPES if GG.LABELS[t] == self.v_type.get()), None)
-        if want is None or want == GG.active_type():
+        want = GG.choice_from_label(self.v_type.get())                     # V4.8.4: + Softfin
+        if want is None or want == GG.current_choice():
             return
-        r = GG.set_active(want)
+        r = GG.set_choice(want)
         if not r.get("ok"):
             self.log(f"[WARN] [V4.8 GRIPPER] {r.get('error')}")
-            self.v_type.set(GG.LABELS[GG.active_type()])
+            self.v_type.set(GG.CHOICE_LABELS[GG.current_choice()])
             return
-        self.log(f"[OK] [V4.8 GRIPPER] 夹爪切换为 {GG.LABELS[want]}。接下来：" + "；".join(
+        self.log(f"[OK] [V4.8 GRIPPER] 夹爪切换为 {GG.CHOICE_LABELS[want]}。接下来：" + "；".join(
             f"{i + 1}. {t}" for i, t in enumerate(r.get("todo") or [])))
 
     def _on_switched(self):
         agx = GG.is_agx()
-        self.v_type.set(GG.LABELS[GG.active_type()])
+        self.v_type.set(GG.CHOICE_LABELS[GG.current_choice()])
+        self.v_tip.set(f"{GG.tip_from_flange_mm():.1f}")
         if agx:
             self.so101_hint.pack_forget()
             self.body.pack(fill="both", expand=True)
@@ -414,13 +415,17 @@ class GripperPanelUI:
         except ValueError:
             self.log("[WARN] [V4.8.1 GRIPPER] 指尖到法兰要是数字（mm）")
             return
-        if not 120.0 <= v <= 170.0:
-            self.log(f"[WARN] [V4.8.1 GRIPPER] {v:.0f} mm 不合理（官方模型 144 mm，允许 120–170 mm）")
+        soft = GG.fingers() == "softfin"                       # V4.8.4: the value of the fingers that are on
+        lo, hi, nominal = (180.0, 230.0, 205.4) if soft else (120.0, 170.0, 144.0)
+        if not lo <= v <= hi:
+            self.log(f"[WARN] [V4.8.1 GRIPPER] {v:.0f} mm 不合理（{'Softfin 设计值' if soft else '官方模型'} {nominal} mm，"
+                     f"允许 {lo:.0f}–{hi:.0f} mm）")
             return
         c = GG.load_cfg()
-        c["agx"]["tip_from_flange_mm"] = v
+        c["agx"]["softfin_tip_from_flange_mm" if soft else "tip_from_flange_mm"] = v
         GG.save_cfg(c)
-        self.log(f"[OK] [V4.8.1 GRIPPER] 指尖到法兰 = {v:.0f} mm（官方模型 144 mm）→ 叠杯子 / 鸡蛋任务下次规划起生效")
+        self.log(f"[OK] [V4.8.1 GRIPPER] {'Softfin ' if soft else ''}指尖到法兰 = {v:.1f} mm（"
+                 f"{'Softfin 设计值' if soft else '官方模型'} {nominal} mm）→ 叠杯子 / 鸡蛋 / 桌面整理下次规划起生效")
 
     def on_disconnect(self):
         if self.busy:

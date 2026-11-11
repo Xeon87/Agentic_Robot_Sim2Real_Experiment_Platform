@@ -99,7 +99,18 @@ def yolo_cfg_from_tab(cam_tab, prompt_text=DEFAULT_PROMPT, detector=None):
            "model_dir": ydir}
     if not path:
         cfg["error"] = f"找不到 YOLOE 模型 {yname}（找过：{', '.join(YP.model_dirs(ydir))}）"
+    cfg["missing_models"] = missing_finetuned(YP, ydir, yname)     # V4.8.4: never drop them silently
     return cfg
+
+
+def missing_finetuned(YP, model_dir, model_name):
+    """V4.8.4: fine-tuned models named in the Camera tab's model set whose files are not found in any model folder
+    (find_model then dropped them without a word: 11-10 / 11-11 the egg task ran with the original model only)"""
+    try:
+        _base, fts = YP.parse_model_set(model_name)
+    except Exception:
+        return []
+    return [ft for ft in fts if not YP.find_model(model_dir, ft)]
 
 
 def describe_cfg(cfg):
@@ -108,7 +119,9 @@ def describe_cfg(cfg):
     if cfg.get("error"):
         return f"YOLOE 不可用：{cfg['error']}"
     q = "默认词库(-pf)" if cfg["mode"] == "pf" else f"文字提示({', '.join(cfg['prompts'][:4])})"
-    return f"YOLOE {os.path.basename(cfg['path'])} · {q} · 置信度 ≥ {cfg['conf']:.2f}（= Camera调试 → 视觉定位）"
+    miss = cfg.get("missing_models") or []
+    return (f"YOLOE {os.path.basename(cfg['path'])} · {q} · 置信度 ≥ {cfg['conf']:.2f}（= Camera调试 → 视觉定位）"
+            + (f" · 精调模型找不到 {len(miss)} 个（只用上面列出的模型）" if miss else ""))
 
 
 # ================================================================================ geometry

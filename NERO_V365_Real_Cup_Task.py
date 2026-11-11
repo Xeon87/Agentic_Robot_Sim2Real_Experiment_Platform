@@ -319,7 +319,10 @@ def agx_real_profile(CK, lift_settle_s=0.5, c=None):
     c = dict(DEFAULT_CFG, **(c or {}))
     base = CK.OFFICIAL_PROFILE
     return CK.GripperProfile("agx_gripper", AG.T_tcp_grasp(), base.open_mm,
-                             f"NERO AgxGripper (official) · pyAgxArm · tips {AG.tip_from_flange_mm():.0f} mm past the flange",
+                             (f"NERO AgxGripper + Softfin (Fin-Ray) · pyAgxArm · fin tips {AG.tip_from_flange_mm():.0f} mm "
+                              f"past the flange, grasp line {AG.SOFTFIN_GRASP_FROM_TIP_MM:.0f} mm inside the tips"
+                              if AG.variant() == "softfin" else
+                              f"NERO AgxGripper (official) · pyAgxArm · tips {AG.tip_from_flange_mm():.0f} mm past the flange"),
                              approach_clearance_m=0.0, approach_along_wall=False, flips=base.flips,
                              release_gap_max_mm=None, lift_settle_s=lift_settle_s, release_tilt_max_deg=0.0,
                              align_rotate_m=float(c["align_rotate_mm"]) / 1000.0,
@@ -911,6 +914,12 @@ class RealIO:
                     conf=float((r.get("yolo") or {}).get("conf", 1.0)),
                     contour=_row_contour(r),
                 )
+                try:                                     # V4.8.4 BLUNT END from the mask outline on the table plane
+                    e_dict["blunt_dir_xy"] = egg_blunt_dir(e_dict["contour"], dict(cam["K"]),
+                                                           np.asarray(cam["T_base_cam"], float), c[2],
+                                                           [float(ax[0]), float(ax[1])])
+                except Exception:
+                    e_dict["blunt_dir_xy"] = None
                 eggs.append(e_dict)
                 dets.append(e_dict)
                 cups_compat.append(e_dict)
@@ -1104,6 +1113,15 @@ class RealIO:
 EGG_PRE_M = 0.065
 EGG_LIFT_M = 0.110
 EGG_RELEASE_ABOVE_SLOT_M = 0.020
+# V4.8.4 GRIP NEARER THE MIDDLE: with the stock AgxGripper jaws the egg is let go 6 mm higher (its lower tip ~1 mm
+# below the cell rim, it settles into the 6-13 mm deep cell) - the fingers then clear the carton with a ~15 mm end
+# offset instead of 24 mm; the Softfin fins are 25.8 mm wide and need only a few mm
+EGG_RELEASE_ABOVE_SLOT_AGX_M = 0.026
+EGG_SWEEP_CLEAR_M = 0.015         # V4.8.4: the held egg stays >= 15 mm above the carton / standing eggs while carried
+EGG_SWEEP_CELL_R_M = 0.028        # around every empty cell centre (cell + half the wall to the next cell)
+EGG_SWEEP_EGG_R_M = 0.022         # a standing egg (its own column)
+EGG_SWEEP_EGG_CLEAR_M = 0.010     # the held egg stays >= 10 mm above a standing egg's top
+EGG_TRANSIT_ABOVE_TOP_M = 0.035   # transit height: the egg's lowest point this far above the carton top
 EGG_OPEN_MM = 56.0
 EGG_CLAMP_N = 4.2
 EGG_MIN_HELD_GAP_MM = 14.0
@@ -1219,6 +1237,47 @@ def egg_long_axis_gap_mm():
     return EGG_LONG_AXIS_GAP_MM
 
 
+def egg_blunt_dir(contour, K, T_base_cam, z_plane, axis_xy, min_rel_diff=0.05):
+    """V4.8.4 BLUNT END: the egg's outline (mask contour, image px) projected onto the horizontal plane through the egg
+    centre; the widths across the long axis at +-25 % of the length are compared -> unit xy vector towards the blunt
+    (wider) end, or None when the two ends differ by less than min_rel_diff (round / unclear / 3D-printed symmetric)"""
+    if not contour or len(contour) < 8 or not K:
+        return None
+    T = np.asarray(T_base_cam, float)
+    pts = []
+    for u, v in contour:
+        d = T[:3, :3] @ np.array([(u - K["ppx"]) / K["fx"], (v - K["ppy"]) / K["fy"], 1.0])
+        if abs(d[2]) < 1e-9:
+            continue
+        s_ = (float(z_plane) - T[2, 3]) / d[2]
+        if s_ > 0:
+            pts.append((T[:3, 3] + s_ * d)[:2])
+    if len(pts) < 8:
+        return None
+    P = np.asarray(pts)
+    a = np.asarray(axis_xy, float)
+    if float(np.linalg.norm(a)) < 1e-9:
+        return None
+    a = a / np.linalg.norm(a)
+    n = np.array([-a[1], a[0]])
+    c = P.mean(axis=0)
+    sa, sn = (P - c) @ a, (P - c) @ n
+    L = float(sa.max() - sa.min())
+    if L < 0.02:
+        return None
+
+    def width_at(frac):
+        sel = np.abs(sa - frac * L) < 0.12 * L
+        return float(sn[sel].max() - sn[sel].min()) if int(sel.sum()) >= 2 else None
+    wp, wm = width_at(0.25), width_at(-0.25)
+    if wp is None or wm is None or max(wp, wm) <= 0:
+        return None
+    if abs(wp - wm) / max(wp, wm) < float(min_rel_diff):
+        return None
+    d = a if wp > wm else -a
+    return [round(float(d[0]), 4), round(float(d[1]), 4)]
+
+
 def egg_place_grasp_origin(tip_target, R_rel_g, egg_in_G, half_len_m):
     """V4.5: grasp-frame origin that puts the held egg's LOWER TIP on `tip_target`.
     egg_in_G = egg centre in the grasp frame measured at the pick; the egg long axis is x_G."""
@@ -1309,6 +1368,103 @@ class RealEggSkills:
                      + (f" | {json.dumps(v, ensure_ascii=False)[:260]}" if v else ""))
         return out
 
+    # ------------------------------------------------------------------ V4.8.4 egg helpers
+    def _egg_release_above_m(self):
+        return EGG_RELEASE_ABOVE_SLOT_AGX_M if self.agx else EGG_RELEASE_ABOVE_SLOT_M
+
+    def _egg_offset_mm(self):
+        """end-grasp offset of this plan (V4.8.4: the smallest the carton allows; V4.8.1 fixed 24 mm)"""
+        v = getattr(self, "_egg_offset_cur", None)
+        return float(self.AG.EGG_OFFSET_MM if v is None else v)
+
+    def _egg_points(self, q, egg_in_G, half_len_m, n=7):
+        T = self._fast.fk(np.asarray(q, float)) @ np.linalg.inv(self.prof.T_grasp_tcp)
+        Rg, pa = T[:3, :3], T[:3, 3]
+        c = pa + Rg @ np.asarray(egg_in_G, float)
+        return [c + Rg[:, 0] * s_ for s_ in np.linspace(-float(half_len_m), float(half_len_m), n)]
+
+    def _egg_obstacles(self, zt):
+        """cells of the carton as vertical columns: (xy, top z) - carton top, or a standing egg's top"""
+        out = []
+        for k, e in self.cam.items():
+            if k.startswith("slot_"):
+                out.append((np.asarray(e["rim"][:2], float), float(zt) + self.AG.CARTON_TOP_ABOVE_TABLE_M,
+                            EGG_SWEEP_CELL_R_M, EGG_SWEEP_CLEAR_M))
+                if e.get("occupied"):
+                    out.append((np.asarray(e["rim"][:2], float), float(zt) + 0.065, EGG_SWEEP_EGG_R_M,
+                                EGG_SWEEP_EGG_CLEAR_M))
+        for q in getattr(self, "eggs_in_carton", []) or []:
+            out.append((np.asarray(q[:2], float), float(zt) + 0.065, EGG_SWEEP_EGG_R_M, EGG_SWEEP_EGG_CLEAR_M))
+        return out
+
+    def _egg_sweep_ok(self, q_list, egg_in_G, half_len_m, zt, r_egg=0.021, n=12):
+        """V4.8.4 HELD EGG SWEEP: the egg (a capsule along x_G) along the joint moves q_list[0] -> q_list[1] -> ...
+        stays above the table and >= EGG_SWEEP_CLEAR_M above the carton cells / standing eggs.
+        -> (ok, worst clearance mm, where)"""
+        obst = self._egg_obstacles(zt)
+        worst = (1e9, None)
+        for a, b in zip(q_list[:-1], q_list[1:]):
+            qa, qb = np.asarray(a, float), np.asarray(b, float)
+            for k in range(n + 1):
+                for P in self._egg_points(qa + (qb - qa) * (k / float(n)), egg_in_G, half_len_m):
+                    low = float(P[2]) - r_egg
+                    d_t = low - (float(zt) + 0.004)
+                    if d_t < worst[0]:
+                        worst = (d_t, "桌面")
+                    for xy, top, r_o, clr in obst:
+                        if float(np.linalg.norm(P[:2] - xy)) < r_o + r_egg:
+                            d = low - (top + clr)
+                            if d < worst[0]:
+                                worst = (d, "蛋托 / 已放的鸡蛋")
+        return worst[0] >= 0.0, round(worst[0] * 1000.0, 1), worst[1]
+
+    def _plan_transit(self, gc, sc, egg_in_G, half_len_m, zt):
+        """V4.8.4: lift -> above the cell with the egg turned upright.  The V4.8.1 single joint move turned the wrist
+        while moving and swept the hanging egg (52 mm below the pads with the end grasp) over the carton.
+        Tries: direct joint move / joint move to a higher point above the cell + straight down / turn upright in place
+        above the pick point, carry high, straight down.  -> (steps, note) or (None, why)"""
+        q_lift, q_above = list(gc["q_lift"]), list(sc["q_above"])
+        ok, worst, where = self._egg_sweep_ok([q_lift, q_above], egg_in_G, half_len_m, zt)
+        if ok:
+            return [], f"直接转过去（鸡蛋最低处离障碍 {worst:.0f} mm）"
+        p_above, R_rel = np.asarray(sc["p_above"], float), sc["R_rel"]
+        low_above = min(float(P[2]) for P in self._egg_points(q_above, egg_in_G, half_len_m)) - 0.021
+        top = max([t for _xy, t, _r, _c in self._egg_obstacles(zt)] + [float(zt) + self.AG.CARTON_TOP_ABOVE_TABLE_M])
+        dz = max(0.04, top + EGG_TRANSIT_ABOVE_TOP_M - low_above)
+        p_hi = p_above + np.array([0.0, 0.0, dz])
+        p_lift = np.asarray(gc["p_lift"], float)
+        p_rot = np.array([p_lift[0], p_lift[1], max(float(p_lift[2]), float(p_hi[2]))])
+        tried = [f"直接：{where}只剩 {worst:.0f} mm"]
+        for mode in ("high", "rotate_first"):
+            r_hi = self._fast.ik([q_above], p_hi, R_rel, iters=30)
+            if not r_hi or r_hi[0] is None:
+                tried.append("高处 IK 无解")
+                break
+            q_hi = list(r_hi[0])
+            down = self._line_qs(q_hi, p_hi, p_above, R_rel)
+            if not down:
+                tried.append("高处竖直下降 IK 断开")
+                break
+            chain = [q_lift, q_hi]
+            steps = [{"label": "carry the upright egg high above the cell", "kind": "joints", "q": q_hi}]
+            if mode == "rotate_first":
+                r_r = self._fast.ik([q_hi, q_lift], p_rot, R_rel, iters=30)
+                if not r_r or r_r[0] is None:
+                    tried.append("原地竖蛋 IK 无解")
+                    continue
+                q_rot = list(r_r[0])
+                chain = [q_lift, q_rot, q_hi]
+                steps = [{"label": "turn the egg upright above the pick point", "kind": "joints", "q": q_rot}] + steps
+            ok, worst, where = self._egg_sweep_ok(chain, egg_in_G, half_len_m, zt)
+            ok_l, worst_l, _w = self._egg_sweep_ok(down, egg_in_G, half_len_m, zt, n=1) if ok else (False, None, None)
+            jchk = self.CK.check_joint_path(chain + down[1:], jump_deg=1e9)
+            if ok and ok_l and jchk.get("ok") and self._check_path_fence(chain + down[1:], zt):
+                steps.append({"label": "straight down above the cell", "kind": "line", "p": p_above, "R": R_rel})
+                return steps, (f"经高处（+{dz * 1000:.0f} mm）" + ("、先原地竖起鸡蛋" if mode == "rotate_first" else "")
+                               + f"：鸡蛋最低处离障碍 {min(worst, worst_l):.0f} mm")
+            tried.append(f"{mode}：" + (f"{where} {worst:.0f} mm" if not ok else "关节 / 围栏"))
+        return None, "；".join(tried)
+
     def _safe_grasp_z_v45(self, zt: float, egg_width_m: float = 0.042) -> float:
         """V4.5: pad centre (grasp origin) at the egg equator, raised if needed so the LOWEST fingertip (either jaw,
         any opening) stays >= TIP_PLAN_CLEAR_M above the table."""
@@ -1331,7 +1487,7 @@ class RealEggSkills:
         gap_mm = st.get("gap_mm") if st.get("gap_mm") is not None else cl.get("gap_mm")
         if gap_mm is not None and self.agx:                            # V4.8.1: the AgxGripper reads the egg width
             g = float(gap_mm)
-            lo, hi = self.AG.EGG_HELD_GAP_MM
+            lo, hi = self.AG.egg_held_gap_mm()                          # V4.8.4: Softfin wraps -> lower
             if g < lo:
                 return False, g, f"两指开口 {g:.1f} mm < {lo:.0f} mm（鸡蛋宽约 42 mm：空夹 / 没夹到）"
             if g > hi:
@@ -1452,7 +1608,7 @@ class RealEggSkills:
         for idx in range(len(q_waypoints) - 1):
             qa = np.asarray(q_waypoints[idx], float)
             qb = np.asarray(q_waypoints[idx + 1], float)
-            n_seg = 6 if idx == 0 else 3
+            n_seg = 24 if idx == 0 else 3            # V4.8.4: the first (joint) move as densely as the execution
             for k in range(n_seg + (1 if idx == len(q_waypoints) - 2 else 0)):
                 pts.append(list(qa + (qb - qa) * (k / float(n_seg))))
         viol = CS.path_fence_check(U, self._fast.joints, self._fast.joints, pts, "base_link", f_cfg, so101_T)
@@ -1541,7 +1697,8 @@ class RealEggSkills:
             l_m = float(e.get("length_m", 0.055))
             self.cam[eid] = {"rim": np.array(c, float), "base": np.array([c[0], c[1], res["table_z_m"]], float),
                              "in_stack": "egg", "yaw_deg": float(e.get("grasp_yaw_deg", 0.0)),
-                             "width_m": w_m, "length_m": l_m, "raw": e}
+                             "width_m": w_m, "length_m": l_m, "raw": e,
+                             "blunt_dir": e.get("blunt_dir_xy")}       # V4.8.4
             eggs_out.append({"id": eid, "center_xyz_m": [round(v, 4) for v in c],
                              "grasp_yaw_deg": round(float(e.get("grasp_yaw_deg", 0.0)), 1),
                              "width_mm": round(w_m * 1000.0, 1)})
@@ -1608,7 +1765,7 @@ class RealEggSkills:
             gyaw = (yaw0 + dyaw + 180.0) % 360.0 - 180.0
             R_gr = self.SK72.grasp_R(math.radians(float(gyaw)))
             if self.agx:                      # pads on the egg's end; the egg sticks out AWAY from the camera side
-                p_a = p_egg - self.AG.egg_side() * (self.AG.EGG_OFFSET_MM / 1000.0) * R_gr[:, 0]
+                p_a = p_egg - self.AG.egg_side() * (self._egg_offset_mm() / 1000.0) * R_gr[:, 0]
             else:
                 p_a = p_egg - (half_w + self.SK72.FIXED_PAD_GAP_M - self.G.WALL_HALF) * R_gr[:, 1]   # grasp origin
             p_g, R_g = self.prof.tcp_from_grasp(p_a, R_gr)
@@ -1628,11 +1785,20 @@ class RealEggSkills:
                     line_dn + line_up[1:], margin_deg=self.CK.PATH_MARGIN_DEG + PLAN_MARGIN_HEADROOM_DEG).get("ok"):
                 self._last_grasp_reject = "下探 / 抬升直线上关节余量不足"
                 continue
-            if not self._check_path_fence([q_pre, q_g, q_lift], zt):
+            # V4.8.4: the joint move from the CURRENT posture to the pregrasp is checked too (the execution checks it;
+            # 11-11: plan OK, then 3x "FENCE: tool 离墙 69 mm < 70 mm" on that move)
+            if not self._check_path_fence([list(q_seed), q_pre, q_g, q_lift], zt):
                 self._last_grasp_reject = "抓取路径越过安全区（指尖 z 或围栏）"
                 continue
             egg_in_G = R_gr.T @ (c_egg - p_a)                        # V4.5: held-egg centre in the grasp frame
+            # V4.8.4 BLUNT END: the pads should sit on the egg's blunt (wider) end, the pointed end goes down into the
+            # cell; blunt_dir from the mask outline (None = not sure -> no preference)
+            blunt = egg.get("blunt_dir")
+            pads_dir = (np.asarray(p_a, float) - c_egg)[:2]
+            on_blunt = (None if (blunt is None or not self.agx or float(np.linalg.norm(pads_dir)) < 0.004)
+                        else bool(float(np.dot(pads_dir, np.asarray(blunt, float)[:2])) > 0.0))
             cands.append({
+                "on_blunt": on_blunt,
                 "R_grasp": R_gr, "p_grasp_origin": p_a, "egg_in_G": egg_in_G,
                 "lowest_tip_z_mm": round((tip_z - float(zt)) * 1000.0, 1),
                 "gyaw": gyaw, "off_axis": abs(dyaw if abs(dyaw) <= 90 else abs(dyaw) - 180),
@@ -1645,7 +1811,7 @@ class RealEggSkills:
             })
             if float(chk.get("min_margin_deg", 0.0)) >= 8.0 and len(cands) >= 2:
                 break
-        cands.sort(key=lambda c: (-int(c["margin"] >= 6.0), c["off_axis"], -c["margin"]))
+        cands.sort(key=lambda c: (-int(c["margin"] >= 6.0), int(c.get("on_blunt") is False), c["off_axis"], -c["margin"]))
         return cands
 
     def _plan_slot_candidates(self, slot, zt: float, q_from, egg_in_G=None, half_len_m=0.0275):
@@ -1656,11 +1822,12 @@ class RealEggSkills:
         p_slot = slot["rim"].copy()
         if math.hypot(float(p_slot[0]), float(p_slot[1])) < 0.285:
             return []
-        p_slot[2] = max(float(p_slot[2]) + EGG_RELEASE_ABOVE_SLOT_M, float(zt) + 0.042)
+        p_slot[2] = max(float(p_slot[2]) + self._egg_release_above_m(), float(zt) + 0.042)
         # V4.5: aim the egg's LOWER TIP at the slot centre (same release height as V4.3 for a vertical egg)
         tip_target = p_slot - np.array([0.0, 0.0, float(half_len_m)])
         if egg_in_G is None:
-            egg_in_G = self.AG.egg_in_G_for_pick() if self.agx else np.array([0.0, EGG_HELD_CENTER_Y_M, 0.0])
+            egg_in_G = (self.AG.egg_in_G_for_pick(offset_mm=self._egg_offset_mm()) if self.agx else
+                        np.array([0.0, EGG_HELD_CENTER_Y_M, 0.0]))
         a1 = math.atan2(float(p_slot[1]), float(p_slot[0]))
         a1 = a1 + math.pi if a1 < 0 else a1 - math.pi
         # Prioritize elbow-up seeds in the same J1/J2 branch as q_from (`q_lift`) so J1 never flips 165 deg and link3 stays inward
@@ -1874,6 +2041,14 @@ class RealEggSkills:
         if not s_c:
             return False
         sc = s_c[0]
+        q_now = list(self.io.current_q())                    # V4.8.4: the carry from here is checked with the egg
+        T_now = self._fast.fk(np.asarray(q_now, float))
+        tr, t_note = self._plan_transit({"q_lift": q_now, "p_lift": T_now[:3, 3].copy()}, sc, egg_in_G,
+                                        float(self.plan.get("egg_half_len_m", 0.0275)), zt)
+        if tr is None:
+            self.io.emit(f"[WARN] [V4.8.4 EGG PLAN] 重新规划 {target_slot}：搬运时鸡蛋会碰蛋托（{t_note}）")
+            return False
+        self.plan.update(_transit=tr, transit_note=t_note)
         self.plan.update(target_slot=target_slot, slot_tip_target=[round(float(v), 4) for v in sc["tip_target"]],
                          place_yaw_deg=round(sc["pyaw"], 1), place_pitch_deg=round(sc["pitch_deg"], 1),
                          egg_long_axis_vertical_err_deg=sc["vert_err_deg"])
@@ -1915,12 +2090,57 @@ class RealEggSkills:
             return self._res("plan_egg_place", False, {"detail": zt_err}, reason="TABLE_HEIGHT_DISAGREE",
                              nxt=["observe_scene"])
         q_seed = self.io.current_q()
-
-        g_cands = self._plan_grasp_candidates(egg, zt, q_seed)
+        half_len = 0.5 * float(egg.get("length_m", 0.055))
+        # V4.8.4 GRIP NEARER THE MIDDLE: the smallest end offset the target cell allows, the V4.8.1 24 mm as fallback
+        offsets = [None]
+        if self.agx and target_slot in self.cam:
+            pz = max(float(self.cam[target_slot]["rim"][2]) + self._egg_release_above_m(), float(zt) + 0.042)
+            need = self.AG.egg_offset_needed_mm(pz, zt)
+            offsets = [need] + ([self.AG.EGG_OFFSET_MM] if need < self.AG.EGG_OFFSET_MM - 0.5 else [])
+        best, transit_why = None, None
+        for i_off, off in enumerate(offsets):
+            self._egg_offset_cur = off
+            best, transit_why, g_cands = self._plan_egg_pair(egg, zt, q_seed, half_len, source_egg, target_slot,
+                                                             zt_src)
+            if best is not None or not g_cands or i_off == len(offsets) - 1:
+                break
+            self.io.emit(f"[INFO] [V4.8.4 EGG PLAN] 夹蛋位置离蛋心 {off:.0f} mm 时放不进去 → 改回 {self.AG.EGG_OFFSET_MM:.0f} mm 再试")
         if not g_cands:
             return self._res("plan_egg_place", False, {"detail": getattr(self, "_last_grasp_reject", None)},
                              reason="GRASP_IK_NO_SOLUTION", nxt=["observe_scene"])
-        half_len = 0.5 * float(egg.get("length_m", 0.055))
+        if best is None:
+            return self._res("plan_egg_place", False, {"detail": transit_why} if transit_why else None,
+                             reason="IK_NO_SOLUTION", nxt=["observe_scene"])
+        self.plan = best
+        self.stage = "PLANNED"
+        if self.agx:
+            gc0 = best
+            self.io.emit(f"[INFO] [V4.8.4 EGG PLAN] 夹在离蛋心 {self._egg_offset_mm():.0f} mm 处（"
+                         + {True: "蛋的大头", False: "蛋的尖头（大头那边够不着）", None: "大小头没认出来"}[gc0.get("on_blunt")]
+                         + f"）；搬运：{best.get('transit_note')}")
+        return self._res("plan_egg_place", True,
+                         {"source_egg": source_egg, "target_slot": best["target_slot"],
+                          "grasp_yaw_deg": best["grasp_yaw_deg"],
+                          "grasp_pad_z_mm": best["grasp_pad_z_mm"],
+                          "fingertip_z_mm": best["fingertip_z_mm"],
+                          "lowest_tip_z_mm": best["lowest_tip_z_mm"],
+                          "table": best["table_z_source"],
+                          "egg_in_G_mm": [round(v * 1000.0, 1) for v in best["egg_in_G_m"]],
+                          "egg_offset_mm": round(self._egg_offset_mm(), 1) if self.agx else None,
+                          "on_blunt_end": best.get("on_blunt"),
+                          "transit": best.get("transit_note"),
+                          "place_yaw_deg": best["place_yaw_deg"],
+                          "place_pitch_deg": best["place_pitch_deg"],
+                          "egg_long_axis_vertical_err_deg": best["egg_long_axis_vertical_err_deg"],
+                          "min_joint_margin_deg": best["min_joint_margin_deg"]},
+                         nxt=["pick_egg"])
+
+    def _plan_egg_pair(self, egg, zt, q_seed, half_len, source_egg, target_slot, zt_src=""):
+        """grasp candidates + the first reachable free cell (+ V4.8.4 transit with the held egg checked)
+        -> (best plan or None, why the transit failed or None, grasp candidates)"""
+        g_cands = self._plan_grasp_candidates(egg, zt, q_seed)
+        if not g_cands:
+            return None, None, g_cands
 
         free_slots = [
             k for k in sorted(self.cam, key=lambda x: int(x.split("_")[-1]) if x.split("_")[-1].isdigit() else 99)
@@ -1929,6 +2149,7 @@ class RealEggSkills:
         slot_try_order = [target_slot] + free_slots
 
         best = None
+        transit_why = None
         gc = g_cands[0]
         for cand_slot_id in slot_try_order:
             slot_obj = self.cam[cand_slot_id]
@@ -1936,8 +2157,15 @@ class RealEggSkills:
             if not s_cands:
                 continue
             sc = s_cands[0]
+            transit, t_note = self._plan_transit(gc, sc, gc["egg_in_G"], half_len, zt)    # V4.8.4 HELD EGG SWEEP
+            if transit is None:
+                transit_why = f"{cand_slot_id}：搬运时鸡蛋会碰蛋托（{t_note}）"
+                self.io.emit(f"[INFO] [V4.8.4 EGG PLAN] {transit_why}")
+                continue
             margin = min(gc["margin"], sc["margin"])
             best = {
+                "on_blunt": gc.get("on_blunt"), "egg_offset_mm": self._egg_offset_mm(),
+                "_transit": transit, "transit_note": t_note,
                 "source_egg": source_egg, "target_slot": cand_slot_id,
                 "requested_slot": target_slot,
                 "grasp_yaw_deg": round(gc["gyaw"], 1),
@@ -1975,24 +2203,7 @@ class RealEggSkills:
             if cand_slot_id != target_slot:
                 self.io.emit(f"[INFO] [V4.3 EGG PLAN] 原目标 {target_slot} 靠近底座内侧不可达 → 自动改选可达空槽 {cand_slot_id}")
             break
-
-        if best is None:
-            return self._res("plan_egg_place", False, reason="IK_NO_SOLUTION", nxt=["observe_scene"])
-        self.plan = best
-        self.stage = "PLANNED"
-        return self._res("plan_egg_place", True,
-                         {"source_egg": source_egg, "target_slot": best["target_slot"],
-                          "grasp_yaw_deg": best["grasp_yaw_deg"],
-                          "grasp_pad_z_mm": best["grasp_pad_z_mm"],
-                          "fingertip_z_mm": best["fingertip_z_mm"],
-                          "lowest_tip_z_mm": best["lowest_tip_z_mm"],
-                          "table": best["table_z_source"],
-                          "egg_in_G_mm": [round(v * 1000.0, 1) for v in best["egg_in_G_m"]],
-                          "place_yaw_deg": best["place_yaw_deg"],
-                          "place_pitch_deg": best["place_pitch_deg"],
-                          "egg_long_axis_vertical_err_deg": best["egg_long_axis_vertical_err_deg"],
-                          "min_joint_margin_deg": best["min_joint_margin_deg"]},
-                         nxt=["pick_egg"])
+        return best, transit_why, g_cands
 
     def _align_rotate(self, name, wp_pre, q_pre):
         r = self.io.move_joints(f"V4.3 egg pregrasp {name}", q_pre)
@@ -2404,6 +2615,13 @@ class RealEggSkills:
             self.io.emit(f"[WARN] [V4.5 WRIST SLOT] 按腕部相机修正后的位置不可达 → 沿用主相机槽位")
             return chk
         sc = s_c[0]
+        tr, t_note = self._plan_transit({"q_lift": self.plan["_q"]["lift"], "p_lift": self.plan["_wps"]["lift"][0]}, sc,
+                                        np.asarray(self.plan["egg_in_G_m"], float),
+                                        float(self.plan.get("egg_half_len_m", 0.0275)), zt)
+        if tr is None:                                       # V4.8.4
+            self.io.emit(f"[WARN] [V4.5 WRIST SLOT] 按腕部相机修正后搬运会碰蛋托（{t_note}）→ 沿用主相机槽位")
+            return chk
+        self.plan.update(_transit=tr, transit_note=t_note)
         W, Q = self.plan["_wps"], self.plan["_q"]
         for k in ("orient", "above_target"):
             W[k] = (sc["p_above"], sc["R_rel"])
@@ -2444,9 +2662,21 @@ class RealEggSkills:
             f"[INFO] [V4.3 EGG ORIENT] 正在调整鸡蛋角度：绕短轴俯仰旋转 {pitch_deg:+.0f}° "
             f"（使鸡蛋长轴垂直于桌面，垂直偏差 {vert_err:.1f}°）并移至 {target_slot} 正上方"
         )
-        r = self.io.move_joints(f"V4.3 orient vertical egg above {target_slot}", Q["orient"], slow=1.5)
-        if not r.get("ok"):
-            return self._res("orient_for_slot", False, r, reason="ORIENT_MOTION_FAILED", nxt=["return_to_safe_pose"])
+        transit = self.plan.get("_transit") or []
+        if transit:                                    # V4.8.4: high carry with the upright egg, then straight down
+            self.io.emit(f"[INFO] [V4.8.4 EGG ORIENT] 搬运路线：{self.plan.get('transit_note')}")
+        for st in transit:
+            if st["kind"] == "joints":
+                r = self.io.move_joints(f"V4.8.4 {st['label']}", st["q"], slow=1.5)
+            else:
+                r = self.io.move_line(f"V4.8.4 {st['label']}", st["p"], self.CK.R_to_quat_xyzw(st["R"]), 0.03)
+            if not r.get("ok"):
+                return self._res("orient_for_slot", False, r, reason="ORIENT_MOTION_FAILED",
+                                 nxt=["return_to_safe_pose"])
+        if not transit:
+            r = self.io.move_joints(f"V4.3 orient vertical egg above {target_slot}", Q["orient"], slow=1.5)
+            if not r.get("ok"):
+                return self._res("orient_for_slot", False, r, reason="ORIENT_MOTION_FAILED", nxt=["return_to_safe_pose"])
         held_after, gap_after, why_after = self._is_egg_held()
         if not held_after:
             self.io.emit(f"[FAIL] [V4.3 EGG ORIENT] 旋转立蛋后鸡蛋脱落：{why_after} → 立即中止下插")
@@ -3486,9 +3716,10 @@ class RealCupTaskTabUI:
         rs = ttk.Frame(gf)                                             # V4.8 gripper switch (global, all pages)
         rs.pack(fill="x", padx=4, pady=(2, 0))
         ttk.Label(rs, text="当前夹爪").pack(side="left")
-        self.v_grip_type = tk.StringVar(value=self.GG.LABELS[self.GG.active_type()])
-        self.cb_grip_type = ttk.Combobox(rs, textvariable=self.v_grip_type, values=[self.GG.LABELS[t] for t in self.GG.TYPES],
-                                         width=26, state="readonly")
+        self.v_grip_type = tk.StringVar(value=self.GG.CHOICE_LABELS[self.GG.current_choice()])   # V4.8.4 + Softfin
+        self.cb_grip_type = ttk.Combobox(rs, textvariable=self.v_grip_type,
+                                         values=[self.GG.CHOICE_LABELS[t] for t in self.GG.CHOICES],
+                                         width=30, state="readonly")
         self.cb_grip_type.pack(side="left", padx=4)
         self.cb_grip_type.bind("<<ComboboxSelected>>", lambda _e: self.on_gripper_type())
         ttk.Label(rs, text="（三个页面共用同一个设置）", foreground="#607d8b").pack(side="left")
@@ -3719,10 +3950,15 @@ class RealCupTaskTabUI:
         tq = self.GR.clamp_torque_pct(knobs["cup_clamp_force_n"], self._so101().cfg)
         if hasattr(self, "v_geo") and self.GG.is_agx():               # V4.8.1
             import NERO_V481_Agx_Geom as AG
+            soft = AG.variant() == "softfin"                             # V4.8.4
             self.v_geo.set(geo_err or (
-                f"NERO 原装夹爪：两指对称，指尖在法兰外 {AG.tip_from_flange_mm():.0f} mm（config/gripper.json "
-                f"agx.tip_from_flange_mm），抓杯张开 {p.open_mm:.0f} mm，两种夹法（里外）都试\n抓取前：先到预抓取点上方 "
-                f"{p.align_rotate_m * 1000:.0f} mm → 原地转腕 → 竖直降到预抓取点；鸡蛋：夹住蛋的一头，竖起来时蛋朝下、相机朝上"))
+                (f"NERO 原装夹爪-Softfin：柔性指 25.8 mm 宽、指尖在法兰外 {AG.tip_from_flange_mm():.0f} mm，按指尖内 "
+                 f"{AG.SOFTFIN_GRASP_FROM_TIP_MM:.0f} mm 处夹；" if soft else
+                 f"NERO 原装夹爪：两指对称，指尖在法兰外 {AG.tip_from_flange_mm():.0f} mm（config/gripper.json "
+                 f"agx.tip_from_flange_mm），")
+                + f"抓杯张开 {p.open_mm:.0f} mm，两种夹法（里外）都试\n抓取前：先到预抓取点上方 "
+                f"{p.align_rotate_m * 1000:.0f} mm → 原地转腕 → 竖直降到预抓取点；鸡蛋：夹在离蛋心尽量近、偏大头的位置，"
+                "竖起来时尖头朝下、相机朝上；搬运时检查鸡蛋不碰蛋托"))
         elif hasattr(self, "v_geo"):
             self.v_geo.set(geo_err or (
                 f"安装：座面 {m['seat_mm']:.1f} mm + 转接环 {m['ring_mm']:.1f} mm · 偏转 {m['roll_deg']:+.1f}° · 指尖修正 "
@@ -4029,7 +4265,7 @@ class RealCupTaskTabUI:
                 r.pack(fill="x", padx=4, pady=2, before=self.lbl_grip.holder)
         self.grip_frame.configure(text="夹爪 · NERO 原装 AgxGripper（pyAgxArm · CAN）" if agx else
                                   "夹爪 · SO-101（STS3215 舵机 · 180° = 夹紧，正角度 = 张开）")
-        self.v_grip_type.set(self.GG.LABELS[self.GG.active_type()])
+        self.v_grip_type.set(self.GG.CHOICE_LABELS[self.GG.current_choice()])
 
     def on_agx_speed(self):
         v = self.GG.parse_speed(self.v_agx_speed.get())
@@ -4041,15 +4277,15 @@ class RealCupTaskTabUI:
         self._log(f"[OK] [V4.8.2 GRIPPER] 夹爪开合速度 = {v:.0f}%（实机NERO调试 / 任务同一个设置）")
 
     def on_gripper_type(self):
-        want = next((t for t in self.GG.TYPES if self.GG.LABELS[t] == self.v_grip_type.get()), None)
-        if want is None or want == self.GG.active_type():
+        want = self.GG.choice_from_label(self.v_grip_type.get())        # V4.8.4: + NERO 原装夹爪-Softfin
+        if want is None or want == self.GG.current_choice():
             return
-        r = self.GG.set_active(want)
+        r = self.GG.set_choice(want)
         if not r.get("ok"):
             self._log(f"[WARN] [V4.8 GRIPPER] {r.get('error')}")
-            self.v_grip_type.set(self.GG.LABELS[self.GG.active_type()])
+            self.v_grip_type.set(self.GG.CHOICE_LABELS[self.GG.current_choice()])
             return
-        self._log(f"[OK] [V4.8 GRIPPER] 夹爪切换为 {self.GG.LABELS[want]}。接下来：" + "；".join(
+        self._log(f"[OK] [V4.8 GRIPPER] 夹爪切换为 {self.GG.CHOICE_LABELS[want]}。接下来：" + "；".join(
             f"{i + 1}. {t}" for i, t in enumerate(r.get("todo") or [])))
 
     def _on_gripper_switched(self):
@@ -4339,6 +4575,10 @@ class RealCupTaskTabUI:
             return
         for t in self.preflight_warnings(mode):
             self._log(f"[{'INFO' if t.startswith('夹爪开合速度') else 'WARN'}] [V4.8.2 REAL] {t}")
+        for ft in (ycfg or {}).get("missing_models") or []:              # V4.8.4
+            self._log(f"[WARN] [V4.8.4 YOLO] Camera调试 选了精调模型 {ft}，但哪个模型文件夹里都找不到这个文件 → "
+                      "这次只用原模型识别（鸡蛋 / 蛋托可能认不出来）。在 ~/Downloads/objectmodels/finetuned/ 下放回，"
+                      "或在 Camera调试 → 视觉定位 改模型文件夹")
         try:
             mc = self.motion_cfg()
             steps = int(self.v_steps.get())
@@ -4398,7 +4638,8 @@ class RealCupTaskTabUI:
         if self.GG.is_agx():                                           # V4.8.1
             import NERO_V481_Agx_Geom as AG
             z = self.GG.load_cfg().get("zero")
-            grip_txt = (f"NERO 原装夹爪 · 指尖在法兰外 {AG.tip_from_flange_mm():.0f} mm · 校正归零 "
+            grip_txt = (f"NERO 原装夹爪{'-Softfin' if AG.variant() == 'softfin' else ''} · 指尖在法兰外 "
+                        f"{AG.tip_from_flange_mm():.0f} mm · 校正归零 "
                         f"{'已做' if z else '未做'}")
         else:
             grip_txt = (f"SO-101 偏转 {geo['roll_deg']:+.0f}° · 离杯壁 {geo['clearance_mm']:.0f} mm · "

@@ -66,7 +66,11 @@ DEFAULTS = {
     "agx": {"channel": "can0", "fw": "v111", "backend": "pyagxarm", "default_force": 1.0,
             "tip_from_flange_mm": 144.0,        # V4.8.1: measured flange face -> fingertips (official URDF: 6 + 138)
             "speed_pct": 40.0,                  # V4.8.2: finger speed, % of full_speed_mm_s (100 = no limit)
-            "full_speed_mm_s": 150.0},          # V4.8.2: what "100 %" means (the gripper's own top speed, estimate)
+            "full_speed_mm_s": 150.0,           # V4.8.2: what "100 %" means (the gripper's own top speed, estimate)
+            # V4.8.4 SOFTFIN: which fingers are on the AgxGripper - "stock" (official jaws) or "softfin" (the user's
+            # printed PETG adapter + XLeRobot TPU Fin-Ray fingers, NERO_SoftFin_Adapter); tip length measured flange
+            # face -> fin tips (design: 6 + 199.4 = 205.4 mm)
+            "fingers": "stock", "softfin_tip_from_flange_mm": 205.4},
     # per-object open width (mm) + force level; starting values, tune them on the real objects (力控标定 ③)
     "presets": {"egg": {"open_mm": 60.0, "force": 0.5}, "cup": {"open_mm": 65.0, "force": 1.0},
                 "block": {"open_mm": 60.0, "force": 1.5}},
@@ -129,6 +133,85 @@ def active_type() -> str:
 
 def is_agx() -> bool:
     return active_type() == "agx_gripper"
+
+
+# ---------------------------------------------------------------------------- V4.8.4 SOFTFIN fingers
+FINGERS = ("stock", "softfin")
+CHOICES = ("so101", "agx_gripper", "agx_softfin")       # what the gripper selectors offer
+CHOICE_LABELS = {"so101": LABELS["so101"], "agx_gripper": LABELS["agx_gripper"],
+                 "agx_softfin": "NERO 原装夹爪-Softfin（柔性指 · CAN）"}
+CHOICE_SHORT = {"so101": "SO-101", "agx_gripper": "NERO 原装", "agx_softfin": "NERO 原装-Softfin"}
+
+
+def fingers() -> str:
+    f = (load_cfg().get("agx") or {}).get("fingers", "stock")
+    return f if f in FINGERS else "stock"
+
+
+def is_softfin() -> bool:
+    """the AgxGripper carries the Softfin (Fin-Ray) fingers"""
+    return is_agx() and fingers() == "softfin"
+
+
+def tip_from_flange_mm() -> float:
+    """flange face -> fingertips (mm) of the fingers that are on: stock 144 (URDF) / Softfin 205.4 (design)"""
+    a = load_cfg().get("agx") or {}
+    key, dflt = (("softfin_tip_from_flange_mm", 205.4) if a.get("fingers") == "softfin" else ("tip_from_flange_mm", 144.0))
+    try:
+        v = a.get(key)
+        return float(v) if v not in (None, "") else dflt
+    except (TypeError, ValueError):
+        return dflt
+
+
+def current_choice() -> str:
+    return "agx_softfin" if is_softfin() else active_type()
+
+
+def choice_from_label(text) -> Optional[str]:
+    for c in CHOICES:
+        if text in (CHOICE_LABELS[c], CHOICE_SHORT[c], c):
+            return c
+    return None
+
+
+def set_choice(choice: str) -> Dict[str, Any]:
+    """so101 / agx_gripper (stock jaws) / agx_softfin -> like set_active, plus the finger setting"""
+    if choice not in CHOICES:
+        return {"ok": False, "error": f"未知夹爪选项 {choice}"}
+    want_f = "softfin" if choice == "agx_softfin" else "stock"
+    t = "so101" if choice == "so101" else "agx_gripper"
+    if choice == current_choice():
+        return {"ok": True, "changed": False, "todo": []}
+    f_change = t == "agx_gripper" and fingers() != want_f
+    if f_change and t == active_type():
+        why = switch_blocked()
+        if why:
+            return {"ok": False, "error": f"现在不能切换夹爪：{why}"}
+    r = set_active(t)
+    if not r.get("ok"):
+        return r
+    if t == "agx_gripper" and fingers() != want_f:
+        c = load_cfg()
+        c["agx"]["fingers"] = want_f
+        save_cfg(c)
+        if not r.get("changed"):
+            for fn in list(_listeners):
+                try:
+                    fn(t)
+                except Exception:
+                    pass
+        r = dict(r, changed=True, todo=todo_after_finger_switch(want_f))
+    return r
+
+
+def todo_after_finger_switch(f: str) -> List[str]:
+    if f == "softfin":
+        return ["换上 Softfin：指尖比原装长 61.4 mm（法兰面到指尖 205.4 mm，实机NERO调试 → 夹爪 可改实测值）",
+                "实机NERO调试 → 夹爪：重新做「校正归零」（合拢时两片柔性指面贴住 = 0 mm）",
+                "示教模式负载：约 0.71 kg（夹爪 0.50 + 支架 / 相机 0.06 + 两指转接座和 TPU 指约 0.15）",
+                "规划按 Softfin 的尺寸算（更长、更窄的指）：先「只规划」再悬停"]
+    return ["换回原装爪片：实机NERO调试 → 夹爪 重新「校正归零」", "示教模式负载：约 0.56 kg"]
 
 
 def add_listener(fn: Callable[[str], None]) -> None:

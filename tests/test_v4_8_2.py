@@ -157,7 +157,7 @@ class TestV482(unittest.TestCase):
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
         self.assertEqual((v, RR.VERSION), (C.VERSION, C.VERSION))
-        self.assertIn(v, ("V4.8.2", "V4.8.3"))
+        self.assertIn(v, ("V4.8.2", "V4.8.3", "V4.8.4"))
         self.assertEqual(GG.SPEED_CHOICES, (30, 40, 50, 70, 100))
 
 

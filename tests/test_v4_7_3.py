@@ -48,7 +48,7 @@ class TestV473(unittest.TestCase):
             v = f.read().strip()
         self.assertEqual(v, C.VERSION)
         self.assertEqual(v, RR.VERSION)
-        self.assertIn(v, ("V4.7.3", "V4.7.4", "V4.8", "V4.8.1", "V4.8.2", "V4.8.3"))
+        self.assertIn(v, ("V4.7.3", "V4.7.4", "V4.8", "V4.8.1", "V4.8.2", "V4.8.3", "V4.8.4"))
         self.assertEqual(VT.MARKER_V473, "V4.7.3 READY_TO_WORK BEFORE TEACH RECORDING")
         self.assertTrue(hasattr(TL.EpisodePlayer, "_work_yolo"))
 
