@@ -107,6 +107,7 @@ grep -qF 'V4.8.1 AGX GRIPPER GEOMETRY + COLLISION' NERO_V481_Agx_Geom.py && grep
 grep -qF 'V4.8.2 SPEED LIMIT' NERO_V48_Gripper.py && grep -qF 'def preflight_warnings' NERO_V365_Real_Cup_Task.py && grep -qF 'LAST_LIGHTING = {}' NERO_V379_Camera_Lab.py || { echo "[FAIL] V4.8.2 markers missing"; exit 1; }
 grep -qF 'V4.8.3 TIDY DESK INTENT LAYER' NERO_V483_Tidy.py && grep -qF 'def set_sort_layout' NERO_V343_Scenes.py && grep -qF 'def agx_parts' NERO_V375_Collision_Check.py && grep -qF 'def return_item_to_table' NERO_V372_Sort_Skills.py || { echo "[FAIL] V4.8.3 markers missing"; exit 1; }
 grep -qF 'def set_choice' NERO_V48_Gripper.py && grep -qF 'SOFTFIN_GRASP_FROM_TIP_MM' NERO_V481_Agx_Geom.py && grep -qF 'def _plan_transit' NERO_V365_Real_Cup_Task.py && grep -qF 'def missing_finetuned' NERO_V366_Real_Cup_Yolo.py || { echo "[FAIL] V4.8.4 markers missing"; exit 1; }
+grep -qF 'def _carton_base_z' NERO_V365_Real_Cup_Task.py && grep -qF 'def _extra_ik_seeds' NERO_V365_Real_Cup_Task.py || { echo "[FAIL] V4.8.5 markers missing"; exit 1; }
 grep -qF 'V3.81 YOLOE TRAIN' NERO_V381_Yolo_Train.py && grep -qF 'V3.81 PROFILE FILES + TRAIN PAGE' NERO_V379_Camera_Lab.py && grep -qF 'NERO_V381_Yolo_Train.py' start_nero.sh || { echo "[FAIL] V3.81 train marker missing"; exit 1; }
 grep -qF 'V3.82 FINE-TUNED MODELS' NERO_V347_Yolo_Perception.py && grep -qF 'V3.82 HIGHLIGHTS + GAMMA + LABEL ASSIST' NERO_V379_Camera_Lab.py && grep -qF 'V3.82 APPLY FINE-TUNED + 1280 TRAINING' NERO_V381_Yolo_Train.py || { echo "[FAIL] V3.82 marker missing"; exit 1; }
 grep -qF 'V3.83 MULTI-MODEL DISTRIBUTION' NERO_V347_Yolo_Perception.py && grep -qF 'V3.83 GPU PREFLIGHT' start_nero.sh && grep -qF 'NERO_V383_Gpu_Check.py' start_nero.sh || { echo "[FAIL] V3.83 marker missing"; exit 1; }
@@ -202,4 +203,5 @@ python3 tests/test_v4_8_3.py 2>&1 | tail -1   # V4.8.3 tidy desk: layout, origin
 python3 tests/test_v4_8_3_gui.py | tail -1     # V4.8.3 tidy preview dialog (skips without tkinter / DISPLAY)
 python3 tests/test_v4_8_3_twin.py 2>&1 | tail -1  # V4.8.3 tidy desk in the MuJoCo twin (skips without mujoco; minutes)
 python3 tests/test_v4_8_4.py 2>&1 | tail -1   # V4.8.4 Softfin fingers, egg grip nearer the middle, blunt end, held-egg sweep, fence start, missing models
+python3 tests/test_v4_8_5.py 2>&1 | tail -1   # V4.8.5 carton on the measured table (grip nearer the middle), more IK postures, reasons
 python3 tests/test_v4_6_1_gui.py | tail -1   # skips without tkinter / DISPLAY

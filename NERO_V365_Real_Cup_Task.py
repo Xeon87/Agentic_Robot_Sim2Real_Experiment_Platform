@@ -1122,6 +1122,9 @@ EGG_SWEEP_CELL_R_M = 0.028        # around every empty cell centre (cell + half 
 EGG_SWEEP_EGG_R_M = 0.022         # a standing egg (its own column)
 EGG_SWEEP_EGG_CLEAR_M = 0.010     # the held egg stays >= 10 mm above a standing egg's top
 EGG_TRANSIT_ABOVE_TOP_M = 0.035   # transit height: the egg's lowest point this far above the carton top
+CARTON_TABLE_MAX_DIFF_M = 0.015   # V4.8.5: the carton is put on the measured table when it is <= 15 mm below zt
+IK_EXTRA_RANDOM_SEEDS = 24        # V4.8.5: after the 5 usual seeds, 16 structured + this many fixed random seeds
+IK_EXTRA_MAX_J1_DEG = 120.0       # ... a solution may not swing the base more than this from the current joints
 EGG_OPEN_MM = 56.0
 EGG_CLAMP_N = 4.2
 EGG_MIN_HELD_GAP_MM = 14.0
@@ -1369,6 +1372,17 @@ class RealEggSkills:
         return out
 
     # ------------------------------------------------------------------ V4.8.4 egg helpers
+    def _carton_base_z(self, zt):
+        """V4.8.5: the table the CARTON stands on = the camera-measured table (the same camera found the cells).
+        zt (the higher of camera table / fence z_table) stays for the fingertip / body clearance; with it the carton was
+        taken 9-11 mm too high (user, 11-11 / 11-12: fence z_table 10 mm above the measured table) -> the end-grasp
+        offset came out 23 mm instead of ~14 mm and the egg slipped out of the pads."""
+        zc = (getattr(self, "last_obs", None) or {}).get("table_z_m")
+        if zc is None:
+            return float(zt)
+        zc = float(zc)
+        return zc if 0.0 <= float(zt) - zc <= CARTON_TABLE_MAX_DIFF_M else float(zt)
+
     def _egg_release_above_m(self):
         return EGG_RELEASE_ABOVE_SLOT_AGX_M if self.agx else EGG_RELEASE_ABOVE_SLOT_M
 
@@ -1388,13 +1402,13 @@ class RealEggSkills:
         out = []
         for k, e in self.cam.items():
             if k.startswith("slot_"):
-                out.append((np.asarray(e["rim"][:2], float), float(zt) + self.AG.CARTON_TOP_ABOVE_TABLE_M,
+                out.append((np.asarray(e["rim"][:2], float), self._carton_base_z(zt) + self.AG.CARTON_TOP_ABOVE_TABLE_M,
                             EGG_SWEEP_CELL_R_M, EGG_SWEEP_CLEAR_M))
                 if e.get("occupied"):
-                    out.append((np.asarray(e["rim"][:2], float), float(zt) + 0.065, EGG_SWEEP_EGG_R_M,
+                    out.append((np.asarray(e["rim"][:2], float), self._carton_base_z(zt) + 0.065, EGG_SWEEP_EGG_R_M,
                                 EGG_SWEEP_EGG_CLEAR_M))
         for q in getattr(self, "eggs_in_carton", []) or []:
-            out.append((np.asarray(q[:2], float), float(zt) + 0.065, EGG_SWEEP_EGG_R_M, EGG_SWEEP_EGG_CLEAR_M))
+            out.append((np.asarray(q[:2], float), self._carton_base_z(zt) + 0.065, EGG_SWEEP_EGG_R_M, EGG_SWEEP_EGG_CLEAR_M))
         return out
 
     def _egg_sweep_ok(self, q_list, egg_in_G, half_len_m, zt, r_egg=0.021, n=12):
@@ -1429,7 +1443,8 @@ class RealEggSkills:
             return [], f"直接转过去（鸡蛋最低处离障碍 {worst:.0f} mm）"
         p_above, R_rel = np.asarray(sc["p_above"], float), sc["R_rel"]
         low_above = min(float(P[2]) for P in self._egg_points(q_above, egg_in_G, half_len_m)) - 0.021
-        top = max([t for _xy, t, _r, _c in self._egg_obstacles(zt)] + [float(zt) + self.AG.CARTON_TOP_ABOVE_TABLE_M])
+        top = max([t for _xy, t, _r, _c in self._egg_obstacles(zt)]
+                  + [self._carton_base_z(zt) + self.AG.CARTON_TOP_ABOVE_TABLE_M])
         dz = max(0.04, top + EGG_TRANSIT_ABOVE_TOP_M - low_above)
         p_hi = p_above + np.array([0.0, 0.0, dz])
         p_lift = np.asarray(gc["p_lift"], float)
@@ -1639,25 +1654,49 @@ class RealEggSkills:
             [a1, 0.55, 0.0, 1.4, 0.0, 0.4, 0.9],
             [a1, 0.55, 0.0, 1.4, 0.0, -0.3, -0.9],
         ]
-        for sd in seeds:
+        def chain_from(sd):
             r0 = self._fast.ik([sd], waypoints[0][1], waypoints[0][2], iters=35)
             if not r0 or r0[0] is None:
-                continue
+                return None, None
             qs = [list(r0[0])]
             qp = qs[0]
-            ok_chain = True
             for _name, p, R in waypoints[1:]:
                 r = self._fast.ik([qp], p, R, iters=30)
                 if not r or r[0] is None:
-                    ok_chain = False
-                    break
+                    return None, None
                 qp = list(r[0])
                 qs.append(qp)
-            if ok_chain:
-                chk = self.CK.check_joint_path(qs, jump_deg=1e9)
-                if chk.get("ok"):
-                    return qs, chk
-        return None, None
+            chk = self.CK.check_joint_path(qs, jump_deg=1e9)
+            return (qs, chk) if chk.get("ok") else (None, None)
+        for sd in seeds:
+            qs, chk = chain_from(sd)
+            if qs:
+                return qs, chk
+        # V4.8.5 MORE ARM POSTURES: the 7-DoF arm has many postures for one gripper pose; the 5 seeds above miss the
+        # ones with the elbow / wrist turned (user 11-12: an egg at yaw -139 deg -> "IK 无解" for all 6 grasp
+        # directions; 300 random seeds found all 6 with 11-20 deg joint margin).  Structured + fixed random seeds;
+        # among the solutions: a normal joint margin first, then the one closest to the current joints.
+        best, best_key = (None, None), None
+        q0 = np.asarray(q_seed, float)
+        for sd in self._extra_ik_seeds(a1):
+            qs, chk = chain_from(sd)
+            if not qs or abs(float(qs[0][0]) - float(q0[0])) > math.radians(IK_EXTRA_MAX_J1_DEG):
+                continue
+            key = (-int(float(chk.get("min_margin_deg", 0.0)) >= 6.0), float(np.linalg.norm(np.asarray(qs[0]) - q0)))
+            if best_key is None or key < best_key:
+                best, best_key = (qs, dict(chk, extra_seed=True)), key
+        return best
+
+    def _extra_ik_seeds(self, a1):
+        if getattr(self, "_ik_seed_cache", None) is None:
+            import itertools
+            L = np.asarray(self.CK.JOINT_LIMITS, float)
+            out = [[0.0, j2, j3, 1.6, j5, -0.3, j7]
+                   for j2, j3, j5, j7 in itertools.product((0.4, 1.1), (-1.2, 1.2), (-1.3, 1.3), (-1.1, 1.1))]
+            rng = np.random.default_rng(485)
+            out += [list(rng.uniform(L[:, 0] * 0.85, L[:, 1] * 0.85)) for _ in range(IK_EXTRA_RANDOM_SEEDS)]
+            self._ik_seed_cache = out
+        return [[a1] + sd[1:] if i < 16 else sd for i, sd in enumerate(self._ik_seed_cache)]
 
     def _line_qs(self, q_start, p0, p1, R, step_m=0.003):
         """V4.5: IK along the straight line p0 -> p1 (fixed orientation), like RealIO.cartesian_path -> qs or None.
@@ -1757,6 +1796,10 @@ class RealEggSkills:
         tip_drop = so101_tip_drop_m()
         cands = []
         self._last_grasp_reject = None
+        why_n = {}                                         # V4.8.5: why each grasp direction was refused
+
+        def rej(key):
+            why_n[key] = why_n.get(key, 0) + 1
         # V4.8.1 AgxGripper: the 56 mm wide pads must hold only the egg's upper END (long axis = x_G, egg centre
         # EGG_OFFSET_MM along x_G, on the side away from the wrist camera) so the lower part sticks out below the
         # pads into the cell while the camera bracket points up -> long axis aligned
@@ -1772,11 +1815,13 @@ class RealEggSkills:
             tip_z = float(p_a[2]) - tip_drop                         # z_G points straight down
             if tip_z < float(zt) + TIP_PLAN_CLEAR_M - 1e-6:
                 self._last_grasp_reject = f"指尖离桌 {(tip_z - zt) * 1000:.1f} mm < {TIP_PLAN_CLEAR_M * 1000:.0f} mm"
+                rej("指尖离桌面太近")
                 continue
             p_pre = p_g + np.array([0.0, 0.0, EGG_PRE_M])
             p_lift = p_g + np.array([0.0, 0.0, EGG_LIFT_M])
             qs, chk = self._fast_ik_chain([("pre", p_pre, R_g), ("grasp", p_g, R_g), ("lift", p_lift, R_g)], q_seed)
             if not qs or not chk:
+                rej(f"{5 + 16 + IK_EXTRA_RANDOM_SEEDS} 种手臂起始姿态都没找到解（够不着 / 关节到限位）")
                 continue
             q_pre, q_g, q_lift = qs
             line_dn = self._line_qs(q_pre, p_pre, p_g, R_g)
@@ -1784,11 +1829,13 @@ class RealEggSkills:
             if not line_dn or not line_up or not self.CK.check_joint_path(
                     line_dn + line_up[1:], margin_deg=self.CK.PATH_MARGIN_DEG + PLAN_MARGIN_HEADROOM_DEG).get("ok"):
                 self._last_grasp_reject = "下探 / 抬升直线上关节余量不足"
+                rej("下探 / 抬升直线上关节余量不足")
                 continue
             # V4.8.4: the joint move from the CURRENT posture to the pregrasp is checked too (the execution checks it;
             # 11-11: plan OK, then 3x "FENCE: tool 离墙 69 mm < 70 mm" on that move)
             if not self._check_path_fence([list(q_seed), q_pre, q_g, q_lift], zt):
                 self._last_grasp_reject = "抓取路径越过安全区（指尖 z 或围栏）"
+                rej("路径越过安全区（围栏 / 指尖高度）")
                 continue
             egg_in_G = R_gr.T @ (c_egg - p_a)                        # V4.5: held-egg centre in the grasp frame
             # V4.8.4 BLUNT END: the pads should sit on the egg's blunt (wider) end, the pointed end goes down into the
@@ -1812,6 +1859,9 @@ class RealEggSkills:
             if float(chk.get("min_margin_deg", 0.0)) >= 8.0 and len(cands) >= 2:
                 break
         cands.sort(key=lambda c: (-int(c["margin"] >= 6.0), int(c.get("on_blunt") is False), c["off_axis"], -c["margin"]))
+        if not cands and why_n:                        # V4.8.5: say why, per reason
+            self._last_grasp_reject = (f"试了 {sum(why_n.values())} 个夹取方向（垂直蛋长轴 ±12° 及反向）：" + "；".join(
+                f"{k} {n} 个" for k, n in why_n.items()) + "。可以把鸡蛋转 90° 或挪近一点再试")
         return cands
 
     def _plan_slot_candidates(self, slot, zt: float, q_from, egg_in_G=None, half_len_m=0.0275):
@@ -1906,7 +1956,7 @@ class RealEggSkills:
                     continue
                 if self.agx:                      # V4.8.1: the fingers stay above the carton while the egg goes in
                     low = self._agx_finger_low(p_rel, R_rel)
-                    top = float(zt) + self.AG.CARTON_TOP_ABOVE_TABLE_M + self.AG.PAD_ABOVE_CARTON_M
+                    top = self._carton_base_z(zt) + self.AG.CARTON_TOP_ABOVE_TABLE_M + self.AG.PAD_ABOVE_CARTON_M
                     if low < top:
                         _rej(pitch_deg, "carton", (round((low - top + self.AG.PAD_ABOVE_CARTON_M) * 1000.0, 1), "finger_a"))
                         continue
@@ -2094,8 +2144,9 @@ class RealEggSkills:
         # V4.8.4 GRIP NEARER THE MIDDLE: the smallest end offset the target cell allows, the V4.8.1 24 mm as fallback
         offsets = [None]
         if self.agx and target_slot in self.cam:
+            cb = self._carton_base_z(zt)                               # V4.8.5: measured table under the carton
             pz = max(float(self.cam[target_slot]["rim"][2]) + self._egg_release_above_m(), float(zt) + 0.042)
-            need = self.AG.egg_offset_needed_mm(pz, zt)
+            need = self.AG.egg_offset_needed_mm(pz, cb)
             offsets = [need] + ([self.AG.EGG_OFFSET_MM] if need < self.AG.EGG_OFFSET_MM - 0.5 else [])
         best, transit_why = None, None
         for i_off, off in enumerate(offsets):

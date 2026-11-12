@@ -1,3 +1,7 @@
+## V4.8.5 (2026-11-12) — 鸡蛋夹得更靠中间 + IK 多试姿态
+- `NERO_V365_Real_Cup_Task.py`：`_carton_base_z`（蛋托放在相机实测的桌面上，差 ≤ 15 mm 时）用于夹蛋最小距离、插槽手指离蛋托顶、搬运扫掠、蛋托放置高度；指尖 / 本体离桌仍用较高的桌面。`_fast_ik_chain` 在 5 个常用种子失败后试 16 个结构化 + 24 个固定随机种子（`_extra_ik_seeds`，底座转动 ≤ 120°），选余量正常且离当前关节最近的解。夹取方向全部被拒时按原因计数写进 detail。
+- 测试：新 `tests/test_v4_8_5.py`；版本白名单补 V4.8.5。
+
 ## V4.8.4 (2026-11-11) — NERO 原装夹爪-Softfin + 鸡蛋任务修正
 - `NERO_V48_Gripper.py`：`agx.fingers`（stock / softfin）、`agx.softfin_tip_from_flange_mm`（205.4）；`CHOICES` / `CHOICE_LABELS` / `set_choice` / `current_choice` / `is_softfin` / `tip_from_flange_mm`。
 - `NERO_V481_Agx_Geom.py`：`SOFTFIN` 尺寸（用户 CAD）、`variant()`、Softfin 的抓取线（指尖内 25 mm）、碰撞盒（指尖段 / 指根段 / 转接座）、`pad_half_width_m`、`finger_footprint_mm`、`egg_held_gap_mm`、`egg_offset_needed_mm`。
