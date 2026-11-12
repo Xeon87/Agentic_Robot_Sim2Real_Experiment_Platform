@@ -1,12 +1,223 @@
-# NERO 项目开发与交接文档（V3.82 · Sim2Real 与自动寻优路线版）
+# NERO 项目开发与交接文档（V4.8.5 · 交接版）
 
-> 放在仓库根目录，命名为 `AGENTS.md`（Codex / 后续开发 Agent 会自动读取）。
-> 更新时间：2026-11-09。当前已交付最新版本：**V4.8.5**（仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`）。
-> 接手者请在做任何修改前通读本文件。本文件里“用户”指项目所有者 Jimmy。
+> 本文件放在仓库根目录，名为 `AGENTS.md`（Codex 和其他开发 Agent 会自动读取）。
+> 更新时间：2026-11-12。当前交付版本：**V4.8.5**。仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`，开发分支 `claude/charming-euler-eoqyme`。
+> “用户”指项目所有者 Jimmy。文件分两部分：
+> - **第一部分**：交接速览，给接手工程师先读，约 15 分钟。
+> - **第二部分**：详细规则、不变量和逐版本记录。原文档持续追加，第 1、2、4 节仍然有效。
+>
+> 修改代码前，至少读完第一部分，再读第二部分的第 1 节（沟通规则）、第 2 节（开发纪律）、第 4 节（不变量）。
 
-## 0. 一句话现状
+---
 
-NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 做“鸡蛋放进蛋托”及通用操作任务，已全面进入 **Sim2Real 闭环阶段**。
+# 第一部分：交接速览
+
+## H1. 项目是什么，现在到哪一步了
+
+硬件是 NERO 7 自由度机械臂（AgileX，CAN）、一个固定主相机和一个腕部相机。软件是一个 Tk 控制台 `NERO_V312_Console.py`，里面有这些页：
+
+- 仿真
+- 实机NERO调试
+- Camera调试
+- Agentic实机任务
+- Smol VLA实机任务
+
+各任务的状态（截至 2026-11-12）：
+
+| 任务 / 功能 | 在哪 | 状态 |
+| :--- | :--- | :--- |
+| 叠杯子 cups（原装夹爪） | Agentic实机任务 | 真机跑通过，用的是 `CK.OFFICIAL_PROFILE` 加实机保护 |
+| 鸡蛋入蛋托 eggs（原装夹爪） | Agentic实机任务 | 真机能完成，但偶尔要重试。V4.8.4–V4.8.5 改了夹持位置，现在端距约 13 mm，比原来更靠近蛋的中段，**还没在真机上复测**（见 H6-1） |
+| 分拣 sort | Agentic实机任务 / 仿真 | 仿真可用。原装夹爪下，实机只做规划 |
+| 桌面整理 tidy_desk（V4.8.3） | 仿真孪生 + Agentic实机 ④ | 只在 MuJoCo 孪生里验证过。实机 ④ 没在硬件上跑过 |
+| Softfin 软指（V4.8.4） | 两个实机任务的夹爪下拉框 | 几何已接进算法，**真机完全没测**。叠杯子够不着，桌面整理的远排够不着 |
+| Smol VLA | Smol VLA实机任务 | 示教采集、浏览、回放、训练入口已有。原装夹爪的 VLA 数据接口在 V4.8.2 改过，仿真里的官方夹爪还没做（“V4.8 第 3 部分”） |
+| 运动规划 | — | 实机：FastArm C 扩展 IK + 自己的路径围栏检查，然后用 MoveIt `/execute_trajectory` 执行。**cuRobo 只在仿真里用**（`NERO_GPU_Planner_Server`，独立 venv） |
+
+## H2. 硬件和环境（已确认的事实）
+
+**电脑**
+- Ubuntu 22.04，RTX 4060 Laptop 8 GB。
+- 控制台用 `/usr/bin/python3` 3.10（tk 8.6）。torch / ultralytics / pyrealsense2 装在 `~/.local`。
+- ROS2 Humble + MoveIt。
+
+**机械臂**
+- NERO，固件 V1.2.1，接口 `can0`，用 pyAgxArm。
+- **软件绝不自动使能**。使能只能由用户在「实机NERO调试」页手动做。
+
+**夹爪**
+- 当前是 NERO 原装 AgxGripper：**70 mm 行程版**，CAN 夹爪 ID 10（0x51A / 0x52A），只通过 pyAgxArm 控制。ROS2 驱动固定 `effector_type:=none`。
+- SDK 力度 0.5–3.0 不是牛顿数。
+- 开合速度由程序按 25 Hz 发中间目标来限制，默认 30–40 %。
+- 用户还没做夹爪归零。
+- SO-101（STS3215）仍然能通过开关切换，但用户已经不用了。
+
+**夹爪选项**
+- `NERO_V48_Gripper.CHOICES = ("so101", "agx_gripper", "agx_softfin")`。
+- Softfin 的硬件类型仍然是 `agx_gripper`，区别只在设置 `agx.fingers = "softfin"`。
+- 指尖到法兰的距离：原装 144 mm，Softfin 205.4 mm。
+
+**固定主相机**
+- RealSense D435i，序列号 261222075224。
+- 启动默认 848×480 + Default。
+
+**腕部相机**
+- Innomaker 4MP UVC，装在用户自己的支架上（STEP V7.1：相机托架倾斜 30°）。
+- 腕部手眼标定 link7→cam 约为 (+122.1, −53.7, −25.0) mm。
+- 换 ArUco 纸后，**先重做腕部内参，再做腕部手眼标定**。
+
+**用户数据目录（程序运行时只能写这些地方，不能写发布文件夹）**
+- `~/Downloads/cameracalib/`（`NERO_CALIB_DIR`）放这些内容：
+  - 手眼标定、内参、安全区
+  - `teach_gravity.json`、`tidy_prefs.json`、`tidy_layout.json`
+  - `carton_diag/` 诊断图、`vision_check/`
+- `~/Downloads/objectmodels/` 放 YOLOE 原模型。精调模型在 `finetuned/<名字>/`，每个模型带一个 `model_card.json`。11-09 到 11-10 之间这个目录丢过一次，原因不明。用户已重新训练。
+- LeRobot / SmolVLA 的全部内容放在卷标为 `EMBODIED_AI` 的移动硬盘的 `<盘>/nero_lerobot/` 下（`NERO_V44_Storage.py`）。硬盘不在时，大文件操作一律拒绝。
+
+**用户场景的已知数值（从日志得到）**
+- 安全区 `z_table` 比相机测得的桌面高 9–11 mm（办公室）。
+- 蛋托规格：2×3，孔距 46 × 47 mm，高 30 mm，写在 `config/egg_carton.json`。
+- 鸡蛋约 55 × 42 mm。
+
+## H3. 怎么运行
+
+```bash
+./start_nero.sh            # 控制台
+./start_nero.sh --real     # 直接打开实机NERO调试页
+./start_nero.sh --no-vla   # 不建 Smol VLA 页（应急）
+./start_nero.sh --sim      # 只跑仿真链路
+```
+
+用户报闪退时，要这三个文件：
+- `logs/crash.log`
+- `logs/stderr.log`
+- `logs/native_crash.log`
+
+## H4. 代码地图（V3.61 之后新增 / 现在常改的模块）
+
+V3.60 之前的模块见第二部分第 5 节。文件名里的版本号是该模块**首次出现**的版本，不是最后修改的版本。
+
+| 文件 | 作用 |
+| :--- | :--- |
+| `NERO_V312_Console.py` | 控制台主程序，`VERSION` 在这里 |
+| `NERO_V313_Real_Robot.py` | 实机启动流程、`move_joint_path`（`/execute_trajectory` + 路径围栏）、`move_and_settle`。启动时会结束残留的 GPU planner 进程。`VERSION` 也在这里 |
+| `NERO_V365_Real_Cup_Task.py` | **Agentic实机任务的核心**：`RealIO`、`RealCupTaskTabUI`、`RealEggSkills`（鸡蛋：选蛋 → 候选夹取方向 → IK → 围栏 → 搬运 → 立蛋插入 → 验证）、`_run_tidy`。鸡蛋常数集中在约 1110–1150 行 |
+| `NERO_V366_Real_Cup_Yolo.py` | 实机识别，走 Camera调试页的 YOLOE 流水线。`missing_finetuned`：勾选的精调模型文件不存在时，任务日志里出 WARN |
+| `NERO_V347_Yolo_Perception.py` | YOLOE 检测器，支持原模型和精调模型组合 |
+| `NERO_V384_Object_Tracker.py` | 多帧跟踪、egg carton 6 孔定位 |
+| `NERO_V48_Gripper.py` / `NERO_V48_Gripper_UI.py` | 夹爪抽象（SO-101 / AgxGripper / Softfin）：`set_choice`、`current_choice`、`is_softfin`、`tip_from_flange_mm`、速度限制；「实机NERO调试 → 夹爪」页 |
+| `NERO_V481_Agx_Geom.py` | 原装夹爪和 Softfin 几何：`T_tcp_grasp(v)`、`boxes_in_G`、`finger_footprint_mm`、`egg_held_gap_mm`、`egg_offset_needed_mm`、`AgxToolModel`。`SOFTFIN` 字典来自用户的 CAD 文件 NERO_SoftFin_Adapter |
+| `NERO_V4613_Tool_Collision.py` | 腕部支架和相机头的碰撞方块，用来检查与桌面的距离 |
+| `NERO_V375_Collision_Check.py` | 碰撞预检：`agx_parts(v=)`、MoveIt `/check_state_validity` |
+| `NERO_V362_Cup_Skills.py` / `NERO_V372_Sort_Skills.py` | 叠杯子 / 分拣技能。仿真和实机共用同一份代码 |
+| `NERO_V483_Tidy.py` | 桌面整理意图层：规则 + LLM → 计划 → 预览 → 提问 → `TidyRunner` → 汇报 → 偏好记忆。`twin_tidy` 是 MuJoCo 孪生 |
+| `NERO_V343_Scenes.py` | 仿真场景，含 `tidy_desk` 变体和 `set_sort_layout` |
+| `NERO_V472_Wrist_Calib.py` | 腕部标定流程的修复。它在类上替换 V325 的方法，因为 V325 冻结、不能改 |
+| `NERO_V464_Vision_Check.py` | 视觉精度验证：合爪悬停，由用户填 dx / dy |
+| `NERO_V462_Teach_Gravity.py` | 示教栏。注意：NERO 驱动没有负载接口 |
+| `NERO_V4_Console_Tab.py`、`NERO_V4_*.py`、`NERO_V44_*.py`、`NERO_V47_VLA_Tools.py`、`NERO_V474_Episode_Tools.py` | Smol VLA 页：准备、示教采集、Episode 浏览和回放、训练、执行、评估。推理在移动硬盘 venv 的子进程里 |
+| `NERO_V4_Dataset_Recorder.py` | 示教数据记录。夹爪名写 "AgxGripper" 或 "AgxGripper-Softfin" |
+| `NERO_GPU_Planner_Server.py` / `_Client.py`、`NERO_V71_Hybrid_GPU_Planner_Core.py` | cuRobo 规划服务，只在仿真里用 |
+| `NERO_V325_Camera.py` | Camera调试页。**冻结**，测试会校验 sha256 |
+
+## H5. 修改和发布流程（每个版本都照这个做）
+
+1. 复制上一版的平铺文件夹，命名为 `NERO_V4_x_y`。
+2. 把版本号改成新版本，三个地方要一致：
+   - `VERSION` 文件
+   - `NERO_V312_Console.py` 里的 `VERSION = "V4.x.y"`
+   - `NERO_V313_Real_Robot.py` 里的 `VERSION = "V4.x.y"`
+3. 扩展老测试的版本白名单：
+   - 在 `tools/dev/fix_whitelists.py` 的 `NEW` 列表末尾加上新版本号，再运行：
+     ```bash
+     python3 tools/dev/fix_whitelists.py .
+     ```
+   - 上一版测试里有一句断言版本号相等，例如 `assertEqual((v, C.VERSION, RR.VERSION), ("V4.8.5", ...))`。把它改成两句：
+     ```python
+     assertEqual((v, RR.VERSION), (C.VERSION, C.VERSION))
+     assertIn(v, (...))
+     ```
+   - **漏掉这一步，很多 V3 测试一开头就会停。** V4.4–V4.6 出过这个问题。
+4. 每个改动块加版本标记注释（`# V4.x.y ...`）。给用户看的日志用 `[OK]/[INFO]/[WARN]/[FAIL] [V4.x.y 模块] 中文说明` 的格式。
+5. 新建 `tests/test_v4_x_y.py`。文件开头的 docstring 逐条写清测试项，并写清是用户哪次实测引出的问题。把这个测试和标记 grep 行加进 `tests/check_release.sh`。
+6. 写 `README.md` / `CHANGELOG.md` 顶部的本版说明，并在本文件第二部分第 0 节末尾追加一段。
+7. 运行回归，并和上一版的结果逐行对比。没有新增失败才能交付：
+   ```bash
+   bash tools/dev/run_tests.sh .       # 非 GUI，较慢（含 MuJoCo 孪生测试）
+   bash tools/dev/run_tests.sh . gui   # GUI，需要 DISPLAY 或 xvfb-run
+   ```
+   **已知的老失败，与当前功能无关，接手时可以考虑修掉：**
+   - `test_v3_16`、`test_v3_16_2`、`test_v3_17`、`test_v3_19`：断言源码里有 `VERSION = "V3.`，进入 V4 后必然失败。
+   - `test_v3_60`、`test_v3_61`、`test_v3_62` 中的个别文件哈希检查：它们针对的文件后来被有意修改过。
+   - `test_v3_56_gui`。
+   - 其余测试必须全部通过。
+   - `tests/test_v4_8_3_twin.py` 需要 mujoco，跑一次要好几分钟。设 `NERO_V483_TWIN=quick` 只跑 W1。
+8. 清理发布目录：
+   ```bash
+   rm -rf logs task; find . -name __pycache__ -exec rm -rf {} +
+   ```
+9. 重新生成 `SHA256SUMS.txt`。命令见第二部分 2.4 第 5 步。
+10. 打包 `NERO_V4_x_y.zip`，保留 `.sh` 的可执行权限。
+11. 推到 `claude/charming-euler-eoqyme` 分支。用户通过 GitHub 分支 zip 或附件下载。**不要把文件直接放进用户的文件夹**，用户自己下载、自己替换。
+
+**离线测试要点**
+- 测试绝不能读写用户的真实目录。
+- 用 `NERO_CALIB_DIR` 和 `NERO_V368_TASK_DIR` 指向临时目录。
+- ultralytics 一律用 `tests/v347_fake.py` 或 `tests/v381_fake_yolo.py`。
+- 用户真实画面的离线复现数据在 `tests/data/`，例如 `v4612_real_carton.npz`。
+- 鸡蛋规划的回归场景是 `tests/test_v4_8_4.py` 的 `T13.user_scene()`，里面是用户的腕部手眼参数和真实槽位。
+
+## H6. 未完成事项（按优先级）
+
+**等用户在真机上验证或操作的（先问用户结果）**
+
+1. **鸡蛋夹持位置复测（最重要）**：V4.8.5 的端距是按用户 11-12 的日志离线算出的，从 23 mm 降到 13 mm。要看真机日志里的 `egg_offset_mm` 和 `table_z_source`，确认鸡蛋不再滑脱。V4.8.4 的教训是：离线“修好”了，在用户场景里只从 24 降到 23。**改算法后，一定要用用户真实日志里的数值复核。**
+2. 安全区桌面比相机桌面高 9–11 mm：建议快速复核主相机手眼标定，或者在安全区编辑器里把 `z_table` 改成实测值。代码只信任差值 ≤ 15 mm（`CARTON_TABLE_MAX_DIFF_M`）。
+3. 原装夹爪归零：在「实机NERO调试 → 夹爪 → 归零向导」里做。
+4. Camera调试页模型下拉框里，取消勾选车库时期的旧精调模型。
+5. egg carton 识别不够准，需要补采数据。用户说“似乎没法直接补充照片了”，具体卡在哪一步还没问清。可能有关的线索：V379「拍一张」按钮的文字里有 emoji，而 Tk + libXft 遇到 emoji 会崩。
+6. Softfin 的实测参数：`SOFTFIN_GRASP_FROM_TIP_MM`（目前 25）、夹住鸡蛋时的读数范围 `SOFTFIN_EGG_HELD_GAP_MM`（目前 8–46）。这些都在 `NERO_V481_Agx_Geom.py`。
+7. 原装夹爪开合速度的实测（100 % ≈ 150 mm/s 是估计值）。
+
+**已提出方案、等用户点头才做的**
+
+8. 叠杯子「让开视线」：直线走廊经常失败，改为关节运动回 `ready_to_work`（`config/real_poses.json`）。
+9. 日志“靠近底座内侧不可达”有误导，要改措辞。
+10. 0 检出时把 YOLO 前几名候选打印出来，方便诊断。
+11. **cuRobo 用于实机 IK（B 方案）**：FastArm 多种子都失败时，第二步调用 cuRobo。需要在实机环境起 GPU planner，并解决它与控制台进程、显存的共存。
+12. 鸡蛋放不下时，自动“放回再换方向夹”（regrasp）。现在只提示用户“把鸡蛋转 90° 或挪近一点”。
+13. 仿真里的原装夹爪 + Smol VLA 第 3 部分（数据和仿真）。
+14. 用 `move_mit` 做软件零力拖动、补偿重力。用户说“暂时不动这块”。
+
+**已知限制（不是 bug）**
+- 原装夹爪的 TCP 是 155 mm，可达范围很小：俯抓只到 x −0.34…−0.46 m、|y| ≤ 0.18。Softfin 再长 56 mm，所以叠杯子返回 `PLACE_UNREACHABLE`。
+- 示教时 J7 可能被拖出限位，零力拖动不受 URDF 限位约束。录制时会报警，回放前会检查。
+
+## H7. 和用户合作的要点（详见第二部分第 1 节）
+
+**回复方式**
+- 用中文，简洁，先给结论再给依据。
+- 用户说“先分析 / 先别改”，或者只是报告现象时：**只分析，给方案，等确认**。
+- 不夸大：只在离线、替身或模拟上验证过的，要明确说“真机未验证”。
+- 不要从单个读数推断硬件状态。新的判断规则要先用实测数据验证。
+
+**代码硬规则**
+- **Tk 控件文字不用 emoji**（Ubuntu 22.04 libXft 会段错误）。
+- 工作线程不读写 Tk 变量。
+- 不创建 `tkinter.font.Font`。
+- **`NERO_V325_Camera.py` 冻结**。`NERO_V308`、后端 B 段等不变量见第二部分第 4 节。
+
+**沟通习惯**
+- 用户是机械博士，讲清“为什么”和“怎么验证”：点哪里、看日志里的哪个字段。
+- 用户发来的日志是第一手数据。回复时引用里面的数值，例如 `egg_offset_mm`、`table_z_source`、`[V4.6.13 PLACE]` 的否决原因。
+
+---
+
+# 第二部分：详细规则与历史（原文档，持续追加）
+
+## 0. 逐版本记录（V3.13–V4.8.5，新版本在本节末尾追加）
+
+NERO 7 自由度机械臂（AgileX）+ MuJoCo 仿真 + GPT Agent 做“鸡蛋放进蛋托”及通用操作任务。以下按版本记录每次的改动、原因和教训（早期条目里“当前状态”的说法以第一部分 H1 为准）。
 - **已完成（V3.13–V3.58）**：CAN 驱动（固件 V1.2.1 `NeroFW.V121` 兼容）、ROS2 / MoveIt2、关节控制、示教平滑进出、待断电位置（Park Pose D）、3D 安全围栏（Fence + `z_table` + 路径碰撞检查）、固定主相机 D435i（Eye-to-Hand 6× 快速标定 + YOLOE-26 轮廓与局部桌面平面 3D 定位）、4 姿态碰点 TCP 标定、以及独立实机腕部广角相机模块 `NERO_V349_Real_Wrist_Camera.py`（双画面同屏、静止/清晰度门禁、TCP 准星投影、零先验 6 孔蛋托识别 `locate_egg_holder`、粗到精定位 `wrist_refine_target`、运动学锚定广角内参 + ChArUco 手眼一键联合标定）。
 - **V3.59 / V3.60（阶段 1，已交付）**：`NERO_V359_Strategy.py` 45 项技能旋钮 + 技能名片 + 无夹爪多点悬停预演（V3.59）；V3.60 把默认技能 **EB** 改为严格还原 V3.58（悬停 100 mm、表格顺序 + 可信优先），加技能编号（EB/DP/HD/QH）、发布包运行时只读、仿真注入 6 个后端已有环境变量、仿真窗口技能页、每次仿真任务打分 `Y = s/(t*z)*100`。
 - **V3.61（已交付）**：第三个仿真场景 `stack_cups`（叠杯子，RoboDojo；两只 16 oz 红色 party 杯）；新模块 `NERO_V361_Cup_Stack.py` 离线 MuJoCo 松手试验 + URDF 严格 6-DoF 可达性试验，得出技能 **CS**（Cup Stack）9 个旋钮（第 ⑥ 组，`wired="study"`，**尚无运行代码读取**）；技能页每个区域可折叠 + 一键全部折叠/展开；技能名称后带 `[XX]` 缩写（控制台与仿真窗口一致）。**后端未改，机械臂在仿真里还不会自动叠杯子**（待 V3.62 加后端工具，需先和用户确认接入方式）。
@@ -101,7 +312,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
    用户只是报告现象、没有明确说“改”时，也默认**先分析、给方案、等确认**。
 3. **原话规则：“未来针对 USB-Camera 的策略改动，如果有影响到其他模式的话，要提前和我确认。”**
    （USB 相机 = 用户的 innomaker 1080P USB2.0 UVC 腕部相机，已封装在独立模块 `NERO_V349_Real_Wrist_Camera.py` 中，绝不污染仿真 `NERO_V326_Wrist_Camera.py`。）
-4. **每次代码更新：所有文件放在一个平铺的文件夹里交付**（不引用外部/嵌套的其他版本文件），保证用户运行的就是他以为的那个版本，同时提供一个同名 `.zip`。
+4. **每次代码更新：所有文件放在一个平铺的文件夹里交付**（不引用外部/嵌套的其他版本文件），保证用户运行的就是他以为的那个版本，同时提供一个同名 `.zip`。**不要直接往用户的文件夹里放文件**，给下载链接（GitHub 分支 zip / 附件），由用户自己替换。
 5. 用户是机械博士、做硬件/传感器出身，懂原理但不想被代码细节淹没；解释时讲“为什么”和“怎么验证”。
 6. 方案有取舍时说清楚代价和风险；不确定的事情说不确定，并给出用户能做的验证步骤（命令、点哪里、看什么）。
 7. 不要夸大测试结果：只在模拟 / 假数据上验证过的东西，要明确说“还没在真实硬件上验证”。
@@ -132,7 +343,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 - 测试**绝不能读写用户的真实目录**（`~/Downloads/cameracalib`、`~/Downloads/objectmodels`）：GUI 测试开头要改 `CAM.CALIB_PATH / CAM.LOCATE_PATH / CAM.CALIB_DIR` 到临时目录。
 - `check_release.sh` 必须 `rc=0` 才能交付。
 
-### 2.4 交付流程（逐条照做）
+### 2.4 交付流程（V3 时期写法；V4 的完整步骤见第一部分 H5，第 5 步的校验和命令仍然照用）
 1. 在一个**新的平铺文件夹** `NERO_V3_XX` 里工作，从上一个版本复制过来。
 2. 更新：`VERSION` 文件、`NERO_V313_Real_Robot.py` / `NERO_V312_Console.py` / `NERO_V347_Yolo_Perception.py` / `NERO_V349_Real_Wrist_Camera.py` 里的 `VERSION = "..."`；`README.md` 与 `CHANGELOG.md` 顶部加本版说明。
 3. `chmod +x *.sh tests/*.sh`。
@@ -141,7 +352,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 6. 跑 `bash tests/check_release.sh`，必须 `rc=0`（跑完若产生 `__pycache__`，再次清理并刷新 `SHA256SUMS.txt`）。
 7. 从工作目录打包 `NERO_V3_XX.zip`，保留 `.sh` 可执行权限。
 
-## 3. 用户的硬件和环境（已确认的事实）
+## 3. 用户的硬件和环境（V3 时期记录；V4 现状见第一部分 H2，冲突时以 H2 为准）
 
 - **电脑**：Ubuntu 22.04，笔记本 RTX 4060 Laptop 8 GB。控制台用 `/usr/bin/python3`（3.10.12），包在 `~/.local/lib/python3.10/site-packages`：torch 2.14.1+cu130（CUDA 可用）、numpy 1.26.4、cv2 4.11.0（pip 版 opencv-python）、ultralytics 8.4.174、clip、pyrealsense2。
 - **机械臂**：NERO 7DOF，**固件已升级至 V1.2.1（`NeroFW.V121`）**，USB-CAN（`can0`），AgileX `agx_arm_ros` / `pyAgxArm`；ROS2 Humble + MoveIt + cuRobo（GPU planner 独立进程）。
@@ -168,8 +379,10 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 9. **叠杯子运动安全（V3.63）**：持杯运动只朝规划时检查过余量的关节解执行；任何直线插补轨迹先经 `check_joint_path`（≥ 4°、≤ 5°/点）才执行；技能遇急停必须停下并经后端 `_v337_clear_latch` 解锁，不能在锁住时继续发运动。固定相机杯子感知只在 `NERO_V331_Fixed_Camera.py` 的 stack_cups 分支里，鸡蛋场景路径不变（`test_v3_31`）。
 10. **夹爪变体（V3.64 / V3.67–V3.69）**：`GripperProfile` 的实机选项（V3.67 `align_rotate_m`、`descent_stop_above_rim_m`、`wide_search_below_deg`；V3.68 `lenient_pick`、`plan_time_budget_s`、`remember_angles`；V3.69 `clear_view_before_verify`、`camera_decides_grip`；V3.71 `recheck_held_before_place`、`stack_by_cluster`、`perception_retries`、`recover_after_motion_failure`、`nested_dz_real_mm`）在 `OFFICIAL_PROFILE` / `so101_profile()` 中必须保持关闭（`test_v3_67` Y1）；新夹爪只能作为场景变体（`SCENES[...]['base']` + `'gripper'`）接入，`active_scene()` 返回基础场景；变体夹爪的 MJCF 必须保留后端用到的名字（`gripper_joint1` 开口 = 2000·q1、`gripper_joint2` = −q1、`gripper_link1/2`、`finger1/2_rubber_pad`、`gripper`/`gripper_force` 执行器、`gripper_coupling`）。原夹爪档案 `OFFICIAL_PROFILE` 的参数不能改（等于 V3.63 行为）。V3.76 起 SO-101 安装偏转默认 −90°（用户选定：工具水平、J7 = 0 时动指在上；V3.75 为 0°，V3.64–V3.74 为 −45°）。分类场景的框壁在 MuJoCo 里必须保持短段（半长 < 45 mm），否则后端冻结的 `V2-44 R2 BASKET RIM` 会把它削到 14 mm（`test_v3_76` I2）。
 11. **实机叠杯子（V3.65 / V3.66）**：实机杯子识别只能走 Camera调试页的 YOLOE 流水线（`NERO_V366`，复用 `det_yolo` / `_grab_frames` / `YP.fuse_depth` / `YP.locate_objects`），不另写识别方法、不退回颜色法；实机只能复用仿真的 `CupSkills` / 旋钮 / 夹爪档案（不在实机模块里另写一套技能逻辑）；实机运动只走 `RealPipeline.move_joint_path`（或 `move_and_settle`），必须经过关节限位 + 目标围栏 + 路径围栏检查；运行档位 ② ③ 必须先弹窗确认；`NERO_V365` 运行时只写 `NERO_CALIB_DIR/real_cup_task.json`。
+12. **`NERO_V325_Camera.py` 冻结（V4.x）**：一字不改，sha256 前缀 `82f2416d`；需要改 Camera调试页的行为时，在新模块里替换类方法（例：`NERO_V472_Wrist_Calib.py`）。
+13. **实机安全（V4.x）**：软件不自动使能 NERO；未用 NERO 数据微调的 VLA 模型禁止实机执行；没有验证的结果不许报成功（`unverified` / `UNCONFIRMED`）。
 
-## 5. 代码地图（截至 V3.60）
+## 5. 代码地图（V3 部分，截至 V3.60；V3.61 之后的模块见第一部分 H4）
 
 | 文件 | 作用 |
 | :--- | :--- |
@@ -220,7 +433,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
    - **痛点 B（画面下沿黑色夹爪阴影与塑封膜反光拉偏角点）**：**V3.58 方案**：开启 `CORNER_REFINE_SUBPIX` + `tryRefineMarkers`，并通过**干净子集去畸变 + 平面 RANSAC 单应性检验（`_clean_outlier_corners`）**自动剥离每张图里偏离 `> 1.15 px` 的 1–3 个孤立反光/夹爪遮挡坏角点（保留其余干净角点），而对 `>= 4` 个坏角点的运动模糊帧则整张剔除。
    - **痛点 C（起点偏左导致采样集中在左侧 + 纸面微翘）**：**V3.58 方案**：`plan_intr_auto_targets` 读取起点标定板实际位置 `s0_board["center_frac"]` 作为最远点采样种子，将四向及对角倾视基线提升至 `18°–28°`；`calibrate_eye_in_hand` 将 2D 深度比例因子 `alpha_z` 拓宽至 `[0.12, 1.85]`（以 `axy=1.0` 起算），并在自动采集达标后**一键同步保存 `wrist_intrinsics.json` 与 `wrist_handeye_calib.json`**。
 
-## 7. 版本简史（V3.43 – V3.82）
+## 7. 版本简史表（V3.43 – V3.85；V4 起只写在第 0 节）
 
 | 版本 | 核心改动内容 |
 | :--- | :--- |
@@ -266,7 +479,7 @@ NERO 7 自由度机械臂（AgileX，两指夹爪）+ MuJoCo 仿真 + GPT Agent 
 | **V3.66** | 实机杯子识别 = Camera 调试页 YOLOE 流水线（同一检测器 / 模型 / 取帧 / 3D 定位）+ 锥面杯轴 + 轮廓顶边量杯高 + 单杯 / 已叠好；YOLOE 不可用即终止；监控框画 YOLOE 轮廓 |
 | **V3.65** | 控制台「NERO实机任务」TAB：叠杯子 · SO-101 仿真技能和参数原样上实机（RealIO）；STS3215 夹爪驱动（位置 + 扭矩上限夹紧）；V313 关节路径执行（`/execute_trajectory` + 路径围栏）；运行档位 ①②③；替身当实机身体全流程测试 |
 
-## 8. 后续开发计划（V3.59–V3.69 已交付；V3.70 → V3.72：带噪仿真寻优与真机迁移，原编号顺延五版）
+## 8. 早期开发计划（历史记录：其中多数已交付或被 V4 路线替代，现在的待办以第一部分 H6 为准）
 
 ### 8.0 核心设计哲学（已与用户对齐确认）
 1. **一套大脑，两套身体（仿真与实机 100% 逻辑通用）**：
@@ -388,3 +601,5 @@ ightarrow$ `回起点姿态`，方便在夹爪未就绪时完整验证视觉定�
 - 在没有 `tkinter` / `DISPLAY` 的云端容器环境里，独立 `test_v3_XX_gui.py` 会打印 `skipped` 并返回 0；因此必须在非 GUI 单测（如 `test_v3_57.py` X5、`test_v3_58.py` Y5）中同时包含基于 `unittest.mock` 的 `run_console('sim')`、`run_console('real')` 和 `CameraTabUI` 交互回归测试，确保任何 UI 属性初始化顺序问题在无显示器环境下也能被 100% 捕获。
 - 真机 GUI 显示效果（行高、列宽、双画布缩放）最终以用户在 Ubuntu 22.04 实机上运行 `bash tests/check_release.sh` 及实测截图为准。
 - 不要在测试中联网下载模型；`ultralytics` 在单测中统一使用 `tests/v347_fake.py` 里的假模块（`F.install()` / `F.uninstall()`）。
+- 本地测试辅助脚本在 `tools/dev/`（`run_tests.sh` 逐文件跑测试、`fix_whitelists.py` 扩展版本白名单），运行时不使用。
+- 云端容器里 Tk 测试需要 `xvfb-run`，以及一个带 tk 的 Python 3.10（系统 python3 可能没有 `_tkinter`）。
