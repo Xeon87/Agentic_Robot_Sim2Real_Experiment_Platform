@@ -1035,7 +1035,7 @@ def general_egg_body_xml(name, xy):
         f'<body name="{name}" pos="{_f(xy[0], xy[1], 0.022)}">\n'
         f'            <freejoint/>\n'
         f'            <geom name="{name}_shell" type="ellipsoid" size="0.029 0.022 0.022" mass="0.045" '
-        f'rgba="0.90 0.78 0.62 1" friction="1.0 0.02 0.005" condim="4" solref="0.006 1" '
+        f'rgba="0.90 0.78 0.62 1" friction="1.0 0.02 0.005" condim="6" solref="0.006 1" '
         f'solimp="0.96 0.995 0.0005" margin="0.0003"/>\n'
         f'            <geom name="{name}_ballast" type="sphere" pos="0 0 -0.012" size="0.006" mass="0.015" '
         f'rgba="0 0 0 0" contype="0" conaffinity="0"/>\n'

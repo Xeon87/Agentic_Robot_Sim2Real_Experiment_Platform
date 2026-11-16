@@ -30,7 +30,8 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-VERSION = "V4.9.2"
+VERSION = "V4.9.3"
+MARKER_V493 = "V4.9.3 TASK-START RECOVERY + SAFETY STOP + SINGULARITY + EGG ROLL"
 MARKER_V491 = "V4.9.1 DENSE LINES + REACHABILITY"
 MARKER_V492 = "V4.9.2 REAL-LIKE PERCEPTION + LLM EVAL + COMPACT OUTPUTS"
 MARKER = "V4.8.9 GENERAL PICK&PLACE CHUNK LLM"
@@ -38,6 +39,7 @@ MARKER_V49 = "V4.9 GENERAL FACTS"
 PLAN_BUDGET_S = 2.0
 MIN_PLAN_MARGIN_DEG = 8.0      # V4.9: the executed path is checked at >= 4 deg; plan with room to spare
 GOOD_PLAN_MARGIN_DEG = 14.0
+SINGULAR_SIGMA_MIN = 0.08     # V4.9.3: smallest singular value of the Jacobian (position / 0.3 m); top-down poses >= 0.24
 DENSE_LINE_MARGIN_DEG = 5.0    # V4.9.1: every straight line the IO will execute, checked point by point (exec >= 4)
 MIN_PLACE_MARGIN_DEG = 5.0     # V4.9: release / above-target (the executed lowering line is checked at >= 4 deg)
 
@@ -229,6 +231,36 @@ class GeneralPickPlaceSkills:
                 return qs, dict(chk, ik_solver="fast_ik_45seeds")
         return None, None
 
+    def _sing_sigma(self, q) -> float:
+        """V4.9.3 SINGULARITY: smallest singular value of the arm Jacobian (position rows / 0.3 m, rotation rows in
+        rad) at q; NERO: 0 at J4 = 0 (elbow) and J6 = +-90 deg (wrist, J5 // J7); normal top-down poses >= 0.24"""
+        q = np.asarray(q, float)
+        T0 = self._fast.fk(q)
+        J = np.zeros((6, 7))
+        e = 1e-6
+        for i in range(7):
+            dq = q.copy()
+            dq[i] += e
+            T = self._fast.fk(dq)
+            J[:3, i] = (T[:3, 3] - T0[:3, 3]) / e / 0.3
+            dR = T[:3, :3] @ T0[:3, :3].T
+            J[3:, i] = np.array([dR[2, 1] - dR[1, 2], dR[0, 2] - dR[2, 0], dR[1, 0] - dR[0, 1]]) / (2 * e)
+        return float(np.linalg.svd(J, compute_uv=False)[-1])
+
+    def _sing_check(self, qs):
+        """-> (ok, min sigma, why) over a joint path (every other point)"""
+        worst, wq = 1e9, None
+        for q in list(qs)[::2] + [qs[-1]]:
+            v = self._sing_sigma(q)
+            if v < worst:
+                worst, wq = v, q
+        if worst >= SINGULAR_SIGMA_MIN:
+            return True, round(worst, 3), ""
+        j4, j6 = math.degrees(float(wq[3])), math.degrees(float(wq[5]))
+        near = "elbow J4 %.0f deg" % j4 if abs(j4) < 20.0 else ("wrist J6 %.0f deg" % j6 if abs(abs(j6) - 90.0) < 20.0 else "")
+        return False, round(worst, 3), (f"passes near a singular arm posture (Jacobian sigma {worst:.3f} < "
+                                        f"{SINGULAR_SIGMA_MIN}{'; ' + near if near else ''})")
+
     def _dense_line(self, q_start, p_end, R_end, step_m=0.004):
         """V4.9.1 DENSE LINE CHECK: the straight TCP line the IO will execute (IK continuity from q_start, one point
         every 4 mm / 2 deg, like SimGeneralIO.move_line) -> (qs or None, check dict)"""
@@ -252,6 +284,11 @@ class GeneralPickPlaceSkills:
             qp = list(r[0])
             qs.append(qp)
         chk = self.CK.check_joint_path(qs, margin_deg=DENSE_LINE_MARGIN_DEG, jump_deg=8.0)
+        if chk.get("ok"):
+            ok_s, sig, why_s = self._sing_check(qs)
+            chk = dict(chk, min_singularity_sigma=sig)
+            if not ok_s:
+                chk = dict(chk, ok=False, why=why_s)
         return (qs if chk.get("ok") else None), chk
 
     def _unlatch_if_needed(self, label: str) -> Tuple[bool, str]:
@@ -655,6 +692,46 @@ class GeneralPickPlaceSkills:
         gap = st.get("gap_mm", st.get("opening_mm"))
         return gap is not None and 4.0 <= float(gap) <= 68.0
 
+    def _trips(self) -> Optional[int]:
+        try:
+            return int(self.io.safety_trips()) if hasattr(self.io, "safety_trips") else None
+        except Exception:
+            return None
+
+    def _safety_hit(self, r, n0) -> bool:
+        """V4.9.3: did this motion end in a safety stop / a large tracking mismatch?"""
+        n1 = self._trips()
+        txt = str(r.get("error") or r.get("why") or "")
+        return bool(r.get("safety")) or (n0 is not None and n1 is not None and n1 > n0) or \
+            any(k in txt for k in ("TRACKING MISMATCH", "RUNAWAY", "SAFETY"))
+
+    def _safety_stop(self, tool, step, r, n0):
+        """V4.9.3 SAFETY STOP = STOP: no fallback motion; report what happened and the state now"""
+        facts = {"step": step, "motion_result": {k: r.get(k) for k in ("error", "why", "trip_reason",
+                                                                       "closest_joint_limit", "tcp_error_mm") if r.get(k)}}
+        n1 = self._trips()
+        if n0 is not None and n1 is not None:
+            facts["safety_stops"] = n1 - n0
+        held = None
+        try:
+            st = dict(self.io.gripper_state())
+            facts["gripper_now"] = st
+            held = self._held_now(st)
+        except Exception:
+            pass
+        if self.held or tool == "execute_place_chunk":
+            facts["object_still_held"] = held
+            if held is False:
+                facts["note_hold"] = ("the object is no longer held (the safety recovery released it); "
+                                      "look before doing anything else")
+                self.held = None
+                self.stage = "OBSERVED"
+        facts["note"] = ("the safety guard stopped the arm; no further motion was attempted by this tool. The "
+                         "simulator may need STOP+RECOVER (the next tool does it) or a restart if motions keep failing")
+        self.sim_suspect = True
+        self.io.emit(f"[WARN] [V4.9.3 GENERAL] {tool}: safety stop at {step} -> stopped (no fallback motion)")
+        return self._res(tool, False, facts, reason="SAFETY_STOP", nxt=["perceive_objects", "verify_and_park_chunk"])
+
     def execute_grasp_chunk(self, clamp_force_n=8.0, open_mm=None, **_):
         if not self.grasp_plan:
             return self._res("execute_grasp_chunk", False, reason="GRASP_NOT_PLANNED", nxt=["plan_grasp_chunk"])
@@ -664,10 +741,13 @@ class GeneralPickPlaceSkills:
         if not getattr(self.io, "motion_allowed", True):
             return self._res("execute_grasp_chunk", True, {"dry_run": True, "object_id": oid}, nxt=["plan_place_chunk"])
         self._unlatch_if_needed(f"V4.9 pregrasp {oid}")
+        n0 = self._trips()
         p_before = self._obj_xyz(oid)
         self.io.gripper_open(om)
         r = self.io.move_joints(f"V4.9 pregrasp {oid}", Q["pregrasp"])
         if not r.get("ok"):
+            if self._safety_hit(r, n0):
+                return self._safety_stop("execute_grasp_chunk", "pregrasp", r, n0)
             return self._res("execute_grasp_chunk", False, r, reason="PREGRASP_FAILED", nxt=["plan_grasp_chunk"])
         p_g, R_g = W["grasp"]
         p_mid = np.asarray(p_g, float) + np.array([0.0, 0.0, 0.015])
@@ -675,6 +755,8 @@ class GeneralPickPlaceSkills:
         if r.get("ok"):
             r = self.io.move_line(f"V4.9 grasp {oid}", p_g, self.CK.R_to_quat_xyzw(R_g), 0.012, strict=True)
         if not r.get("ok"):
+            if self._safety_hit(r, n0):
+                return self._safety_stop("execute_grasp_chunk", "descent", r, n0)
             self.io.move_line(f"V4.9 retreat {oid}", W["pregrasp"][0], self.CK.R_to_quat_xyzw(W["pregrasp"][1]), 0.035)
             return self._res("execute_grasp_chunk", False, r, reason="DESCENT_FAILED", nxt=["plan_grasp_chunk"])
         p_desc = self._obj_xyz(oid)
@@ -698,6 +780,9 @@ class GeneralPickPlaceSkills:
             return self._res("execute_grasp_chunk", False, facts, reason="OBJECT_NOT_HELD",
                              nxt=["perceive_objects", "preview_grasp"])
         r = self.io.move_line(f"V4.9 lift {oid}", W["lift"][0], self.CK.R_to_quat_xyzw(W["lift"][1]), 0.04)
+        if not r.get("ok") and self._safety_hit(r, n0):
+            self.held = oid if not self._held_lost() else None
+            return self._safety_stop("execute_grasp_chunk", "lift", r, n0)
         if not r.get("ok"):
             dropped = self._held_lost()
             facts.update({"lift": r})
@@ -978,6 +1063,17 @@ class GeneralPickPlaceSkills:
         qa, qb = np.asarray(q_now, float), np.asarray(qs[0], float)
         w_joint, at_joint = _clear_along([self._fast.fk(qa + (qb - qa) * (k / 20.0)) @ self.prof.T_tcp_grasp
                                           for k in range(1, 21)])
+        if line_ok:                                     # V4.9.3: the carry line too, as it will be executed
+            qcl, chcl = self._dense_line(q_now, p_above, R_tcp)
+            if not qcl:
+                line_ok = False
+                facts["carry_line_rejected"] = chcl.get("why")
+        if not line_ok:
+            qa_, qb_ = np.asarray(q_now, float), np.asarray(qs[0], float)
+            ok_s, sig_s, why_s = self._sing_check([qa_ + (qb_ - qa_) * (k / 20.0) for k in range(21)])
+            if not ok_s:
+                facts["problems"] = [f"the joint-space carry {why_s}"]
+                return self._res("plan_place_chunk", False, facts, reason="PLACE_PLAN_FAILED", nxt=["plan_place_chunk"])
         worst, worst_at = (w_line, (0, at_line)) if line_ok else (w_joint, (0, at_joint))
         facts["carry"] = "straight line at the lift orientation" if line_ok else "joint-space move (slow)"
         facts["carry_min_clearance_mm"] = None if worst is None or worst > 1e8 else round(worst, 1)
@@ -1020,9 +1116,12 @@ class GeneralPickPlaceSkills:
                              nxt=["verify_and_park_chunk"])
         oid = self.held
         self._unlatch_if_needed(f"V4.9 carry above {self.place_plan['target']}")
+        n0 = self._trips()
         via = self.place_plan.get("_via")
         if via is not None:
             r = self.io.move_line("V4.9 carry lift", via[0], self.CK.R_to_quat_xyzw(via[1]), 0.04)
+            if not r.get("ok") and self._safety_hit(r, n0):
+                return self._safety_stop("execute_place_chunk", "carry lift", r, n0)
             if not r.get("ok"):
                 return self._res("execute_place_chunk", False, dict(r, object_still_held=not self._held_lost()),
                                  reason="CARRY_LIFT_FAILED", nxt=["plan_place_chunk", "verify_and_park_chunk"])
@@ -1031,10 +1130,12 @@ class GeneralPickPlaceSkills:
             p_ab, R_ab = W["above_target"]
             r = self.io.move_line(f"V4.9 carry above {self.place_plan['target']}", p_ab, self.CK.R_to_quat_xyzw(R_ab),
                                   0.04)
-            if not r.get("ok") and not r.get("refused"):
-                pass
+            if not r.get("ok") and self._safety_hit(r, n0):         # V4.9.3: never fall back after a safety stop
+                return self._safety_stop("execute_place_chunk", "carry", r, n0)
         if not r.get("ok"):
             r = self.io.move_joints(f"V4.9 carry above {self.place_plan['target']}", Q["above_target"], slow=3.0)
+            if not r.get("ok") and self._safety_hit(r, n0):
+                return self._safety_stop("execute_place_chunk", "carry", r, n0)
         if not r.get("ok"):
             self._unlatch_if_needed("V4.9 recover after carry fail")
             lost = self._held_lost()
@@ -1045,6 +1146,8 @@ class GeneralPickPlaceSkills:
                              nxt=["perceive_objects", "verify_and_park_chunk"])
         r = self.io.move_line(f"V4.9 lower to {self.place_plan['target']}", W["release"][0],
                               self.CK.R_to_quat_xyzw(W["release"][1]), 0.015, strict=True)
+        if not r.get("ok") and self._safety_hit(r, n0):
+            return self._safety_stop("execute_place_chunk", "lower", r, n0)
         if not r.get("ok"):
             self._unlatch_if_needed("V4.9 recover after lower fail")
             lost = self._held_lost()
@@ -1878,6 +1981,73 @@ SimGeneralIO = _make_sim_io_class()
 TwinGeneralIO = _make_twin_io_class()
 
 
+_V493_SEEN = {"trips": 0}
+
+
+def recover_for_task(io, probe=True) -> Tuple[bool, str]:
+    """V4.9.3 TASK-START RECOVERY: a failed task must not block the next one unless the simulator is really broken.
+    1) STOP+RECOVER handshake when a latch is pending or new safety stops happened since the last task,
+    2) release a hold left over, 3) home, 4) small joint probe (J1 +2 deg and back) - one retry after another
+    STOP+RECOVER. Returns (ok, why); not ok = the simulator does not follow commands -> restart it."""
+    emit = io.emit
+    trips = lambda: (io.safety_trips() if hasattr(io, "safety_trips") else 0)
+
+    def _clear(tag):
+        if hasattr(io, "clear_latch"):
+            try:
+                ok, why = io.clear_latch(f"V4.9.3 task start {tag}")
+                emit(f"[INFO] [V4.9.3 RECOVER] STOP+RECOVER ({tag}): ok={ok} ({why})")
+            except Exception as exc:
+                emit(f"[WARN] [V4.9.3 RECOVER] STOP+RECOVER ({tag}) failed: {str(exc)[:160]}")
+
+    try:
+        n = int(trips())
+    except Exception:
+        n = 0
+    pending = False
+    try:
+        pending = bool(io.latch_pending()) if hasattr(io, "latch_pending") else False
+    except Exception:
+        pass
+    if pending or n > _V493_SEEN["trips"]:
+        _clear(f"latch_pending={pending}, safety stops {n - _V493_SEEN['trips']} since last task")
+    try:
+        st = dict(io.gripper_state())
+        if st.get("hold_active") or st.get("force_mode"):
+            io.gripper_open(60.0)
+            emit("[INFO] [V4.9.3 RECOVER] released the hold left over from the last task")
+    except Exception:
+        pass
+    why = "ok"
+    for attempt in (1, 2):
+        n0 = int(trips() or 0)
+        r = io.go_home(f"V4.9.3 task start home (try {attempt})")
+        ok = bool(r.get("ok", True))
+        if ok and probe and getattr(io, "motion_allowed", True):
+            try:
+                q0 = list(io.current_q())
+                q1 = list(q0)
+                q1[0] += 0.035
+                r1 = io.move_joints("V4.9.3 start probe", q1)
+                r2 = io.move_joints("V4.9.3 start probe back", q0) if r1.get("ok") else r1
+                ok = bool(r1.get("ok")) and bool(r2.get("ok"))
+                if not ok:
+                    why = f"joint probe failed: {(r2 or r1).get('error') or (r2 or r1).get('joint_error_deg')}"
+            except Exception as exc:
+                ok, why = False, f"joint probe error: {str(exc)[:160]}"
+        elif not ok:
+            why = f"home failed: {r.get('error')}"
+        if ok and int(trips() or 0) == n0:
+            _V493_SEEN["trips"] = int(trips() or 0)
+            emit(f"[INFO] [V4.9.3 RECOVER] simulator follows commands (try {attempt}) - task can start")
+            return True, "ok"
+        if ok:
+            why = "safety stop during the start probe"
+        _clear(f"retry after: {why}")
+    _V493_SEEN["trips"] = int(trips() or 0)
+    return False, why
+
+
 def gui_run_sim_task(ctx):
     """V4.8.10: called from NERO_V2_7_1_Unified_Backend.llm_run_task_cmd (# V3.43 A2) when NERO_SCENE=general_pick_place."""
     log = ctx["log"]
@@ -1898,7 +2068,16 @@ def gui_run_sim_task(ctx):
 
     def _run():
         if not dry_run:
-            ctx["start_check"](False)
+            ok, why = recover_for_task(io)
+            if ok:
+                try:
+                    ctx["start_check"](False)
+                except Exception as exc:           # V4.9.3: a blocked start retreat is not fatal - home + probe
+                    io.emit(f"[WARN] [V4.9.3 RECOVER] start posture check: {str(exc)[:200]} -> home + probe again")
+                    ok, why = recover_for_task(io)
+            if not ok:
+                io.emit(f"[FAIL] [V4.9.3 GENERAL] simulator state not recoverable ({why}) - restart the simulation")
+                return {"ok": False, "reason": "SIM_NOT_RECOVERABLE", "final": why}
         res = run_general_pick_place(io, cfg["task"], mode=mode, agent=ctx["agent"], llm_cfg=cfg)
         if res.get("final"):
             io.emit(f"[V4.8.10 GENERAL RESULT] {res['final']}")

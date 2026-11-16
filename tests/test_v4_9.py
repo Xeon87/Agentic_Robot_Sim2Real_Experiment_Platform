@@ -196,7 +196,7 @@ class TestV49(unittest.TestCase):
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
         self.assertEqual((v, RR.VERSION, GP.VERSION), (C.VERSION, C.VERSION, C.VERSION))
-        self.assertIn(v, ("V4.9", "V4.9.1", "V4.9.2"))
+        self.assertIn(v, ("V4.9", "V4.9.1", "V4.9.2", "V4.9.3"))
         self.assertEqual(G.MARKER, "V4.9 GENERAL GEOMETRY")
 
 

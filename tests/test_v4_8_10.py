@@ -129,7 +129,7 @@ class TestV4810GeneralPickPlaceSim(unittest.TestCase):
         import NERO_V312_Console as C
         import NERO_V343_Scenes as SC
 
-        self.assertIn(C.VERSION, ("V4.8.10", "V4.8.11", "V4.9", "V4.9.1", "V4.9.2"))
+        self.assertIn(C.VERSION, ("V4.8.10", "V4.8.11", "V4.9", "V4.9.1", "V4.9.2", "V4.9.3"))
         keys = [k for k, _lbl in C.SIM_SCENES]
         self.assertIn("general_pick_place", keys)
         self.assertIn("general_pick_place", SC.SCENES)
@@ -217,12 +217,15 @@ class TestV4810GeneralPickPlaceSim(unittest.TestCase):
         sk = GP.GeneralPickPlaceSkills(io)
         io.skills = sk
         self.assertTrue(sk.perceive_objects(prompts=["egg", "cup"], use_finetuned=True)["ok"])
-        self.assertTrue(sk.plan_grasp_chunk(object_id="egg_1", grasp_mode="equator_pinch",
-                                            pregrasp_height_mm=70.0, lift_height_mm=120.0, clearance_above_table_mm=5.0)["ok"])
-        self.assertTrue(sk.execute_grasp_chunk(open_mm=65.0, clamp_force_n=4.2)["ok"])
-        self.assertTrue(sk.plan_place_chunk(target_id_or_xyz="cup_1", place_mode="drop_into",
-                                            release_above_target_mm=30.0, xy_offset_mm=[0.0, 0.0], pitch_deg=0.0)["ok"])
-        self.assertTrue(sk.execute_place_chunk(release_open_mm=65.0, retreat_up_mm=70.0)["ok"])
+        # V4.9.3: V4.9 API (no grasp modes / hints; the old call put the fingertips 4.7 mm into the table)
+        self.assertTrue(sk.plan_grasp_chunk(object_id="egg_1", xy_offset_mm=[0, 0], grasp_z_offset_from_top_mm=-9,
+                                            closing_yaw_deg=90, pitch_deg=0, open_mm=60, yaw_tolerance_deg=30,
+                                            pregrasp_height_mm=80, lift_height_mm=150)["ok"])
+        self.assertTrue(sk.execute_grasp_chunk(clamp_force_n=8.0)["ok"])
+        self.assertTrue(sk.plan_place_chunk(target_id_or_xyz="cup_1", xy_offset_mm=[0, 0],
+                                            held_bottom_above_target_top_mm=15, yaw_change_deg=0,
+                                            approach_height_mm=40, release_open_mm=60, carry_lift_mm=0)["ok"])
+        self.assertTrue(sk.execute_place_chunk(retreat_up_mm=60)["ok"])
         self.assertTrue(sk.verify_and_park_chunk(action="clear_view_and_perceive", prompts=["egg", "cup"])["ok"])
 
     def test_05_gui_run_sim_task_contract(self):

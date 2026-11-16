@@ -93,7 +93,7 @@ def _egg(name, xy, d, rgba, yaw):
     q = (math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2))
     return (f'<body name="{name}" pos="{_f(xy[0], xy[1], 0.022)}" quat="{_f(*q)}"><freejoint/>'
             f'<geom name="{name}_shell" type="ellipsoid" size="0.029 0.022 0.022" mass="0.045" rgba="0.90 0.78 0.62 1" '
-            f'friction="1.0 0.02 0.005" condim="4" solref="0.006 1" solimp="0.96 0.995 0.0005" margin="0.0003"/>'
+            f'friction="1.0 0.02 0.005" condim="6" solref="0.006 1" solimp="0.96 0.995 0.0005" margin="0.0003"/>'
             f'<geom name="{name}_ballast" type="sphere" pos="0 0 -0.012" size="0.006" mass="0.015" rgba="0 0 0 0" '
             f'contype="0" conaffinity="0"/></body>')
 
