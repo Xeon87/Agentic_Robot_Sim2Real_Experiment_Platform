@@ -534,12 +534,185 @@ def on_wcalib_check(self):
     self._run(job)
 
 
+# ------------------------------------------------------------------ V4.8.6 CAMERA YMODEL MENU + STARTUP DEFAULTS
+MARKER_V486 = "V4.8.6 CAMERA YMODEL MENU + STARTUP DEFAULTS"
+
+
+def v486_canon_ft_list(cur_fts, ft_models, model_dir=""):
+    """V4.8.6: canonicalize fine-tuned model entries (e.g. absolute paths from locate_settings.json) against ft_models
+    from YP.list_models(model_dir), dropping stale or unmatched paths so menu checkboxes and v_ymodel stay 1-to-1."""
+    if not cur_fts:
+        return []
+    if ft_models:
+        out = []
+        for f in cur_fts:
+            fn = str(f or "").strip().replace("\\", "/")
+            if not fn:
+                continue
+            fbase = os.path.basename(fn)
+            matched = None
+            for m in ft_models:
+                mn = str(m).replace("\\", "/")
+                if fn == mn or fn.endswith("/" + mn) or mn.endswith("/" + fn) or (fbase and fbase == os.path.basename(mn)):
+                    matched = m
+                    break
+            if matched is not None and matched not in out:
+                out.append(matched)
+        return out
+    # When ft_models is empty: if model_dir is an existing directory with no fine-tuned models, clear stale paths
+    if model_dir and os.path.isdir(str(model_dir)):
+        return []
+    out = []
+    for f in cur_fts:
+        fn = str(f or "").strip()
+        if fn and fn not in out:
+            out.append(fn)
+    return out
+
+
+def _v486_list_ft_models(self):
+    base = self.YP.DEFAULT_MODEL
+    ydir = self.v_ydir.get() if hasattr(self, "v_ydir") else ""
+    all_models = self.YP.list_models(ydir) or []
+    return [m for m in all_models if m != base and (
+        "finetuned" in m or self.YP.finetune_card(os.path.join(ydir, m)) is not None
+    )]
+
+
+def v486_select_all_finetuned(self):
+    """V4.8.6: select all available fine-tuned models in Camera调试 -> 视觉定位 by default at startup."""
+    base = self.YP.DEFAULT_MODEL
+    cur_str = self.v_ymodel.get().strip() if hasattr(self, "v_ymodel") else base
+    base_name, _ = self.YP.parse_model_set(cur_str)
+    base_name = base_name or base
+    ft_models = _v486_list_ft_models(self)
+    if hasattr(self, "v_ymodel"):
+        self.v_ymodel.set(";".join([base_name] + list(ft_models)))
+    self._ymodel_initialized = True
+    self._update_ymodel_menu()
+    return list(ft_models)
+
+
+def _update_ymodel_menu(self):
+    """V3.83 / V4.8.6: Populate checkmenu with base model (locked checked) and fine-tuned models.
+    V4.8.6: canonicalize absolute/relative paths and default all available fine-tuned models to checked on startup."""
+    tk = self.tk
+    try:
+        self.menu_ymodel.delete(0, "end")
+    except Exception:
+        return
+    base = self.YP.DEFAULT_MODEL
+    self.menu_ymodel.add_checkbutton(label=f"原模型：{base}", state="disabled")
+    self.menu_ymodel.add_separator()
+    cur_str = self.v_ymodel.get().strip() if hasattr(self, "v_ymodel") else base
+    base_name, raw_fts = self.YP.parse_model_set(cur_str)
+    base_name = base_name or base
+    ydir = self.v_ydir.get() if hasattr(self, "v_ydir") else ""
+    ft_models = _v486_list_ft_models(self)
+    cur_fts = v486_canon_ft_list(raw_fts, ft_models, ydir)
+
+    # Default all fine-tuned models to checked on initial setup if not loaded from settings
+    if not getattr(self, "_ymodel_initialized", False) and not getattr(self, "_ymodel_loaded_from_settings", False) and ft_models:
+        cur_fts = list(ft_models)
+    self._ymodel_initialized = True
+    if hasattr(self, "v_ymodel"):
+        new_str = ";".join([base_name] + cur_fts)
+        if self.v_ymodel.get().strip() != new_str:
+            self.v_ymodel.set(new_str)
+
+    if not hasattr(self, "_ymodel_vars") or self._ymodel_vars is None:
+        self._ymodel_vars = {}
+    for k in list(self._ymodel_vars.keys()):
+        if k not in ft_models:
+            self._ymodel_vars.pop(k, None)
+
+    for ft in ft_models:
+        if ft not in self._ymodel_vars:
+            var = tk.BooleanVar(value=(ft in cur_fts))
+            self._ymodel_vars[ft] = var
+        else:
+            var = self._ymodel_vars[ft]
+            var.set(ft in cur_fts)
+
+        def _make_toggle(ft_name=ft, ft_var=var):
+            return lambda: self._on_ymodel_toggle(ft_name, ft_var.get())
+
+        disp = ft[len("finetuned/"):] if ft.startswith("finetuned/") else ft
+        self.menu_ymodel.add_checkbutton(label=f"精调：{disp}", variable=var, command=_make_toggle(ft, var))
+
+    self._refresh_ymodel_summary()
+
+
+def _on_ymodel_toggle(self, ft_name, is_checked):
+    """V4.8.6: toggle a fine-tuned model and remove any matching absolute/relative path when unchecked."""
+    base, raw_fts = self.YP.parse_model_set(self.v_ymodel.get() if hasattr(self, "v_ymodel") else "")
+    base = base or self.YP.DEFAULT_MODEL
+    ft_models = _v486_list_ft_models(self) or list(getattr(self, "_ymodel_vars", {}).keys())
+    fts = v486_canon_ft_list(raw_fts, ft_models, self.v_ydir.get() if hasattr(self, "v_ydir") else "")
+    canon_target = v486_canon_ft_list([ft_name], ft_models, "")
+    target = canon_target[0] if canon_target else ft_name
+    t_base = os.path.basename(str(target).replace("\\", "/"))
+    if is_checked:
+        if target not in fts:
+            fts.append(target)
+    else:
+        fts = [f for f in fts if f != target and f != ft_name and os.path.basename(str(f).replace("\\", "/")) != t_base]
+    if hasattr(self, "_ymodel_vars") and target in self._ymodel_vars:
+        try:
+            self._ymodel_vars[target].set(bool(is_checked))
+        except Exception:
+            pass
+    if hasattr(self, "v_ymodel"):
+        self.v_ymodel.set(";".join([base] + fts))
+    self._refresh_ymodel_summary()
+
+
+def _refresh_ymodel_summary(self):
+    """V4.8.6: show '原模型' (not 'yoloe-26s-seg.pt' and not stale '原模型 + 2 精调模型') when no fine-tuned model is checked."""
+    base, raw_fts = self.YP.parse_model_set(self.v_ymodel.get() if hasattr(self, "v_ymodel") else "")
+    ft_keys = list(getattr(self, "_ymodel_vars", {}).keys())
+    if ft_keys:
+        fts = v486_canon_ft_list(raw_fts, ft_keys, "")
+    else:
+        fts = [f for f in raw_fts if str(f or "").strip()]
+    if not fts:
+        txt = "原模型"
+    elif len(fts) == 1:
+        f0 = str(fts[0]).replace("\\", "/")
+        if "finetuned/" in f0:
+            disp = f0.split("finetuned/", 1)[1].split("/")[0]
+        elif "/" in f0:
+            disp = f0.split("/")[1]
+        else:
+            disp = f0
+        txt = f"原模型 + {disp}"
+    else:
+        txt = f"原模型 + {len(fts)} 精调模型"
+    try:
+        self.mb_ymodel.configure(text=txt)
+    except Exception:
+        pass
+
+
+def _locate_autoload(self):
+    """V4.8.6: run _locate_autoload and then default all available fine-tuned models to selected at startup."""
+    orig = _ORIG.get("_locate_autoload")
+    if orig is not None:
+        orig(self)
+    if os.environ.get("NERO_YMODEL_KEEP_SAVED") != "1":
+        try:
+            v486_select_all_finetuned(self)
+        except Exception:
+            pass
+
+
 PATCHES = ("_wrist_autoload", "on_intr_save", "on_intr_clear_calib", "on_intr_compute", "on_wcalib_compute",
-           "on_wcalib_save", "on_wcalib_check", "_capture_wrist_sample")
+           "on_wcalib_save", "on_wcalib_check", "_capture_wrist_sample",
+           "_update_ymodel_menu", "_on_ymodel_toggle", "_refresh_ymodel_summary", "_locate_autoload")
 
 
 def patch_class(C):
-    """install the V4.7.2 methods on CameraTabUI (idempotent); call BEFORE the Camera tab is built"""
+    """install the V4.7.2 + V4.8.6 methods on CameraTabUI (idempotent); call BEFORE the Camera tab is built"""
     if getattr(C, "_v472_patched", False):
         return
     g = globals()

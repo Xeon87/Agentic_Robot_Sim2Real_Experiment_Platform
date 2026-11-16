@@ -1,3 +1,82 @@
+## V4.9 (2026-11-16) — 通用 pick & place：只给 LLM 测量事实（几何、试算、实测），不给经验；夹住按接触判断；随机场景测试
+
+起因：用户 11-15 仿真日志「Pick up cup_1 and stack it into cup_2」失败。backend.log 证实前两次根本没夹住（cup_1 没有任何夹持记录），却因 `gap >= 4 mm` 被当成夹住、抬升后报 `OBJECT_SLIPPED_ON_LIFT`，LLM 因此去加大夹紧力；第三次手指插进杯壁，MuJoCo 发散（qvel 2349 rad/s、QACC NaN）。
+
+- **新模块 `NERO_V49_Geometry.py`（不认识任何物体类别）**：
+  - `FingerModel`：夹爪碰撞盒（仿真 = 后端 MJCF 原装夹爪：指垫 29×4×60 mm 以抓取点为中心，指垫内面 = 张开/2 − 4 mm，掌体在抓取点上方 55–120 mm；实机 = `NERO_V481_Agx_Geom.boxes_in_G`）。
+  - `HeightMap`：桌面俯视 2.5-D 高度图（每格最高表面 + 属于哪个物体）；仿真用 `MjProbe`（无机器人的场景副本，射线），实机暂用检测框（`from_boxes`，空心物体看成实心，偏保守）。
+  - `describe()`：每个物体的中心 / 顶 / 底、占地主轴与尺寸、过中心的两条俯视截面（分段）、侧面轮廓（6 个高度的外 / 内半宽，仿真）、开口空腔（底高、口沿高、深度、开口半宽）。
+  - `preview_grasp()`：给定抓取点 / 合拢方向 / 张开量：抓取位姿下手指和掌体有没有插进任何物体或桌面、合拢时每个指垫在哪碰到什么、先碰的一侧会把物体推多远、两边都碰到时的指垫间距。
+  - `cloud_clearance()`、`held_cloud_from_desc()`：被夹物体（按测量几何的点云）+ 手指在放置 / 搬运时离其他物体和桌面的间隙。
+  - `relations()`：物体之间的几何关系 inside / on（套叠时外面那只不算「在里面」）。
+- **`NERO_V489_General_Pick_Place.py` 工具层重写**（7 个工具，严格 JSON schema）：
+  - 新工具 `preview_grasp`（不动）；`plan_grasp_chunk` 参数全部是数值（偏移、相对顶面高度、合拢方向 `closing_yaw_deg`、允许旋转 `yaw_tolerance_deg`、俯仰、张开量、预抓 / 抬升高度），**删掉 `grasp_mode` / `place_mode` 枚举、工具说明里的例子数值、`end_offset` 里写死的鸡蛋偏移、`rim_pinch` / `top_down` 默认高度、`min_held_gap_mm`**；系统提示里没有数字和策略。
+  - 抓取规划：先做手指几何检查（插进物体、指尖低于安全区 5 mm 都拒绝并写明原因），再 IK；关节余量规划 ≥ 8°（V4.8.11 用 4.5° 的解，执行时 3.9° 被拒）；多个方向取余量最大的。
+  - **夹住 = `hold_active` 或两个指垫都接触（仿真）**，不再看开口；没夹住在夹紧这一步就报 `OBJECT_NOT_HELD` 并原样返回夹紧测量；抬升后再查一次，并报物体是否跟着升起（`object_rose_mm`）、下探 / 夹紧时物体被推动多少。
+  - 放置 `plan_place_chunk`：被夹物体按自己的测量几何定位（中心对目标中心 + 偏移，最低点 = 目标顶 + `held_bottom_above_target_top_mm`，可为负 = 放进去），检查被夹物体、合拢 / 张开的手指离其他物体的间隙，以及搬运路径的间隙；可选 `carry_lift_mm`（搬运前先竖直抬高）；没夹东西不许放（V4.8.11 抬升失败后照样执行放置）。
+  - 搬运优先走保持姿态的直线（不绕竖直轴转，被夹物体不摆），否则关节运动并放慢 3 倍（11-16 孪生里杯子被甩到 98° 后撞杯、发散）。
+  - `verify_and_park_chunk` 返回几何关系；这次看不到或明显被挡住的物体按上次测量参与判断（叠好的杯子下面那只从上面看不见）。
+  - 任何工具执行中出现仿真安全停，结果里附 `safety_events`。
+- **仿真感知通用化**：`TwinGeneralIO` / `SimGeneralIO` 用 `ProbeVision`（任何 `obj_<label>_<n>` 物体，不再按名字写死尺寸表）；`TwinGeneralIO(world_xml=…, hold_names=…)` 可跑任意场景。
+- **`NERO_V343_Scenes.general_carton_geoms_xml`**：蛋托左右壁拆成两段（后端冻结的 V2-44 R2 BASKET RIM 规则把 110 mm 长的左壁削成 14 mm，见 11-15 backend.log 第 8 行）。
+- **新模块 `NERO_V49_Random_Scenes.py`**：随机场景（方块 / 罐 / 球 / 鸡蛋 / 杯子 → 盒子 / 碗 / 杯子 / 盘子，0–2 个干扰物，只在原装夹爪俯抓可达的区域里摆放）+ 任务句 + 按仿真真值判断成功。
+- **测试**：`tests/test_v4_9.py`（G1–G8，不需要 mujoco）、`tests/test_v4_9_twin.py`（用户场景蛋入杯 + 叠杯；随机 8 个场景 ≥ 50 %）、`tests/v49_random_eval.py`（批量评测）、`tests/v49_reasoner.py`（**测试用的几何推理替身，不是 LLM、不进产品**：只用工具返回的事实）。旧测试 test_v4_8_9 / 4_8_10 / 4_8_11 改为新参数（行为有意改变）；版本白名单补 V4.8.6–V4.9。
+- **孪生实测（测试替身推理）**：随机场景 101–150 号 46/50（92 %，这批在调试替身时看过）；从没用过的 201–230 号 27/30（90 %）；80 次全程没有仿真安全停，平均每次 16 次工具调用、约 11 s（孪生）。按任务分：球 / 方块 / 罐 / 鸡蛋放进盒子、碗、杯子或放到盘子上 68/68；杯子放进盒子 4/9、叠杯 1/3（这批里）——都是夹爪够不到 / 杯子 95 mm 宽放进 100 mm 左右的盒子太紧；另外用户原场景的蛋入杯、叠杯（tests/test_v4_9_twin.py T1）都成功
+- **没做 / 没验证**：容器里没有 LLM API key，**真实 LLM 没跑过**（成功率是替身推理的）；实机感知还没有高度图（检测框退化，空心物体看成实心）；后端 GUI 仿真只跑原来的 general_pick_place 场景（随机场景只在孪生里）；真机未验证。
+
+## V4.8.11 — 纯物理/几何暴露与 3D 旋转包围盒感知 (100% LLM 推理)
+
+- **移除 `gripper_specs` 与系统提示中的经验阈值**：删除了 `35..45 mm`、`-20..-25 mm` 等硬编码经验数值，仅暴露夹爪硬件几何尺寸（`max_opening_mm`、`palm_width_mm`、`finger_pad_depth_mm`、`finger_thickness_each_mm`、`outer_width_formula_mm`），将抓取/放置几何推理 100% 交由 LLM 完成。
+- **通用 3D 旋转包围盒（OBB → 世界系 AABB）感知 (`_body_world_aabb`)**：取消对 `origin == "rim"` 的特殊高度修正，统一通过物体局部 3D 包围盒经姿态四元数旋转后的世界系 AABB 计算任意倾角下的 `center_xyz_m`、`top_z_m`、`size_mm`、`height_mm`、`yaw_deg`、`tilt_deg` 与 `upright`。
+- **底层局部连续 IK 与物理持物同步 (`SimGeneralIO.move_line` / `_sync_held_state`)**：消除下降段首尾 J7 分支跳变并实时同步 `hold_active` 掉落状态。
+
+## V4.8.10 — MuJoCo 仿真新增 `general_pick_place` 场景（复用实机 General Pick&Place 通用技能）
+
+- **新增仿真场景 `general_pick_place`**：在 `NERO_V312_Console.py` (`SIM_SCENES`)、`start_nero_sim.sh` (`SCENE344`) 与 `NERO_V343_Scenes.py` 中注册 `general_pick_place`（桌面同时放置 2 个鸡蛋 `obj_egg_1/2`、4 槽蛋托 `slot_1..4` 与 2 个杯子 `obj_cup_1/2`，使用原装 AgileX 夹爪），便于在无实机时直接在仿真中验证通用抓取/放置流程。
+- **仿真适配器与无头孪生 (`NERO_V489_General_Pick_Place.py`)**：新增 `SimGeneralIO(CK.BackendIO)`、`TwinGeneralIO(CK.TwinIO)` 与 `gui_run_sim_task(ctx)`，将实机 `GeneralPickPlaceSkills` + `run_general_pick_place` 原封不动接入仿真。
+- **后端 A2 调度 (`NERO_V2_7_1_Unified_Backend.py`)**：仅在 `# V3.43 A2` 块内新增 `general_pick_place` 分发，所有冻结文件与 A2 外部字节哈希保持不变。
+
+## V4.8.9 (2026-11-13) — ⑤ General pick&place 通用 LLM Chunk 编排与夹爪一键归零
+
+- **新增 ⑤ General pick&place 通用实机任务分支 (`NERO_V489_General_Pick_Place.py`)**：
+  - 向 LLM Agent 开放 6 个带底层安全护栏的原子级 Chunk 工具：`perceive_objects`（动态跨类别 YOLOE 提示词联合 3D 识别）、`plan_grasp_chunk`（`equator_pinch` / `end_offset` / `rim_pinch` / `top_down` 抓取位姿与 `2.0 s` 预算熔断）、`execute_grasp_chunk`、`plan_place_chunk`（`drop_into` / `vertical_insert` / `place_on`）、`execute_place_chunk` 与 `verify_and_park_chunk`。
+  - 支持 `plan` / `hover` / `execute` 三种档位，完美适配如 `pick up the egg and put it into the cup` 等跨物体自然语言指令，同时严格保留原有「① 叠杯子」与「② 鸡蛋入蛋托」逻辑不变。
+- **夹爪一键电动合拢归零 (`NERO_V48_Gripper_UI.py`)**：点击「开始归零」后自动以 `0.5` 轻力电动合拢两指并自动失能，直接进入「已合拢」确认步，无需再手动用力推丝杆或分两次点击失能。
+
+## V4.8.8 (2026-11-13) — Agentic 实机任务全链路风险修复与性能优化
+
+- **夹爪 3D 自滤波包络盒适配 (`RealIO.gripper_boxes`)**：根据当前激活夹爪动态生成 `AgxToolModel` 3D 包络盒（涵盖原装夹爪/`Softfin` 指尖、转接座与腕部相机支架；`tight=True` 仅保留双指轮廓用于遮挡与抓杯下界判断），解决原装爪/`Softfin` 叠杯时点云自滤波错位问题。
+- **抓蛋偏心判定与长轴告警适配 (`RealEggSkills._egg_cfg` & `pick_egg`)**：结合 `NERO_V481_Agx_Geom.egg_held_gap_mm()` 动态设定 `Softfin`（`8..46 mm`）与原装刚性爪端头夹取（`30..48 mm`）的偏心阈值及告警文案，消除包裹式夹取或尖端夹取时的误报松爪。
+- **悬停预演安全搬运 (`run_hover`)**：在 `fill_egg_holder` 场景下使用 `egg_open_mm()` 张爪预设，并在存在 `plan["_transit"]` 时按安全分段搬运轨迹执行悬停预演；同时修复腕部相机 `calib_eih` 为 `numpy.ndarray` 时的布尔判断异常。
+- **桌面整理与分拣保守桌面高度对齐 (`RealTidySkills` & `RealSortSkills`)**：`perceive_sort_items` 透传 `fence_z_table_m`，`RealTidySkills.ingest` 与 `RealSortSkills.plan_sort_item` 统一采用 `conservative_table_z`（相机桌面与安全区 `z_table` 取较高安全值），并在 `_state_check` 中按 `self.table_z` 同步平移桌面与容器碰撞盒。
+- **腕部相机微调前安全围栏护栏 (`_wrist_recheck_egg_grasp` & `_wrist_recheck_slot_place`)**：执行腕部微调 `move_line` 前先校验 `_line_qs` 与 `_check_path_fence`，若触碰围栏、支架碰桌或关节受限则自动取消微调、保持主相机安全位姿。
+- **实机叠杯规划期支架防撞桌与围栏预检 (`CupSkills.plan_cup_stack` & `RealIO.cup_path_validator`)**：在实机 `PipelineArm` 下对候选叠杯角度预检 `NERO_V4613_Tool_Collision` 与多边形安全围栏，避免执行期才因围栏越界中断。
+- **多候选 IK 零成本 `T_l7` 几何预筛 (`_plan_grasp_candidates` & `_slot_pass`)**：在调用 `cuRobo` / `FastIK` 前直接由目标 TCP 反推 `T_l7` 预检腕部支架离桌高度，毫秒级剔除碰桌姿态，大幅降低多候选规划延迟。
+
+## V4.8.7 (2026-11-13) — Agentic 实机任务默认接入 cuRobo IK（45 种子 FastIK 备选兜底）+ SmolVLA / 训练显存自动释放
+- 新增 `NERO_V487_CuRobo_IK.py`：
+  - `ensure_curobo_server` / `stop_curobo_server` / `curobo_status`：管理 `NERO_GPU_Planner_Server.py`（`127.0.0.1:8765`）守护进程生命周期，短 TTL 状态缓存避免离线时阻塞内层循环。
+  - `solve_pose` / `solve_chain`：将目标 `(xyz, R)` 转换至 `tcp_link` 四元数，默认优先调用 `cuRobo`（`GPUPlannerClient.plan_pose(engine="curobo")`），并用 `FastArm.fk` 复核位姿精度、关节限位与底座 J1 转角（`≤ 120°`）；当 `cuRobo` 未启动、已为 SmolVLA 释放显存或某姿态无解时，零报错自动回退至 45 种子 `FastArm`（`fast_ik_45seeds`）。
+- `NERO_V313_Real_Robot.py`、`NERO_V312_Console.py`：
+  - 将 `NERO_GPU_Planner_Server.py` 移出 `STALE_SCRIPTS`（实机启动环境检查不再误杀 `cuRobo` 服务）。
+  - 实机第 1 步环境检查（`step_env`）与「▶ 一键启动」（`run_all_then_gripper`）自动调用 `ensure_curobo_server()` 检查并按需拉起 `cuRobo` 服务。
+- `NERO_V365_Real_Cup_Task.py`、`NERO_V362_Cup_Skills.py`：
+  - `RealEggSkills`（`_fast_ik_chain`、`_slot_pass`、`_plan_transit`、`plan_egg_place`）与 `CupSkills.ik_chain` 默认优先使用 `cuRobo` 求解，自动回退 45 种子 `FastIK`；规划结果与日志新增 `"ik_solver": "curobo" | "fast_ik_45seeds"` 字段；点击「执行 / 规划」启动实机任务时若 `cuRobo` 此前已被释放，自动尝试后台唤醒。
+- `NERO_V4_Console_Tab.py`、`NERO_V4_SmolVLA_Policy.py`、`NERO_V381_Yolo_Train.py`：
+  - 在加载 SmolVLA 模型（`on_connect_and_load` / `on_prepare_all` / `load_external`）、启动 SmolVLA 闭环推理（`on_run_vla_loop` / `on_run_agent_task` / `run_vla_closed_loop`）、启动 `lerobot-train` 微调训练（`on_train_lerobot`）以及启动 YOLOE 1280 精调训练（`TrainJob.start`）前，自动调用 `stop_curobo_server` 关闭 `cuRobo` 释放约 1.5–2.2 GB GPU 显存。
+- 测试：新增 `tests/test_v4_8_7.py`（5 项）；版本白名单补 V4.8.7。
+
+## V4.8.6 (2026-11-12) — 开机默认连原装夹爪 + 一键启动联动双相机 + 精调模型默认全选与「原模型」显示 + Crash / Smol VLA 闪退修复
+- `NERO_V312_Console.py`：
+  - 开机默认选中 NERO 原装夹爪（`agx_gripper`，`v486_gripper_startup_default`）并在启动后自动发起夹爪通讯连接（`v486_gripper_startup_connect`）。
+  - 「实机NERO调试」页「▶ 一键启动」（`run_all_then_gripper`）在启动机械臂 6 步流程与夹爪的同时，通过 Tk 主线程同步连接并启动主相机（D435i）与腕部相机（`v486_start_cameras`）。
+  - 修复 `crash.log` 中鼠标滚轮滑过 `ttk.Combobox` 下拉弹出框（Tcl popdown 路径为 `str`）时的 `AttributeError: 'str' object has no attribute 'winfo_class'`（`_wheel_skip_widget`）。
+  - 修复 `native_crash.log` 与点击「Smol VLA实机任务」页面时的 `libX11.so.6(_XReply+0x37f)` <- `XSync` <- `Tk_DeleteErrorHandler` <- `Tk_MeasureChars` 段错误（`signal 11`）：在 `tk.Tk()` 前通过 `v486_disable_color_emoji_fonts`（`logs/fontconfig_no_emoji.conf` + `libfontconfig.so.1` 内存配置注入）及 `start_nero.sh` 屏蔽 `NotoColorEmoji.ttf` 彩色位图字体（消除 XRender `BadGlyph 144, request 138.22`），并在 `_v312_pick_cjk_font` 中同步将 `TkFixedFont` 等命名字体设为 `Noto Sans CJK SC`。
+- `NERO_V472_Wrist_Calib.py`（类级替换 `CameraTabUI` 方法，`NERO_V325_Camera.py` 冻结未改）：
+  - `_update_ymodel_menu` / `_on_ymodel_toggle` / `_refresh_ymodel_summary` / `_locate_autoload`：将 `locate_settings.json` 中的精调模型绝对/相对路径统一归一化到 `finetuned/<目录>/<文件>.pt`（`v486_canon_ft_list`），开机默认勾选全部可选精调模型（`v486_select_all_finetuned`），取消勾选全部精调模型时按钮显示「原模型」（不再残留显示「原模型 + 2 精调模型」或底层文件名）。
+- `NERO_V4_Console_Tab.py`、`NERO_V359_Strategy.py`、`NERO_V379_Camera_Lab.py`：延迟 VLA 页后台硬盘检查线程至控件布局完成后启动；移除残留高平面 Emoji（`💾`/`📂`/`🔍`/`📷`）。
+- 测试：新增 `tests/test_v4_8_6.py`（5 项）；版本白名单补 V4.8.6。
+
 ## V4.8.5 (2026-11-12) — 鸡蛋夹得更靠中间 + IK 多试姿态
 - `NERO_V365_Real_Cup_Task.py`：`_carton_base_z`（蛋托放在相机实测的桌面上，差 ≤ 15 mm 时）用于夹蛋最小距离、插槽手指离蛋托顶、搬运扫掠、蛋托放置高度；指尖 / 本体离桌仍用较高的桌面。`_fast_ik_chain` 在 5 个常用种子失败后试 16 个结构化 + 24 个固定随机种子（`_extra_ik_seeds`，底座转动 ≤ 120°），选余量正常且离当前关节最近的解。夹取方向全部被拒时按原因计数写进 detail。
 - 测试：新 `tests/test_v4_8_5.py`；版本白名单补 V4.8.5。

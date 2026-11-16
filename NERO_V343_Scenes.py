@@ -57,6 +57,12 @@ SCENES = {
                   "summary": "7 items (fruit, snack, stationery, toy, paper ball, mouse) + fruit bowl / pen box / toy box "
                              "/ trash bin; the intent layer plans, asks, previews, the robot tidies, then reports",
                   "base": "sort_items"},
+    # V4.8.10 GENERAL PICK&PLACE SCENE: eggs + 4-slot carton + two party cups on the table (official gripper)
+    "general_pick_place": {
+        "label": "general_pick_place - 通用 Pick&Place · NERO 原装夹爪（鸡蛋 / 蛋托 / 杯子）",
+        "summary": "2 eggs, 4-slot egg carton, and 2 party cups on the table for General Pick&Place LLM verification",
+        "base": "sort_items",
+    },
 }
 SCENES_REV = "V3.76"       # VERSION above stays "V3.44" (tests pin it); stack_cups V3.61, stack_cups_so101 V3.64, sort_items V3.72 (bins V3.75)
 HERE = Path(__file__).resolve().parent
@@ -111,6 +117,8 @@ def tf_body_map():
     """semantic name -> MuJoCo body; TF child frame = 'sim_' + semantic (object_pose('valuables_box') etc.)."""
     if active_scene() == "stack_cups":                  # V3.61 STACK CUPS SCENE
         return {n: n for n in CUP_NAMES}
+    if selected_variant() == "general_pick_place":      # V4.8.10 GENERAL PICK&PLACE SCENE
+        return {n: n for n in GENERAL_OBJECT_NAMES}
     if active_scene() == "sort_items":                  # V3.72 SORT ITEMS SCENE
         return {n: n for n in SORT_ITEM_NAMES}
     return {"obj_valuables_box": "obj_valuables_box", "obj_safe_handle": "obj_safe_handle",
@@ -120,6 +128,8 @@ def tf_body_map():
 def hold_object_names():
     if active_scene() == "stack_cups":                  # V3.61 STACK CUPS SCENE
         return list(CUP_NAMES) + list(LEGACY_HIDDEN)
+    if selected_variant() == "general_pick_place":      # V4.8.10 GENERAL PICK&PLACE SCENE
+        return list(GENERAL_OBJECT_NAMES) + list(LEGACY_HIDDEN)
     if active_scene() == "sort_items":                  # V3.72 SORT ITEMS SCENE
         return list(SORT_ITEM_NAMES) + list(LEGACY_HIDDEN)
     return ["obj_valuables_box", "obj_safe_handle"] + list(LEGACY_HIDDEN)
@@ -155,6 +165,8 @@ def planning_boxes(model=None, data=None):
     """MoveIt boxes for the fixed safe walls: (id, centre, full size) - same format as the egg-holder list."""
     if active_scene() == "stack_cups":                  # V3.61: the cups are movable objects, no fixed obstacles
         return []
+    if selected_variant() == "general_pick_place":      # V4.8.10: carton floor box
+        return [("general_egg_carton_base", (-0.53, 0.0, 0.010), (0.11, 0.13, 0.020))]
     if active_scene() == "sort_items":                  # V3.72: the two open bins (walls + floor) are fixed obstacles
         return [(n, c, tuple(2.0 * v for v in h)) for n, c, h, _rgba in sort_bin_boxes()]
     return [(n, c, tuple(2.0 * v for v in h)) for n, c, h in static_boxes()]
@@ -185,7 +197,7 @@ def door_angle(model, data):
 
 
 def planning_rotated_boxes(model, data):
-    if active_scene() in ("stack_cups", "sort_items"):  # V3.61 / V3.72: no hinged door in these scenes
+    if active_scene() in ("stack_cups", "sort_items", "general_pick_place"):  # V3.61 / V3.72 / V4.8.10: no hinged door
         return []
     return door_boxes(door_angle(model, data))
 
@@ -331,6 +343,8 @@ def make_store_in_safe_xml(original_xml_path, visual_quality=None):
     V3.61: the backend calls this for every non-default scene (unchanged A2 block) -> stack_cups is dispatched here."""
     if active_scene() == "stack_cups":
         return make_stack_cups_xml(original_xml_path, visual_quality=visual_quality)
+    if selected_variant() == "general_pick_place":      # V4.8.10 GENERAL PICK&PLACE SCENE
+        return make_general_pick_place_xml(original_xml_path, visual_quality=visual_quality)
     if active_scene() == "sort_items":                  # V3.72 SORT ITEMS SCENE
         return make_sort_items_xml(original_xml_path, visual_quality=visual_quality)
     import numpy as np
@@ -1002,3 +1016,135 @@ def sort_task_state(poses):
 
 
 set_sort_layout(_layout_from_env())                     # V4.8.3 TIDY DESK: the console's scene choice (NERO_SCENE)
+
+
+# ============================================================================= V4.8.10 GENERAL PICK&PLACE SCENE
+GENERAL_OBJECT_NAMES = ("obj_egg_1", "obj_egg_2", "obj_cup_1", "obj_cup_2")
+GENERAL_EGG_XY = {"obj_egg_1": (-0.43, -0.05), "obj_egg_2": (-0.43, 0.05)}
+GENERAL_CUP_XY = {"obj_cup_1": (-0.34, -0.16), "obj_cup_2": (-0.34, 0.16)}
+GENERAL_SLOTS = {
+    "slot_1": (-0.505, -0.032, 0.032),
+    "slot_2": (-0.505, 0.032, 0.032),
+    "slot_3": (-0.555, -0.032, 0.032),
+    "slot_4": (-0.555, 0.032, 0.032),
+}
+
+
+def general_egg_body_xml(name, xy):
+    return (
+        f'<body name="{name}" pos="{_f(xy[0], xy[1], 0.022)}">\n'
+        f'            <freejoint/>\n'
+        f'            <geom name="{name}_shell" type="ellipsoid" size="0.029 0.022 0.022" mass="0.045" '
+        f'rgba="0.90 0.78 0.62 1" friction="1.0 0.02 0.005" condim="4" solref="0.006 1" '
+        f'solimp="0.96 0.995 0.0005" margin="0.0003"/>\n'
+        f'            <geom name="{name}_ballast" type="sphere" pos="0 0 -0.012" size="0.006" mass="0.015" '
+        f'rgba="0 0 0 0" contype="0" conaffinity="0"/>\n'
+        f'        </body>'
+    )
+
+
+def general_carton_geoms_xml():
+    # Compact 2x2 egg carton at (-0.53, 0.00) with base + outer rim + cross dividers
+    rgba = "0.76 0.68 0.56 1"
+    boxes = [
+        ("general_carton_floor", (-0.530, 0.000, 0.005), (0.055, 0.065, 0.005)),
+        ("general_carton_front", (-0.478, 0.000, 0.016), (0.003, 0.065, 0.016)),
+        ("general_carton_back", (-0.582, 0.000, 0.016), (0.003, 0.065, 0.016)),
+        # V4.9 CARTON WALL SEGMENTS: the backend's frozen V2-44 R2 BASKET RIM rule cut the 110 mm long left wall
+        # (half length >= 45 mm, near the old basket) to 14 mm (backend.log 11-15); two 55 mm halves stay intact
+        ("general_carton_left_a", (-0.5575, -0.062, 0.016), (0.0275, 0.003, 0.016)),
+        ("general_carton_left_b", (-0.5025, -0.062, 0.016), (0.0275, 0.003, 0.016)),
+        ("general_carton_right_a", (-0.5575, 0.062, 0.016), (0.0275, 0.003, 0.016)),
+        ("general_carton_right_b", (-0.5025, 0.062, 0.016), (0.0275, 0.003, 0.016)),
+        ("general_carton_div_x", (-0.530, 0.000, 0.016), (0.002, 0.062, 0.014)),
+        ("general_carton_div_y", (-0.530, 0.000, 0.016), (0.052, 0.002, 0.014)),
+    ]
+    return "\n    ".join(
+        f'<geom name="{n}" type="box" pos="{_f(*c)}" size="{_f(*h)}" rgba="{rgba}" '
+        f'friction="1.0 0.02 0.002" solref="0.006 1" solimp="0.95 0.99 0.001" contype="1" conaffinity="1"/>'
+        for n, c, h in boxes
+    )
+
+
+def general_world_xml(bare=False):
+    eggs = "\n    ".join(general_egg_body_xml(n, xy) for n, xy in GENERAL_EGG_XY.items())
+    cups = "\n    ".join(cup_body_xml(n, xy, origin=CUP_ORIGIN) for n, xy in GENERAL_CUP_XY.items())
+    carton = general_carton_geoms_xml()
+    if bare:
+        return carton + "\n    " + eggs + "\n    " + cups
+    legacy = "\n".join(
+        f'    <body name="{n}" pos="{-8 - 0.1 * i:.1f} -8 -8"><freejoint/><geom name="{n}_geom" type="sphere" size="0.001" '
+        f'mass="0.001" rgba="0 0 0 0" contype="0" conaffinity="0"/></body>' for i, n in enumerate(LEGACY_HIDDEN))
+    return f"""
+    <!-- ============================================================
+         NERO V4.8.10 general_pick_place SCENE - eggs + carton + cups, table top z = 0
+         ============================================================ -->
+    <geom name="v5_grid_floor" type="plane" pos="0 0 -0.28" size="6 6 0.1"
+          material="v343_floor_mat" friction="1.2 0.01 0.001" contype="1" conaffinity="1"/>
+    <geom name="play_table" type="box" pos="-0.385 0 -0.03" size="0.335 0.38 0.03" material="v343_table_mat"
+          friction="1.2 0.01 0.001" solref="0.008 1" solimp="0.96 0.995 0.0005" margin="0.001"
+          contype="1" conaffinity="1"/>
+    <geom name="nero_support_top" type="box" pos="-0.025 0 -0.008" size="0.025 0.085 0.008"
+          rgba="0.15 0.16 0.18 1" contype="0" conaffinity="0"/>
+    <geom name="nero_support_vertical" type="box" pos="-0.055 0 -0.075" size="0.008 0.085 0.067"
+          rgba="0.15 0.16 0.18 1" contype="0" conaffinity="0"/>
+    <geom name="nero_support_lower_jaw" type="box" pos="-0.080 0 -0.134" size="0.030 0.085 0.008"
+          rgba="0.15 0.16 0.18 1" contype="0" conaffinity="0"/>
+    <!-- 4-slot egg carton -->
+    {carton}
+    <!-- 2 eggs -->
+    {eggs}
+    <!-- 2 party cups -->
+    {cups}
+    <!-- legacy hidden bodies -->
+{legacy}
+    <light name="eggscene_key" pos="0.25 -0.65 2.20" dir="-0.30 0.22 -1" directional="true" castshadow="true"
+           diffuse="0.92 0.84 0.72" specular="0.22 0.20 0.18"/>
+    <light name="eggscene_fill" pos="-1.20 0.80 1.50" dir="0.55 -0.25 -1" directional="true" castshadow="false"
+           diffuse="0.34 0.40 0.48" specular="0.05 0.06 0.08"/>
+"""
+
+
+def make_general_pick_place_xml(original_xml_path, visual_quality=None):
+    """V4.8.10: MJCF builder for the general_pick_place simulation scene (official gripper)."""
+    import re
+    import numpy as np
+    src = Path(original_xml_path).resolve()
+    xml = src.read_text(encoding="utf-8")
+    tex = src.parent / "_nero_v343_scene_textures"
+    tex.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(34301)
+    nz = rng.normal(0.0, 1.0, (256, 256))
+    nz = (nz + np.roll(nz, 3, 0) + np.roll(nz, 4, 1)) / 3.0
+    _png(tex / "floor_grey.png", np.clip(np.stack([102 + 6 * nz, 110 + 6 * nz, 127 + 6 * nz], -1), 0, 255))
+    _png(tex / "table_white.png", np.clip(np.stack([236 + 1.5 * nz, 236 + 1.5 * nz, 234 + 1.5 * nz], -1), 0, 255))
+    assets = f"""
+    <texture name="v343_sky" type="skybox" builtin="gradient" rgb1="0.54 0.64 0.76" rgb2="0.92 0.90 0.84"
+             width="512" height="3072"/>
+    <texture name="v343_floor_tex" type="2d" file="{(tex / 'floor_grey.png').as_posix()}"/>
+    <texture name="v343_table_tex" type="2d" file="{(tex / 'table_white.png').as_posix()}"/>
+    <material name="v343_floor_mat" texture="v343_floor_tex" texrepeat="7 7" reflectance="0.02" specular="0.16"
+              shininess="0.08"/>
+    <material name="v343_table_mat" texture="v343_table_tex" texrepeat="2.2 1.7" reflectance="0.05"
+              specular="0.25" shininess="0.2"/>
+""" + CUP_ASSETS
+    if re.search(r"<asset\b[^>]*/>", xml):
+        xml = re.sub(r"<asset\b[^>]*/>", "<asset>\n" + assets + "\n</asset>", xml, count=1)
+    elif "<asset" in xml:
+        xml = re.sub(r"(<asset\b[^>]*>)", lambda m: m.group(1) + "\n" + assets, xml, count=1)
+    else:
+        xml = xml.replace("<worldbody>", "<asset>\n" + assets + "\n</asset>\n\n<worldbody>", 1)
+    print("[V4.8.10 SCENE] general_pick_place: 2 eggs + 4-slot carton + 2 cups, official AgileX gripper", flush=True)
+    xml = xml.replace("<worldbody>", "<worldbody>\n" + general_world_xml(), 1)
+    if visual_quality is not None:
+        xml = visual_quality(xml)
+    eq = "\n        ".join(
+        f'<connect name="hold_{o}" body1="link7" body2="{o}" anchor="0 0 0" active="false" '
+        f'solref="0.008 1" solimp="0.98 0.995 0.001"/>' for o in hold_object_names())
+    if "</equality>" in xml:
+        xml = xml.replace("</equality>", "        " + eq + "\n    </equality>", 1)
+    else:
+        xml = xml.replace("</mujoco>", "    <equality>\n        " + eq + "\n    </equality>\n</mujoco>", 1)
+    out = src.with_name("_nero_motor_v343_general_pick_place_tmp.xml")
+    out.write_text(xml, encoding="utf-8")
+    return str(out)

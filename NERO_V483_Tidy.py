@@ -878,11 +878,20 @@ def make_real_tidy_skills(io, log=print):
         def _state_check(self, q, opening_mm=None, extra_parts=None):
             if opening_mm is None:
                 opening_mm = (self.io.gripper_state() or {}).get("gap_mm") or 60.0
-            return CC.assess(None, q, opening_mm, CC.world_boxes("sort_items"), extra_parts=extra_parts,
+            dz_t = np.array([0.0, 0.0, float(self.table_z)])
+            wb = [(n, np.asarray(c, float) + dz_t, R, h) for n, c, R, h in CC.world_boxes("sort_items")]
+            return CC.assess(None, q, opening_mm, wb, extra_parts=extra_parts,
                              gripper="agx_gripper", T_flange_cam=T_cam)
 
         def ingest(self, res, merge=False):
-            self.table_z = float(res.get("table_z_m") or 0.0)
+            import NERO_V365_Real_Cup_Task as RT
+            cam = res.get("_cam") or getattr(self.io, "last_cam", None) or {}
+            obs_zt = dict(res)
+            if obs_zt.get("fence_z_table_m") is None and cam.get("z_table") is not None:
+                obs_zt["fence_z_table_m"] = float(cam["z_table"])
+            zt, zt_src, _zt_err = RT.conservative_table_z(obs_zt, try_harder=True)
+            self.table_z = float(zt)
+            self.table_z_source = zt_src
             by_label = {v["label"]: k for k, v in SC.SORT_ITEMS.items()}
             by_label.update({a: by_label[l] for l, a in KIND_ALIASES if l in by_label})
             best = {}

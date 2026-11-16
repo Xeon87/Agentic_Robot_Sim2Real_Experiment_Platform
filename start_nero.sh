@@ -42,6 +42,9 @@ SORT372="$HERE/NERO_V372_Sort_Skills.py"      # V3.72 SORT ITEMS AGENT (sort_ite
 STORE44="$HERE/NERO_V44_Storage.py"           # V4.4 EMBODIED_AI DRIVE STORAGE (LeRobot venv / models / datasets / training on the drive)
 WORKER44="$HERE/NERO_V44_SmolVLA_Worker.py"    # V4.4 SMOLVLA DRIVE WORKER (runs inside the drive venv)
 VLATAB4="$HERE/NERO_V4_Console_Tab.py"         # V4.x VLA / LeRobot console tab
+CUROBO487="$HERE/NERO_V487_CuRobo_IK.py"       # V4.8.7 cuRobo real IK + SmolVLA VRAM release
+GPP489="$HERE/NERO_V489_General_Pick_Place.py"  # V4.8.9 General Pick&Place LLM chunks
+GEOM49="$HERE/NERO_V49_Geometry.py"  # V4.9 measured geometry for General Pick&Place
 
 if [[ "${1:-}" == "--sim" ]]; then
   shift
@@ -60,7 +63,7 @@ echo "============================================================"
 echo " NERO ${RELEASE} — console"
 echo " Folder: $HERE"
 echo "============================================================"
-for f in "$SIM" "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" "$CAM" "$YOLO347" "$WRIST349" "$STRAT359" "$REALCUP365" "$GRIP365" "$CUPYOLO366" "$TASKREC368" "$SORT372" "$VISION374" "$COLL375" "$STALE377" "$BENCH378" "$LAB379" "$TRAIN381" "$STORE44" "$WORKER44" "$VLATAB4" "$HERE/SHA256SUMS.txt"; do
+for f in "$SIM" "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" "$CAM" "$YOLO347" "$WRIST349" "$STRAT359" "$REALCUP365" "$GRIP365" "$CUPYOLO366" "$TASKREC368" "$SORT372" "$VISION374" "$COLL375" "$STALE377" "$BENCH378" "$LAB379" "$TRAIN381" "$STORE44" "$WORKER44" "$VLATAB4" "$CUROBO487" "$GPP489" "$GEOM49" "$HERE/SHA256SUMS.txt"; do
   [[ -f "$f" ]] || die "NERO file missing from this folder: $f"
 done
 if ( cd "$HERE" && sha256sum --quiet -c SHA256SUMS.txt ) >/dev/null 2>&1; then
@@ -74,7 +77,7 @@ fi
 # The console uses only the Python standard library + tkinter.
 PY="${NERO_CONSOLE_PYTHON:-/usr/bin/python3}"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
-"$PY" -m py_compile "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" "$STRAT359" "$REALCUP365" "$GRIP365" "$CUPYOLO366" "$TASKREC368" "$VISION374" "$COLL375" "$STALE377" "$BENCH378" "$LAB379" "$TRAIN381" "$STORE44" "$WORKER44" "$VLATAB4" || die "py_compile failed: $CONSOLE / $REAL / $JOINT / $CONS / $SAFE"
+"$PY" -m py_compile "$CONSOLE" "$REAL" "$JOINT" "$CONS" "$SAFE" "$STRAT359" "$REALCUP365" "$GRIP365" "$CUPYOLO366" "$TASKREC368" "$VISION374" "$COLL375" "$STALE377" "$BENCH378" "$LAB379" "$TRAIN381" "$STORE44" "$WORKER44" "$VLATAB4" "$CUROBO487" "$GPP489" "$GEOM49" || die "py_compile failed: $CONSOLE / $REAL / $JOINT / $CONS / $SAFE"
 "$PY" -c "import tkinter" 2>/dev/null || die "tkinter missing for $PY (sudo apt install python3-tk), or run the simulation directly: ./start_nero.sh --sim"
 bash -n "$SIM" || die "syntax error in $SIM"
 
@@ -121,5 +124,25 @@ if [[ "${NERO_NO_NATIVE_TRACE:-0}" != "1" ]] && command -v gcc >/dev/null 2>&1; 
     export NERO_NATIVE_CRASH_LOG="$HERE/logs/native_crash.log"
     export LD_PRELOAD="$_ct_so${LD_PRELOAD:+:$LD_PRELOAD}"
   fi
+fi
+# V4.8.6 FONTCONFIG COLOR-EMOJI GUARD: reject NotoColorEmoji.ttf so libXft 2.3.4 does not trigger XRender BadGlyph (144) segfaults
+if [[ "${NERO_ALLOW_COLOR_EMOJI:-0}" != "1" && -z "${FONTCONFIG_FILE:-}" ]]; then
+  cat > "$HERE/logs/fontconfig_no_emoji.conf" << 'FCEOF'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
+  <selectfont>
+    <rejectfont>
+      <glob>*ColorEmoji*</glob>
+      <glob>*Emoji*</glob>
+      <pattern>
+        <patelt name="color"><bool>true</bool></patelt>
+      </pattern>
+    </rejectfont>
+  </selectfont>
+</fontconfig>
+FCEOF
+  export FONTCONFIG_FILE="$HERE/logs/fontconfig_no_emoji.conf"
 fi
 exec "$PY" "$CONSOLE" "${ARGS[@]}" 2> >(tee -a "$HERE/logs/stderr.log" >&2)

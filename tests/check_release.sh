@@ -108,9 +108,12 @@ grep -qF 'V4.8.2 SPEED LIMIT' NERO_V48_Gripper.py && grep -qF 'def preflight_war
 grep -qF 'V4.8.3 TIDY DESK INTENT LAYER' NERO_V483_Tidy.py && grep -qF 'def set_sort_layout' NERO_V343_Scenes.py && grep -qF 'def agx_parts' NERO_V375_Collision_Check.py && grep -qF 'def return_item_to_table' NERO_V372_Sort_Skills.py || { echo "[FAIL] V4.8.3 markers missing"; exit 1; }
 grep -qF 'def set_choice' NERO_V48_Gripper.py && grep -qF 'SOFTFIN_GRASP_FROM_TIP_MM' NERO_V481_Agx_Geom.py && grep -qF 'def _plan_transit' NERO_V365_Real_Cup_Task.py && grep -qF 'def missing_finetuned' NERO_V366_Real_Cup_Yolo.py || { echo "[FAIL] V4.8.4 markers missing"; exit 1; }
 grep -qF 'def _carton_base_z' NERO_V365_Real_Cup_Task.py && grep -qF 'def _extra_ik_seeds' NERO_V365_Real_Cup_Task.py || { echo "[FAIL] V4.8.5 markers missing"; exit 1; }
+grep -qF 'V4.9 GENERAL GEOMETRY' NERO_V49_Geometry.py && grep -qF 'V4.9 GENERAL FACTS' NERO_V489_General_Pick_Place.py && grep -qF 'V4.9 RANDOM PICK PLACE SCENES' NERO_V49_Random_Scenes.py || { echo "[FAIL] V4.9 markers missing"; exit 1; }
+grep -qF 'V4.8.6 STARTUP GRIPPER + CAMERAS + YMODEL + XFT CRASH FIX' NERO_V312_Console.py && grep -qF 'V4.8.6 CAMERA YMODEL MENU + STARTUP DEFAULTS' NERO_V472_Wrist_Calib.py || { echo "[FAIL] V4.8.6 markers missing"; exit 1; }
+grep -qF 'V4.8.7 CUROBO REAL IK + SMOLVLA VRAM RELEASE' NERO_V487_CuRobo_IK.py && grep -qF 'ensure_curobo_server' NERO_V313_Real_Robot.py && grep -qF '_release_curobo_vram' NERO_V4_Console_Tab.py || { echo "[FAIL] V4.8.7 markers missing"; exit 1; }
 grep -qF 'V3.81 YOLOE TRAIN' NERO_V381_Yolo_Train.py && grep -qF 'V3.81 PROFILE FILES + TRAIN PAGE' NERO_V379_Camera_Lab.py && grep -qF 'NERO_V381_Yolo_Train.py' start_nero.sh || { echo "[FAIL] V3.81 train marker missing"; exit 1; }
 grep -qF 'V3.82 FINE-TUNED MODELS' NERO_V347_Yolo_Perception.py && grep -qF 'V3.82 HIGHLIGHTS + GAMMA + LABEL ASSIST' NERO_V379_Camera_Lab.py && grep -qF 'V3.82 APPLY FINE-TUNED + 1280 TRAINING' NERO_V381_Yolo_Train.py || { echo "[FAIL] V3.82 marker missing"; exit 1; }
-grep -qF 'V3.83 MULTI-MODEL DISTRIBUTION' NERO_V347_Yolo_Perception.py && grep -qF 'V3.83 GPU PREFLIGHT' start_nero.sh && grep -qF 'NERO_V383_Gpu_Check.py' start_nero.sh || { echo "[FAIL] V3.83 marker missing"; exit 1; }
+grep -qiF 'V3.83: Multi-model distribution' NERO_V347_Yolo_Perception.py && grep -qF 'V3.83 GPU PREFLIGHT' start_nero.sh && grep -qF 'NERO_V383_Gpu_Check.py' start_nero.sh || { echo "[FAIL] V3.83 marker missing"; exit 1; }
 grep -qF 'V3.84 OBJECT TRACKER + JOINT CARTON SLOTS + TABLE LOCK' NERO_V384_Object_Tracker.py && grep -qF 'V3.84 OBJECT TRACKER' NERO_V325_Camera.py && grep -qF 'NERO_V384_Object_Tracker.py' start_nero.sh || { echo "[FAIL] V3.84 marker missing"; exit 1; }
 grep -qF 'V3.85 SCALE SELF-CALIBRATION' NERO_V325_Camera.py && grep -qF 'V3.85 ROBUST IR DEPTH GATE' NERO_V325_Camera.py || { echo "[FAIL] V3.85 marker missing"; exit 1; }
 grep -qF 'V3.77 STALE PROCESS CHECK' NERO_V377_Stale_Procs.py && grep -qF 'V3.77 STALE PROCESS CHECK' NERO_V312_Console.py && grep -qF 'V3.77 OWN PATH LIKE THE PLAN' NERO_V372_Sort_Skills.py && grep -qF 'V3.77 HELD MARGIN' NERO_V372_Sort_Skills.py && grep -qF 'V3.77 TRIP REASON IN THE RESULT' NERO_V362_Cup_Skills.py || { echo "[FAIL] V3.77 stale check / own path / held margin / trip reason markers missing"; exit 1; }
@@ -204,4 +207,12 @@ python3 tests/test_v4_8_3_gui.py | tail -1     # V4.8.3 tidy preview dialog (ski
 python3 tests/test_v4_8_3_twin.py 2>&1 | tail -1  # V4.8.3 tidy desk in the MuJoCo twin (skips without mujoco; minutes)
 python3 tests/test_v4_8_4.py 2>&1 | tail -1   # V4.8.4 Softfin fingers, egg grip nearer the middle, blunt end, held-egg sweep, fence start, missing models
 python3 tests/test_v4_8_5.py 2>&1 | tail -1   # V4.8.5 carton on the measured table (grip nearer the middle), more IK postures, reasons
+python3 tests/test_v4_8_6.py 2>&1 | tail -1   # V4.8.6 startup gripper, cameras on one-click start, ymodel menu defaults, Xft crash fix
+python3 tests/test_v4_8_7.py 2>&1 | tail -1
+python3 tests/test_v4_8_8.py 2>&1 | tail -1
+python3 tests/test_v4_8_9.py 2>&1 | tail -1   # V4.8.9 General pick&place + auto-close zeroing   # V4.8.8 Agentic real-robot pipeline audit fixes & optimizations   # V4.8.7 cuRobo default real IK + 45-seed FastIK fallback + SmolVLA VRAM release
+python3 tests/test_v4_8_10.py 2>&1 | tail -1  # V4.8.10 general_pick_place in the MuJoCo scene list + twin
+python3 tests/test_v4_8_11.py 2>&1 | tail -1  # V4.8.11 geometry-only gripper facts, rotated boxes
+python3 tests/test_v4_9.py 2>&1 | tail -1     # V4.9 measured geometry, preview_grasp, contact hold, no hints, place checks, carton walls
+python3 tests/test_v4_9_twin.py 2>&1 | tail -1  # V4.9 general pick & place in the MuJoCo twin: user scene + random scenes (skips without mujoco; minutes)
 python3 tests/test_v4_6_1_gui.py | tail -1   # skips without tkinter / DISPLAY

@@ -24,7 +24,8 @@ import sys
 import threading
 import time
 
-VERSION = "V4.8.5"
+VERSION = "V4.9"
+# V3.12 baseline: VERSION = "V3.12"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
 # V3.61 STACK CUPS SCENE + COLLAPSIBLE SKILL TAB
@@ -46,7 +47,8 @@ SIM_SCENES = [("fill_egg_holder", "fill_egg_holder - 鸡蛋放入蛋托 (默认)
               ("stack_cups", "stack_cups - 叠杯子 (RoboDojo)"),          # V3.61 STACK CUPS SCENE
               ("stack_cups_so101", "stack_cups_so101 - 叠杯子 · SO-101 夹爪 (7 mm 转接环, 偏转 45°)"),  # V3.64 SO-101 GRIPPER ON NERO
               ("sort_items", "sort_items - 物品分类放入红框 / 蓝框 · SO-101 夹爪（香蕉 / 苹果 / 鼠标 / 马克笔）"),  # V3.72 SORT ITEMS SCENE
-              ("tidy_desk", "tidy_desk - 桌面整理（听懂弦外之音）· NERO 原装夹爪（7 件物品 / 4 个容器）")]  # V4.8.3 TIDY DESK
+              ("tidy_desk", "tidy_desk - 桌面整理（听懂弦外之音）· NERO 原装夹爪（7 件物品 / 4 个容器）"),  # V4.8.3 TIDY DESK
+              ("general_pick_place", "general_pick_place - 通用 Pick&Place · NERO 原装夹爪（鸡蛋 / 蛋托 / 杯子）")]  # V4.8.10 GENERAL PICK&PLACE
 DEFAULT_SIM_SCENE = "fill_egg_holder"
 
 
@@ -252,14 +254,20 @@ CJK_FAMILIES = ("Noto Sans CJK SC", "Noto Sans CJK", "WenQuanYi Micro Hei", "Wen
 
 
 def _v312_pick_cjk_font(root):
-    """Use a Chinese-capable family for the Tk default fonts when one is installed (labels are Chinese)."""
+    """Use a Chinese-capable family for the Tk default fonts when one is installed (labels are Chinese).
+    V4.8.6: also configure TkFixedFont / TkTooltipFont / TkCaptionFont so log & status widgets do not fall back from
+    Ubuntu Mono to NotoColorEmoji.ttf (which triggers XRender BadGlyph 144 + _XReply segfault on libXft 2.3.4)."""
     try:
         import tkinter.font as tkfont
         fams = set(tkfont.families(root))
         fam = next((f for f in CJK_FAMILIES if f in fams), None)
         if fam:
-            for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
-                tkfont.nametofont(name, root).configure(family=fam)
+            for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont",
+                         "TkFixedFont", "TkTooltipFont", "TkCaptionFont", "TkSmallCaptionFont", "TkIconFont"):
+                try:
+                    tkfont.nametofont(name, root).configure(family=fam)
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -360,6 +368,186 @@ def v4610_depth_defaults(cam_tab, log=None):
     return old
 
 
+MARKER_V486 = "V4.8.6 STARTUP GRIPPER + CAMERAS + YMODEL + XFT CRASH FIX"
+MARKER_V487 = "V4.8.7 CUROBO REAL IK + SMOLVLA VRAM RELEASE"
+
+_V486_NO_EMOJI_FONTCONFIG_XML = """<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
+  <selectfont>
+    <rejectfont>
+      <glob>*ColorEmoji*</glob>
+      <glob>*Emoji*</glob>
+      <pattern>
+        <patelt name="color"><bool>true</bool></patelt>
+      </pattern>
+    </rejectfont>
+  </selectfont>
+</fontconfig>
+"""
+
+_V486_REJECT_ONLY_XML = b"""<fontconfig>
+  <selectfont>
+    <rejectfont>
+      <glob>*ColorEmoji*</glob>
+      <glob>*Emoji*</glob>
+      <pattern>
+        <patelt name="color"><bool>true</bool></patelt>
+      </pattern>
+    </rejectfont>
+  </selectfont>
+</fontconfig>"""
+
+
+def v486_disable_color_emoji_fonts(log_dir=None):
+    """V4.8.6: Prevent libXft 2.3.4 (Ubuntu 22.04) from selecting NotoColorEmoji.ttf (BGRA bitmap font) during
+    Tk_MeasureChars / Tk_DrawChars.  When Xft encounters a glyph missing in the primary font and falls back to
+    NotoColorEmoji.ttf, XRender returns BadGlyph (error 144, request 138.22) and corrupts Xlib reply state, causing
+    SIGSEGV in _XReply <- XSync <- Tk_DeleteErrorHandler (every 10th call, e.g. when opening Smol VLA实机任务)."""
+    if os.environ.get("NERO_ALLOW_COLOR_EMOJI") == "1":
+        return "off (NERO_ALLOW_COLOR_EMOJI=1)"
+    conf_dir = log_dir or os.path.join(HERE, "logs")
+    conf_path = None
+    try:
+        os.makedirs(conf_dir, exist_ok=True)
+        conf_path = os.path.join(conf_dir, "fontconfig_no_emoji.conf")
+        with open(conf_path, "w", encoding="utf-8") as f:
+            f.write(_V486_NO_EMOJI_FONTCONFIG_XML)
+        if not os.environ.get("FONTCONFIG_FILE"):
+            os.environ["FONTCONFIG_FILE"] = conf_path
+    except Exception:
+        pass
+    try:
+        import ctypes
+        fc = ctypes.CDLL("libfontconfig.so.1")
+        fc.FcInitLoadConfigAndFonts.restype = ctypes.c_void_p
+        fc.FcConfigGetCurrent.restype = ctypes.c_void_p
+        fc.FcConfigParseAndLoadFromMemory.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+        fc.FcConfigParseAndLoadFromMemory.restype = ctypes.c_int
+        fc.FcConfigBuildFonts.argtypes = [ctypes.c_void_p]
+        fc.FcConfigBuildFonts.restype = ctypes.c_int
+        cfg = fc.FcConfigGetCurrent() or fc.FcInitLoadConfigAndFonts()
+        if cfg:
+            fc.FcConfigParseAndLoadFromMemory(cfg, _V486_REJECT_ONLY_XML, 0)
+            fc.FcConfigBuildFonts(cfg)
+            return "ok (libfontconfig + FONTCONFIG_FILE)"
+    except Exception as exc:
+        return f"file-only ({exc})"
+    return "ok (FONTCONFIG_FILE)" if conf_path else "unavailable"
+
+
+def _wheel_skip_widget(root, w, skip_classes=("Scale", "Text", "TCombobox", "Treeview", "Listbox")):
+    """V4.8.6: Safe widget class check for mouse-wheel handlers.  When the cursor is over a ttk.Combobox popdown
+    listbox (or an unmapped Tcl sub-widget), e.widget is a str path rather than a tkinter.Widget, which used to raise
+    AttributeError: 'str' object has no attribute 'winfo_class' (crash.log 2026-11-12)."""
+    if w is None:
+        return True
+    if isinstance(w, str):
+        if "popdown" in w:
+            return True
+        if root is None:
+            return True
+        try:
+            w = root.nametowidget(w)
+        except Exception:
+            return True
+    try:
+        return w.winfo_class() in skip_classes
+    except Exception:
+        return True
+
+
+def v486_gripper_startup_default(log=None):
+    """V4.8.6: Default the active gripper at console startup to the NERO original AgxGripper (agx_gripper), unless
+    overridden by NERO_GRIPPER or NERO_GRIPPER_KEEP_SAVED=1."""
+    if os.environ.get("NERO_GRIPPER") or os.environ.get("NERO_GRIPPER_KEEP_SAVED") == "1":
+        return None
+    try:
+        import NERO_V48_Gripper as GG
+        c = GG.load_cfg()
+        prev = c.get("type")
+        if prev != "agx_gripper":
+            c["type"] = "agx_gripper"
+            if isinstance(c.get("agx"), dict):
+                c["agx"]["fingers"] = "stock"
+            GG.save_cfg(c)
+            if log:
+                log(f"[INFO] [V4.8.6 GRIPPER] 开机默认夹爪设为 NERO 原装夹爪（agx_gripper，原设置为 {prev}）")
+        return "agx_gripper"
+    except Exception as exc:
+        if log:
+            log(f"[WARN] [V4.8.6 GRIPPER] 设置默认夹爪失败：{exc}")
+        return None
+
+
+def v486_gripper_startup_connect(grip_panel, rct_tab=None, log=None):
+    """V4.8.6: Automatically initiate gripper communication connection at console startup (default: NERO AgxGripper)."""
+    if os.environ.get("NERO_NO_STARTUP_GRIPPER_CONNECT") == "1":
+        return "skipped"
+    try:
+        import NERO_V48_Gripper as GG
+        if GG.is_agx() and grip_panel is not None:
+            dev = grip_panel.agx()
+            if getattr(dev, "connected", False):
+                return "already_connected"
+            if log:
+                log("[INFO] [V4.8.6 GRIPPER] 开机默认自动连接 NERO 原装夹爪通讯（pyAgxArm）…")
+            grip_panel.on_connect()
+            return "agx_connecting"
+        if rct_tab is not None and hasattr(rct_tab, "on_grip_connect"):
+            if log:
+                log("[INFO] [V4.8.6 GRIPPER] 开机自动连接 SO-101 夹爪通讯…")
+            rct_tab.on_grip_connect()
+            return "so101_connecting"
+    except Exception as exc:
+        if log:
+            log(f"[WARN] [V4.8.6 GRIPPER] 开机自动连接夹爪未成功：{exc}")
+        return f"error: {exc}"
+    return "no_panel"
+
+
+def v486_start_cameras(cam_tab, log=None):
+    """V4.8.6: Start both the fixed main camera (D435i) and the wrist camera on the Tk main thread during 一键启动."""
+    res = {"main": False, "wrist": False}
+    if cam_tab is None:
+        return res
+    ui_call = getattr(cam_tab, "_ui", None)
+    try:
+        src = getattr(cam_tab, "src", None)
+        if src is None or not getattr(src, "running", False):
+            if log:
+                log("[INFO] [V4.8.6 CAMERA] 一键启动：同步连接并启动主相机（D435i）…")
+            if callable(ui_call):
+                ui_call(cam_tab.on_connect)
+            else:
+                cam_tab.on_connect()
+            res["main"] = True
+        else:
+            if log:
+                log("[INFO] [V4.8.6 CAMERA] 一键启动：主相机已在运行")
+    except Exception as exc:
+        if log:
+            log(f"[WARN] [V4.8.6 CAMERA] 一键启动主相机异常：{exc}")
+    try:
+        wsrc = getattr(cam_tab, "wrist_src", None)
+        if wsrc is None or not getattr(wsrc, "running", False):
+            if log:
+                log("[INFO] [V4.8.6 CAMERA] 一键启动：同步连接并启动腕部相机…")
+            if callable(ui_call):
+                ui_call(cam_tab.on_wrist_connect)
+            else:
+                cam_tab.on_wrist_connect()
+            res["wrist"] = True
+        else:
+            if log:
+                log("[INFO] [V4.8.6 CAMERA] 一键启动：腕部相机已在运行")
+    except Exception as exc:
+        if log:
+            log(f"[WARN] [V4.8.6 CAMERA] 一键启动腕部相机异常：{exc}")
+    return res
+
+
 def v463_xinitthreads():
     """-> 'ok' / 'off' / reason string; must run before the first Xlib call of the process (before tk.Tk())."""
     if os.environ.get("NERO_NO_XINITTHREADS", "0") == "1":
@@ -427,6 +615,10 @@ def v463_x_error_handlers():
 
 
 def v466_native_trace_status():
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
     """V4.6.6: is tools/nero_crashtrace.c loaded (LD_PRELOAD from start_nero.sh)?  Child processes (ROS, helpers)
     do not get it: LD_PRELOAD is removed from this process's environment once the library is in place."""
     loaded = False
@@ -512,6 +704,7 @@ def run_console(initial_tab="sim"):
     open(console_log, "w").close()
 
     xinit = v463_xinitthreads()                       # V4.6.3 NATIVE CRASH GUARD (before the display is opened)
+    fc_no_emoji = v486_disable_color_emoji_fonts(log_dir)  # V4.8.6: block NotoColorEmoji.ttf Xft BadGlyph segfault
     install_crash_log(log_dir)                        # V4.6.3: open crash.log before Tk (X error notes go there)
     xerr = v463_x_error_handlers()
     root = tk.Tk()
@@ -520,6 +713,7 @@ def run_console(initial_tab="sim"):
                     f"-> logs/stderr.log when started with start_nero.sh")
     v370_crash_note(f"V4.6.6: native crash trace {v466_native_trace_status()}; Tk input methods "
                     f"{v466_tk_input_methods(root)}")
+    v370_crash_note(f"V4.8.6: color-emoji font guard {fc_no_emoji}")
     _v312_pick_cjk_font(root)
     root.title(f"NERO {VERSION} 控制台")
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
@@ -651,7 +845,7 @@ def run_console(initial_tab="sim"):
     real_canvas.bind("<Configure>", lambda e: real_canvas.itemconfigure(real_win, width=e.width))
 
     def _real_wheel(e):
-        if e.widget.winfo_class() in ("Scale", "Text", "TCombobox"):
+        if _wheel_skip_widget(root, getattr(e, "widget", None), ("Scale", "Text", "TCombobox", "Treeview", "Listbox")):
             return
         real_canvas.yview_scroll(-1 if (getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0) else 1, "units")
     for seq in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
@@ -957,7 +1151,7 @@ def run_console(initial_tab="sim"):
     cam_canvas.bind("<Configure>", lambda e: cam_canvas.itemconfigure(cam_win, width=e.width))
 
     def _cam_wheel(e):
-        if e.widget.winfo_class() in ("Scale", "Text", "TCombobox", "Treeview", "Listbox"):
+        if _wheel_skip_widget(root, getattr(e, "widget", None), ("Scale", "Text", "TCombobox", "Treeview", "Listbox")):
             return                                   # these scroll themselves
         cam_canvas.yview_scroll(-1 if (getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0) else 1, "units")
     for seq in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
@@ -994,6 +1188,9 @@ def run_console(initial_tab="sim"):
     nb.bind("<<NotebookTabChanged>>",
             lambda _e: strat_tab.reload_active_if_changed() if nb.select() == str(strat_outer) else None, add="+")
 
+    # V4.8.6: default active gripper to NERO original AgxGripper before building task & gripper tabs
+    v486_gripper_startup_default(log=pipe.log)
+
     # ---- V3.65 NERO REAL CUP TASK TAB: the stack_cups_so101 simulation skills + parameters on the real NERO
     #      (SO-101 gripper on an STS3215 servo, fixed D435i + wrist camera monitors, LLM agent, run modes 1-3)
     rct_tab = None
@@ -1024,6 +1221,7 @@ def run_console(initial_tab="sim"):
                                         visible_fn=lambda: (nb.select() == str(real_outer)
                                                             and real_nb.select() == str(grip_holder)),
                                         teach_fn=lambda: getattr(pipe, "teach_mode", None))
+        root.after(150, lambda: v486_gripper_startup_connect(grip_panel, rct_tab=rct_tab, log=pipe.log))
     except Exception as exc:
         log_append(real_log, f"[FAIL] [V4.8 GRIPPER] 夹爪页不可用：{exc}")
 
@@ -1102,11 +1300,21 @@ def run_console(initial_tab="sim"):
     for i, key in enumerate(RR.STEP_KEYS):
         real_step_btns[i].configure(command=lambda key=key: start_job(key, lambda: pipe.run_step(key)))
     def run_all_then_gripper():
-        """V4.8.1: 一键启动 also connects the NERO AgxGripper (pyAgxArm) when it is the selected gripper"""
+        """V4.8.1 / V4.8.6 / V4.8.7: 一键启动 runs the 6-step arm bring-up, ensures cuRobo IK server, starts cameras, and connects gripper."""
         pipe.run_all()
+        try:
+            pipe.ensure_curobo_server()
+        except Exception as exc:
+            pipe.log(f"[WARN] [V4.8.7 CUROBO] 一键启动检查 cuRobo 异常：{exc}")
+        try:
+            v486_start_cameras(cam_tab, log=pipe.log)
+        except Exception as exc:
+            pipe.log(f"[WARN] [V4.8.6 CAMERA] 一键启动连接相机异常：{exc}")
         try:
             import NERO_V48_Gripper as GG
             if not GG.is_agx() or grip_panel is None:
+                if rct_tab is not None and hasattr(rct_tab, "on_grip_connect"):
+                    rct_tab._ui(rct_tab.on_grip_connect)
                 return
             dev = grip_panel.agx()
             if dev.connected:

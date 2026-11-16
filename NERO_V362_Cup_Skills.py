@@ -422,7 +422,17 @@ def ik_chain(chain, q_start=None, start_first=True):
             seeds = [q_prev] + generic
         else:
             seeds = generic + ([q_prev] if q_prev else [])
-        q, pe, re = pose_ik(U, J, JOINT_LIMITS, seeds, T, [float(v) for v in p], np.asarray(R).tolist(), iters=60)
+        q, pe, re = None, 1e9, 1e9
+        if not name.startswith("~"):
+            try:
+                import NERO_V487_CuRobo_IK as C487
+                q_cu, _why_cu = C487.solve_pose(_IK["t"][0], q_prev if q_prev else seeds[0], p, R)
+                if q_cu is not None:
+                    q, pe, re = q_cu, 0.0, 0.0
+            except Exception:
+                pass
+        if q is None:
+            q, pe, re = pose_ik(U, J, JOINT_LIMITS, seeds, T, [float(v) for v in p], np.asarray(R).tolist(), iters=60)
         if q is None:
             return {"ok": False, "why": f"{name}: no 6-DoF IK (pos {pe * 1000:.1f} mm, rot {re:.1f} deg)",
                     "min_margin_deg": None, "binding": name, "q": qs}
@@ -493,7 +503,7 @@ def stack_heights(knobs, src_base_z, dst_base_z):
 
 
 def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, log=None, _wide=False, profile=None,
-                   allow_wide=True, deadline=None):
+                   allow_wide=True, deadline=None, path_validator=None):
     """rim pinch plan: grasp rim angle + flip (pregrasp / grasp / lift reachable), then place rim angle with the SAME
     flip (the cup axis offset in the TCP frame is fixed by the grasp; V3.61 chose the flips independently, which
     would have put the carried cup 2 x rim radius off the target).  Knob angles are relative to the cup -> base
@@ -547,6 +557,8 @@ def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, lo
                 tried += 1
                 if not r["ok"] or r["min_margin_deg"] < MIN_MARGIN_RELAXED_DEG:
                     continue
+                if path_validator is not None and not path_validator(([list(q_start)] if q_start is not None else []) + r["q"], s_base[2]):
+                    continue
                 grasp_found = True
                 bg = {"phi": phi, "flip": flip, "r": r, "tcp": p, "R": R}
                 lift_tcp = p + [0, 0, dz_lift]
@@ -559,6 +571,8 @@ def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, lo
                            + [("release", p2, R1), ("retreat", p2 + [0, 0, 0.08], R1)])
                     rp = ik_chain(chp, r["q"][-1], start_first=None)
                     if not rp["ok"]:
+                        continue
+                    if path_validator is not None and not path_validator([r["q"][-1]] + rp["q"], min(s_base[2], d_base[2])):
                         continue
                     # the cup is free at the retreat pose: 4 deg is enough there, the margin key uses the held poses
                     m_ret = min(joint_margins_deg(rp["q"][-1]))
@@ -584,7 +598,7 @@ def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, lo
         if log:
             log("[INFO] [V3.64 CUP PLAN] no reachable grasp within +-45 deg of the knob angle -> wide search")
         return plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=q_start, log=log, _wide=True,
-                              profile=profile)
+                              profile=profile, path_validator=path_validator)
     if not grasp_found:
         return {"ok": False, "reason": "GRASP_UNREACHABLE", "detail": f"no reachable rim pinch on the source cup ({tried} tried)"}
     best_g, best_p = (best["g"], best["p"]) if best else (None, None)
@@ -597,7 +611,7 @@ def plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=None, lo
         if log:
             log("[INFO] [V3.63 CUP PLAN] no reachable chain within +-45 / +-90 deg of the knob angles -> wide search")
         return plan_cup_stack(knobs, src_rim, src_quat, dst_rim, dst_quat, q_start=q_start, log=log, _wide=True,
-                              profile=profile)
+                              profile=profile, path_validator=path_validator)
     if best_p is None:
         return {"ok": False, "reason": "PLACE_UNREACHABLE",
                 "detail": "the source cup can be grasped but no reachable carry/release pose over the target with the same grip"}
@@ -1578,16 +1592,18 @@ class CupSkills:
         if last is not None:
             # V3.68 FAST PLAN: start from the rim angles of the last good plan (narrow search only)
             k2 = dict(self.k, cup_grasp_rim_angle_deg=last[0], cup_place_rim_angle_deg=last[1])
+            pv = getattr(self.io, "cup_path_validator", None)
             p_ = plan_cup_stack(k2, s["rim"], s["quat"], t["rim"], t["quat"], q_start=q_now, log=self.io.emit,
-                                profile=self.prof, allow_wide=False)
+                                profile=self.prof, allow_wide=False, path_validator=pv)
             if p_.get("ok") and p_["min_joint_margin_deg"] >= max(MIN_MARGIN_RELAXED_DEG,
                                                                    self.prof.wide_search_below_deg or 0.0):
                 plan = p_
                 self.io.emit(f"[INFO] [V3.68 CUP PLAN] started from the last good rim angles "
                              f"(grasp {last[0]:+.0f} deg, place {last[1]:+.0f} deg)")
         if plan is None:
+            pv = getattr(self.io, "cup_path_validator", None)
             plan = plan_cup_stack(self.k, s["rim"], s["quat"], t["rim"], t["quat"], q_start=q_now, log=self.io.emit,
-                                  profile=self.prof)
+                                  profile=self.prof, path_validator=pv)
         if plan.get("ok") and self.prof.remember_angles and plan["min_joint_margin_deg"] >= MIN_MARGIN_RELAXED_DEG:
             _LAST_ANGLES[self.prof.name] = (plan["grasp_rim_angle_rel_deg"], plan["place_rim_angle_rel_deg"])
         if not plan["ok"]:
@@ -1623,18 +1639,19 @@ class CupSkills:
             # V3.71 PLAN EARLY STOP: a candidate with the preferred margin is taken at once (V3.70: every plan used
             # the whole 15 s budget although the first candidate already had 8 deg)
             return any(c[1].get("ok") and c[1]["min_joint_margin_deg"] >= enough for c in cands)
+        pv = getattr(self.io, "cup_path_validator", None)
         if last is not None:
             k2 = dict(self.k, cup_grasp_rim_angle_deg=last[0], cup_place_rim_angle_deg=last[1])
             cands.append(("last", plan_cup_stack(k2, s["rim"], s["quat"], t["rim"], t["quat"], q_start=q_now,
-                                                 profile=self.prof, allow_wide=False, deadline=dead)))
+                                                 profile=self.prof, allow_wide=False, deadline=dead, path_validator=pv)))
         if not _good_enough():
             cands.append(("narrow", plan_cup_stack(self.k, s["rim"], s["quat"], t["rim"], t["quat"], q_start=q_now,
-                                                   profile=self.prof, allow_wide=False, deadline=dead)))
+                                                   profile=self.prof, allow_wide=False, deadline=dead, path_validator=pv)))
         good = [c for c in cands if c[1].get("ok")]
         best_m = max((c[1]["min_joint_margin_deg"] for c in good), default=-1.0)
         if best_m < max(MIN_MARGIN_RELAXED_DEG, self.prof.wide_search_below_deg or 0.0) and time.time() < dead:
             cands.append(("wide", plan_cup_stack(self.k, s["rim"], s["quat"], t["rim"], t["quat"], q_start=q_now,
-                                                 profile=self.prof, _wide=True, allow_wide=False, deadline=dead)))
+                                                 profile=self.prof, _wide=True, allow_wide=False, deadline=dead, path_validator=pv)))
         good = [c for c in cands if c[1].get("ok")]
         txt = " · ".join(f"{n} " + (f"{p['min_joint_margin_deg']}°" if p.get("ok") else str(p.get("reason")))
                          for n, p in cands)

@@ -512,8 +512,27 @@ class GripperPanelUI:
                 self._zero_mark(0, "bad", "没有读数")
                 return
             self._zero_mark(0, "ok", f"开口读数 {st['gap_mm']:.1f} mm")
-            self.zero_step = 1
-            self.btn_zero.configure(text="下一步：失能")
+
+            def _auto_close_and_relax():
+                # V4.8.9: lightly close fingers (force=0.5) then disable so user never has to fight leadscrew friction
+                try:
+                    g.clamp(force=0.5, timeout_s=3.5)
+                except Exception:
+                    pass
+                ok_r, msg_r = g.relax()
+                return {"ok": ok_r, "msg": msg_r}
+
+            def _done_step0(r):
+                if r.get("ok"):
+                    self._zero_mark(1, "ok", "已轻力合拢并失能")
+                    self._zero_mark(2, "warn", "两指已自动轻力合拢并失能（可轻捏确认贴紧到底），然后点「已合拢」")
+                    self.zero_step = 2
+                    self.btn_zero.configure(text="已合拢")
+                else:
+                    self._zero_mark(1, "bad", r.get("error") or r.get("msg") or "失能失败")
+                    self.zero_step = 1
+                    self.btn_zero.configure(text="下一步：失能")
+            self._run("归零 · 自动合拢并失能", _auto_close_and_relax, _done_step0)
         elif i == 1:
             def done(r):
                 if r.get("ok"):

@@ -1798,11 +1798,11 @@ class SkillStrategyTabUI:
 
         self.b_apply = ttk.Button(r_top, text="✓ 应用当前参数", command=self.on_apply)
         self.b_apply.pack(side="left", padx=2)
-        self.b_save = ttk.Button(r_top, text="💾 保存为用户技能", command=self.on_save)
+        self.b_save = ttk.Button(r_top, text="保存为用户技能", command=self.on_save)
         self.b_save.pack(side="left", padx=2)
         self.b_save_as = ttk.Button(r_top, text="另存为新技能…", command=self.on_save_as)
         self.b_save_as.pack(side="left", padx=2)
-        self.b_load = ttk.Button(r_top, text="📂 打开外部 .json…", command=self.on_load_dialog)
+        self.b_load = ttk.Button(r_top, text="打开外部 .json…", command=self.on_load_dialog)
         self.b_load.pack(side="left", padx=2)
         self.b_reset_base = ttk.Button(r_top, text="↺ 一键还原抓鸡蛋基准", command=self.on_reset_baseline)
         self.b_reset_base.pack(side="left", padx=(8, 2))
@@ -1899,7 +1899,7 @@ class SkillStrategyTabUI:
 
         rd2 = ttk.Frame(dry_lf)
         rd2.pack(fill="x", pady=(4, 2))
-        self.b_dry_check = ttk.Button(rd2, text="🔍 1. 预演航线规划校验（不动真机）", command=self.on_dry_run_plan_only)
+        self.b_dry_check = ttk.Button(rd2, text="1. 预演航线规划校验（不动真机）", command=self.on_dry_run_plan_only)
         self.b_dry_check.pack(side="left", padx=(0, 6))
         self.b_dry_exec = ttk.Button(rd2, text="▶ 2. 执行实机多点悬停预演 (Dry-Run)", command=self.on_dry_run_execute)
         self.b_dry_exec.pack(side="left", padx=4)

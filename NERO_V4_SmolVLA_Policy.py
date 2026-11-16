@@ -609,6 +609,12 @@ class SmolVLAPolicy:
             self.log(f"[INFO] [V4.4 SMOLVLA] 移动硬盘上没有 LeRobot 环境 ({py})；"
                      f"请在「0. 移动硬盘」区点「安装 LeRobot+SmolVLA」。现在使用内置 NERO VLA 引擎")
             return {"ok": False, "error": "no drive venv"}
+        # V4.8.7: stop cuRobo GPU planner server before starting the SmolVLA GPU worker to free ~1.5-2.2 GB VRAM
+        try:
+            import NERO_V487_CuRobo_IK as C487
+            C487.stop_curobo_server(log=self.log, reason="加载 SmolVLA 模型")
+        except Exception:
+            pass
         t0 = time.perf_counter()
         log_path = os.path.join(L["logs"], "smolvla_worker.log") if os.path.isdir(L["logs"]) else None
         cli = SmolVLAWorkerClient(py, env=ST.child_env(L, for_heavy_job=False), log_path=log_path, fake=fake, log=self.log)
@@ -1014,6 +1020,11 @@ class SmolVLAPolicy:
         Observe -> Predict Action Chunk -> Execute Horizon K -> Update Observation -> Repeat.
         V4.6: refuses the REAL backend with a policy not trained on NERO; logs the start, every chunk and the end
         (also every failure); the result is "executed_unverified" - running without errors is not task success."""
+        try:
+            import NERO_V487_CuRobo_IK as C487
+            C487.stop_curobo_server(log=self.log, reason="执行 SmolVLA 闭环推理")
+        except Exception:
+            pass
         if not self.is_loaded:
             self.load()
         if not adapter.is_connected:

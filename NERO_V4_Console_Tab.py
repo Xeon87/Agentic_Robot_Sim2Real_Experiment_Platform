@@ -203,7 +203,11 @@ class VLALeRobotTabUI:
         except Exception:
             pass
         self._schedule()
-        threading.Thread(target=self._startup_drive_check, daemon=True).start()
+        # V4.8.6: defer background drive check slightly so Tk finishes laying out new VLA tab widgets first
+        try:
+            self.parent.after(150, lambda: threading.Thread(target=self._startup_drive_check, daemon=True).start())
+        except Exception:
+            threading.Thread(target=self._startup_drive_check, daemon=True).start()
 
     def _log(self, msg: str) -> None:
         self.q.put(("log", str(msg)))
@@ -668,6 +672,7 @@ class VLALeRobotTabUI:
 
         def _job():
             try:
+                self._release_curobo_vram("加载 SmolVLA 模型")
                 r = self.vla_policy.load(ckpt_target)
                 if not self.adapter.is_connected:
                     self.adapter.connect()
@@ -886,6 +891,7 @@ class VLALeRobotTabUI:
         self.q.put(("lamp", ("1", "busy", "加载中")))
         t0 = time.time()
         try:
+            self._release_curobo_vram("一键准备加载 SmolVLA 模型")
             r = self.vla_policy.load(ckpt)
             if not self.adapter.is_connected:
                 self.adapter.connect()
@@ -1209,6 +1215,8 @@ class VLALeRobotTabUI:
             ck = os.path.expanduser(ck_txt)
             policy_path = ck if ST.has_weights(ck) else ST.DEFAULT_BASE_MODEL_ID
             run = f"smolvla_{self.dataset.dataset_name}_{time.strftime('%Y%m%d_%H%M%S')}"
+            if device == "cuda":
+                self._release_curobo_vram("启动 LeRobot SmolVLA 微调训练")
             cmd = ST.train_command(L, f"nero/{self.dataset.dataset_name}", out, run, policy_path=policy_path,
                                    steps=steps, batch_size=bs, save_freq=max(500, min(steps // 5, 5000)),
                                    device=device, extra_args=extra_txt)
@@ -1311,6 +1319,7 @@ class VLALeRobotTabUI:
         task = self.v_task.get().strip()
 
         def _fn():
+            self._release_curobo_vram("执行 SmolVLA 闭环任务")
             if not self.vla_policy.is_loaded:
                 self._log("[INFO] [V4.6 UI] 模型还没加载，先加载（相当于 ①）")
                 self.vla_policy.load(ckpt)
@@ -1325,6 +1334,8 @@ class VLALeRobotTabUI:
         pol = self.v_policy.get() or "smolvla"
 
         def _fn():
+            if pol == "smolvla":
+                self._release_curobo_vram("执行顶层 Agent (SmolVLA) 任务")
             if pol == "smolvla" and not self.vla_policy.is_loaded:
                 self._log("[INFO] [V4.6 UI] 模型还没加载，先加载（相当于 ①）")
                 self.vla_policy.load(ckpt)
@@ -1334,6 +1345,16 @@ class VLALeRobotTabUI:
             fr = ((r.get("failed_subtask") or {}).get("result") or {})
             return dict(r, reason=r.get("reason") or fr.get("reason"))
         self._start_run(f"顶层 Agent 任务（{pol}）", _fn)
+
+    def _release_curobo_vram(self, reason: str = "SmolVLA 显存释放") -> Dict[str, Any]:
+        """V4.8.7: Stop cuRobo GPU server before heavy SmolVLA model load / inference / training."""
+        try:
+            if self.pipe is not None and hasattr(self.pipe, "stop_curobo_server"):
+                return self.pipe.stop_curobo_server(reason=reason)
+            import NERO_V487_CuRobo_IK as C487
+            return C487.stop_curobo_server(log=self._log, reason=reason)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     # ------------------------------------------------------------------ V4.6.9 teach gripper / replay
     def _real_gripper(self):

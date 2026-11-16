@@ -191,7 +191,9 @@ case "$SCENE344" in
     done ;;
   tidy_desk)                                     # V4.8.3 TIDY DESK (variant of sort_items, official gripper, intent layer)
     python3 -m py_compile "$HERE/NERO_V372_Sort_Skills.py" "$HERE/NERO_V375_Collision_Check.py" "$HERE/NERO_V483_Tidy.py" "$HERE/NERO_V481_Agx_Geom.py" || fatal "py_compile failed: NERO_V372_Sort_Skills.py / NERO_V375_Collision_Check.py / NERO_V483_Tidy.py / NERO_V481_Agx_Geom.py (V4.8.3 TIDY DESK)" ;;
-  *) fatal "Unknown NERO_SCENE='$SCENE344' (known: fill_egg_holder, store_in_safe, stack_cups, stack_cups_so101, sort_items, tidy_desk)";;
+  general_pick_place)                            # V4.8.10 GENERAL PICK&PLACE (eggs + carton + cups, official gripper)
+    python3 -m py_compile "$HERE/NERO_V489_General_Pick_Place.py" "$HERE/NERO_V49_Geometry.py" "$HERE/NERO_V372_Sort_Skills.py" "$HERE/NERO_V375_Collision_Check.py" "$HERE/NERO_V481_Agx_Geom.py" || fatal "py_compile failed: NERO_V489_General_Pick_Place.py (V4.8.10 GENERAL PICK&PLACE)" ;;
+  *) fatal "Unknown NERO_SCENE='$SCENE344' (known: fill_egg_holder, store_in_safe, stack_cups, stack_cups_so101, sort_items, tidy_desk, general_pick_place)";;
 esac
 export NERO_SCENE="$SCENE344"
 status INFO "V3.44 MuJoCo scene: $SCENE344 (chosen in the NERO console before start; default fill_egg_holder)"

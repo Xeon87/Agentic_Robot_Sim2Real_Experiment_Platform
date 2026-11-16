@@ -563,6 +563,11 @@ class TrainJob:
 
     @classmethod
     def start(cls, job, python=None, env=None, cwd=None):
+        try:
+            import NERO_V487_CuRobo_IK as C487
+            C487.stop_curobo_server(reason="启动 YOLOE 精调训练")
+        except Exception:
+            pass
         run = job["run_dir"]
         os.makedirs(run, exist_ok=True)
         jp = os.path.join(run, "job.json")

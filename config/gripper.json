@@ -1,0 +1,32 @@
+{
+ "type": "agx_gripper",
+ "agx": {
+  "channel": "can0",
+  "fw": "v111",
+  "backend": "pyagxarm",
+  "default_force": 1.0,
+  "tip_from_flange_mm": 144.0,
+  "speed_pct": 40.0,
+  "full_speed_mm_s": 150.0,
+  "fingers": "stock",
+  "softfin_tip_from_flange_mm": 205.4
+ },
+ "presets": {
+  "egg": {
+   "open_mm": 60.0,
+   "force": 0.5
+  },
+  "cup": {
+   "open_mm": 65.0,
+   "force": 1.0
+  },
+  "block": {
+   "open_mm": 60.0,
+   "force": 1.5
+  }
+ },
+ "force_table": [],
+ "baseline": null,
+ "zero": null,
+ "j7_test": null
+}

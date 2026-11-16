@@ -30,7 +30,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.8.5"
+VERSION = "V4.9"
 # V3.54 FIRMWARE V1.2.1 (NeroFW.V121) + FOLLOWER MODE TEACH EXIT + STEP 3 PUSH RECOVERY
 DEFAULT_FW_VERSION = "v121"
 SUPPORTED_FW_VERSIONS = ("v121", "v120", "v112", "v111", "default")
@@ -59,8 +59,8 @@ FLOW_SPARSE_FPS = 1.0
 
 STALE_BINS = {"ros2_control_node", "move_group", "rviz2", "robot_state_publisher", "agx_arm_ctrl_single",
               "agx_arm_ctrl_single_node", "spawner"}
-STALE_SCRIPTS = {"NERO_V2_7_1_Unified_Backend.py", "NERO_GPU_Planner_Server.py", "nero_start.py",
-                 "NERO_V313_Real_Robot.py"}
+STALE_SCRIPTS = {"NERO_V2_7_1_Unified_Backend.py", "nero_start.py",
+                 "NERO_V313_Real_Robot.py"}   # V4.8.7: NERO_GPU_Planner_Server.py (cuRobo) is used by real-robot IK too
 
 
 # =========================================================================== small utilities
@@ -2186,7 +2186,35 @@ class RealPipeline:
             self.log(f"{'[OK]' if ok else '[FAIL]'} [V3.13 1 环境] {name}: {detail}")
         bad = [n for n, ok, _d in items if not ok]
         self.set("env", lamp, "all checks passed" if lamp == GREEN else f"failed: {bad}")
+        if lamp in (GREEN, AMBER):
+            self.ensure_curobo_server()
         return lamp
+
+    # ---------------------------------------------------------------- V4.8.7 cuRobo GPU IK server lifecycle
+    def ensure_curobo_server(self, wait_s=25.0):
+        """V4.8.7: Check and start cuRobo GPU planner server if available; fall back to 45-seed FastIK otherwise."""
+        try:
+            import NERO_V487_CuRobo_IK as C487
+            return C487.ensure_curobo_server(log=self.log, wait_s=wait_s)
+        except Exception as exc:
+            self.log(f"[WARN] [V4.8.7 CUROBO] 检查 cuRobo 服务异常（{exc}）→ 使用 FastIK (45 种子)")
+            return {"ok": False, "solver": "fast_ik_45seeds", "error": str(exc)}
+
+    def stop_curobo_server(self, reason="释放 GPU 显存"):
+        """V4.8.7: Stop cuRobo GPU planner server before SmolVLA / training heavy VRAM workloads."""
+        try:
+            import NERO_V487_CuRobo_IK as C487
+            return C487.stop_curobo_server(log=self.log, reason=reason)
+        except Exception as exc:
+            self.log(f"[WARN] [V4.8.7 VRAM] 关闭 cuRobo 服务异常：{exc}")
+            return {"ok": False, "error": str(exc)}
+
+    def curobo_status(self, force_ping=False):
+        try:
+            import NERO_V487_CuRobo_IK as C487
+            return C487.curobo_status(force_ping=force_ping)
+        except Exception as exc:
+            return {"ok": False, "available": False, "solver": "fast_ik_45seeds", "error": str(exc)}
 
     def step_can(self, execute=True):
         port = self.cfg_fn().get("can_port", "can0")

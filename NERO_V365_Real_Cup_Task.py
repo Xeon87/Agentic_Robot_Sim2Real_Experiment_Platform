@@ -88,12 +88,14 @@ TASK_SCENES = (
     ("fill_egg_holder", "② 鸡蛋入蛋托 fill_egg_holder"),
     ("sort_items", "③ 物品分类 sort_items"),
     ("tidy_desk", "④ 桌面整理 tidy_desk（听懂弦外之音 · 原装夹爪）"),       # V4.8.3 TIDY DESK
+    ("general_pick_place", "⑤ General pick&place（通用抓放 · LLM实时规划）"),  # V4.8.9 GENERAL PICK&PLACE
 )
 SCENE_DEFAULT_PROMPTS = {
     "stack_cups": "cup",
     "fill_egg_holder": "egg, egg carton",
     "sort_items": "banana, apple, mouse, marker",
     "tidy_desk": "banana, apple, crumpled paper, cookie pack, toy block, marker pen, computer mouse",
+    "general_pick_place": "egg, cup",
 }
 SCENE_EXAMPLES = {
     "stack_cups": EXAMPLES,
@@ -103,6 +105,8 @@ SCENE_EXAMPLES = {
     # V4.8.3 TIDY DESK: the user describes the situation, the intent layer decides
     "tidy_desk": (("妈妈要来", "我妈妈一会儿要来"), ("要开会", "等下要开会，帮我腾个地方"),
                   ("孩子要来", "孩子一会儿来玩"), ("清垃圾", "把垃圾扔了，别的别动")),
+    "general_pick_place": (("egg → cup", "pick up the egg and put it into the cup"),
+                           ("自由抓放", "把桌面上的物体抓起放到指定目标里")),
 }
 
 
@@ -787,20 +791,85 @@ class RealIO:
 
     # -- eyes
     def gripper_boxes(self, z_shift=0.0, tight=False):
-        """oriented box around the SO-101 + ring (robot self-filter of the cup perception); V3.67 tight=True: the
-        jaw outline only (down to the fingertips) for the image occlusion test"""
+        """oriented box around the active gripper (SO-101 + ring, or V4.8.8 AgxGripper/Softfin + wrist bracket)
+        for robot self-filter of the cup perception; V3.67/V4.8.8 tight=True: jaw/finger outline down to fingertips
+        for image occlusion & held_geometry tests."""
         import NERO_V364_SO101_Gripper as G
         try:
             T_tcp = self.fast.fk(np.asarray(self.current_q(), float))
         except Exception:
             return []
         T_l7 = T_tcp @ np.linalg.inv(self.CK.T_L7_TCP)
+        is_twin_so101 = getattr(getattr(self, "grip", None), "__class__", type(None)).__name__ == "TwinGripper"
+        if not is_twin_so101 and (getattr(getattr(self, "prof", None), "name", "") == "agx_gripper" or gripper_is_agx()):
+            try:
+                import NERO_V481_Agx_Geom as AG
+                st = self.gripper_state() if hasattr(self, "gripper_state") else {}
+                gap = float((st or {}).get("gap_mm") or (st or {}).get("opening_mm") or 60.0)
+                tm = AG.AgxToolModel(opening_mm=gap)
+                shift_vec = np.array([0.0, 0.0, float(z_shift)])
+                out = []
+                for name, c_l7, R_l7, h in tm.boxes:
+                    if tight and name not in ("finger_a", "finger_b"):
+                        continue
+                    c_b = T_l7[:3, :3] @ np.asarray(c_l7, float) + T_l7[:3, 3] - shift_vec
+                    R_b = T_l7[:3, :3] @ np.asarray(R_l7, float)
+                    out.append((c_b, R_b, np.asarray(h, float).copy()))
+                if out:
+                    return out
+            except Exception:
+                pass
         Tg = T_l7 @ self.T_l7g                         # V3.67: the measured mount
         if tight:
             c = Tg[:3, :3] @ np.array([0.005, 0.0, -0.045]) + Tg[:3, 3]
             return [(c, Tg[:3, :3], np.array([0.040, 0.030, 0.060]))]
         c = Tg[:3, :3] @ np.array([0.012, 0.0, -0.05]) + Tg[:3, 3] - np.array([0.0, 0.0, z_shift])
         return [(c, Tg[:3, :3], np.array([0.055, 0.04, 0.075]))]
+
+    def cup_path_validator(self, q_waypoints, z_table=0.0):
+        """V4.8.8: Real-robot tool-collision (wrist camera bracket/adapter vs table) + polygon fence pre-check
+        for CupSkills.plan_cup_stack. Active on real PipelineArm or when enable_cup_fence_check is True."""
+        if not (isinstance(getattr(self, "arm", None), PipelineArm) or getattr(self, "enable_cup_fence_check", False)):
+            return True
+        try:
+            obs = getattr(self, "last_perception", None) or {}
+            cam = getattr(self, "last_cam", None) or {}
+            zt_obs = dict(obs)
+            if zt_obs.get("fence_z_table_m") is None and cam.get("z_table") is not None:
+                zt_obs["fence_z_table_m"] = float(cam["z_table"])
+            if zt_obs.get("table_z_m") is None:
+                zt_obs["table_z_m"] = float(z_table)
+            zt, _src, _err = conservative_table_z(zt_obs, try_harder=True)
+            zt = max(float(z_table), float(zt))
+            import NERO_V4613_Tool_Collision as TC
+            tm = getattr(self, "_cup_tool_cache", None)
+            if tm is None:
+                tm = self._cup_tool_cache = TC.make_tool_model()
+            if tm is not None and tm.ok:
+                Ti = np.linalg.inv(self.CK.T_L7_TCP)
+                for q in q_waypoints:
+                    ok_t, _dz, _part = tm.clear_of_table(self.fast.fk(np.asarray(q, float)) @ Ti, zt)
+                    if not ok_t:
+                        return False
+            import NERO_V315_Consistency_Safety as CS
+            cache = getattr(self, "_cup_fence_cache", None)
+            if cache is None:
+                U = CS.load_sim_urdf()
+                ws = CS.load_workspace()
+                f_cfg = dict((ws or {}).get("fence") or {})
+                f_cfg["margin"] = max(float(f_cfg.get("margin", 0.04)), 0.04)
+                f_cfg["link_radius"] = max(float(f_cfg.get("link_radius", 0.03)), 0.03)
+                so101_T = so101_tip_tool_T(self.T_l7g).tolist()
+                cache = self._cup_fence_cache = (U, f_cfg, so101_T)
+            U, f_cfg0, so101_T = cache
+            f_cfg = dict(f_cfg0, tool_z_min_override=float(zt) + TIP_PLAN_CLEAR_M)
+            viol = CS.path_fence_check(U, self.fast.joints, self.fast.joints,
+                                       [list(map(float, q)) for q in q_waypoints], "base_link", f_cfg, so101_T)
+            if viol:
+                return False
+        except Exception:
+            return True
+        return True
 
     def wrist_snapshot(self):
         """V3.87: Return current wrist camera frame + calibrated intrinsics K + Eye-in-Hand calib_eih when ready."""
@@ -1061,7 +1130,9 @@ class RealIO:
             dets.append(it)
             cups_compat.append(it)
         out = {
-            "ok": True, "scene": "sort_items", "table_z_m": round(zt, 4), "n_2d": len(d2),
+            "ok": True, "scene": "sort_items", "table_z_m": round(zt, 4),
+            "fence_z_table_m": (None if zt_in is None else round(float(zt_in), 4)),
+            "n_2d": len(d2),
             "items": dets, "dets": dets, "cups": cups_compat, "diag": diag,
             "device": (getattr(det, "info", {}) or {}).get("device") or getattr(det, "device", None),
         }
@@ -1071,6 +1142,98 @@ class RealIO:
         self.perc_times.append(dt)
         txt = " ".join(f"{d['det_id']}:{d['kind']}@({d['rim_xyz_m'][0]:+.3f},{d['rim_xyz_m'][1]:+.3f})" for d in dets) or "无物品"
         self.emit(f"[V3.93 REAL SORT YOLOE] {tag} | {txt} | {dt:.2f} s")
+        if self.on_perception is not None:
+            try:
+                self.on_perception(out)
+            except Exception:
+                pass
+        return out
+
+    def perceive_general(self, tag, prompts=None, use_finetuned=True):
+        """V4.8.9 GENERAL PICK&PLACE PERCEPTION: fixed D435i + dynamic YOLOE prompts (combined fine-tuned + base)."""
+        import NERO_V347_Yolo_Perception as YP
+        import NERO_V366_Real_Cup_Yolo as YC
+        import re
+        import NERO_V483_Tidy as TD
+        t_p = time.perf_counter()
+        cam = self.camera_fn()
+        ycfg = dict(cam.get("yolo") or {})
+        if not ycfg:
+            raise YC.YoloCupUnavailable("YOLOE 未配置（Camera调试 → 视觉定位）")
+        if ycfg.get("error"):
+            raise YC.YoloCupUnavailable(ycfg["error"])
+        det = ycfg.get("detector")
+        if det is None:
+            raise YC.YoloCupUnavailable("YOLOE 不可用：缺少检测器")
+        rgb = np.asarray(cam["rgb"])
+        depths = [np.asarray(d, np.float32) for d in (cam.get("depths") or [])]
+        if not depths:
+            raise RuntimeError("没有深度帧")
+        p_list = list(prompts) if prompts else (ycfg.get("prompts") or ["object"])
+        conf = float(ycfg.get("conf", 0.25))
+        m_path = ycfg["path"]
+        if not use_finetuned and ";" in str(m_path):
+            m_path = str(m_path).split(";")[0]
+        try:
+            d2 = det.detect(rgb, "text", m_path, prompts=p_list, conf=conf)
+        except YP.YoloUnavailable as exc:
+            raise YC.YoloCupUnavailable(str(exc))
+        depth = YP.fuse_depth(depths, d2) if len(depths) > 1 else depths[0]
+        zt_in = cam.get("z_table")
+        objs, diag = YP.locate_objects(d2, depth, dict(cam["K"]), np.asarray(cam["T_base_cam"], float),
+                                       table_z=zt_in, fence_poly=cam.get("fence_poly"), calib_note=cam.get("calib_note"))
+        zt = float(diag.get("ground_z_m") if diag.get("ground_z_m") is not None else (zt_in or 0.0))
+        counts, dets, cups_compat = {}, [], []
+        for o in objs:
+            if o.get("status") == "rejected" or not o.get("xyz_m"):
+                continue
+            c = [float(v) for v in o["xyz_m"]]
+            oname = str(o.get("obj_name") or (o.get("yolo") or {}).get("name") or "object").strip().lower()
+            slug = re.sub(r"[^a-z0-9]+", "_", oname).strip("_") or "obj"
+            counts[slug] = counts.get(slug, 0) + 1
+            oid = f"{slug}_{counts[slug]}"
+            bx = (o.get("yolo") or {}).get("box")
+            contour = []
+            for dm in d2:
+                if dm.get("mask") is not None and bx and sum(abs(a - b) for a, b in zip(bx, [round(v) for v in dm["box"]])) <= 8:
+                    contour = YC._contour(dm["mask"])
+                    break
+            h_mm = float(o.get("height_mm") or max(15.0, (c[2] - zt) * 1000.0))
+            top_z = zt + h_mm / 1000.0
+            yaw_deg = None
+            try:
+                yaw_deg = TD.yaw_from_contour(contour, dict(cam.get("K") or {}), cam.get("T_base_cam"), c[2])
+            except Exception:
+                yaw_deg = None
+            it = dict(
+                o,
+                det_id=oid,
+                kind=oname,
+                center_xyz_m=c,
+                center_base=c,
+                base_xyz_m=[c[0], c[1], zt],
+                rim_xyz_m=[c[0], c[1], top_z],
+                top_z_m=round(top_z, 4),
+                yaw_deg=0.0 if yaw_deg is None else round(float(yaw_deg), 1),
+                height_mm=round(h_mm, 1),
+                conf=float((o.get("yolo") or {}).get("conf", 1.0)),
+                contour=contour,
+            )
+            dets.append(it)
+            cups_compat.append(it)
+        out = {
+            "ok": True, "scene": "general_pick_place", "table_z_m": round(zt, 4),
+            "fence_z_table_m": (None if zt_in is None else round(float(zt_in), 4)),
+            "n_2d": len(d2), "objects": dets, "dets": dets, "cups": cups_compat, "diag": diag,
+            "device": (getattr(det, "info", {}) or {}).get("device") or getattr(det, "device", None),
+        }
+        self.last_perception, self.last_cam = out, cam
+        self._table_check(out, cam)
+        dt = time.perf_counter() - t_p
+        self.perc_times.append(dt)
+        txt = " ".join(f"{d['det_id']}@({d['center_xyz_m'][0]:+.3f},{d['center_xyz_m'][1]:+.3f}) h{d['height_mm']:.0f}"
+                       for d in dets) or "无物体"
+        self.emit(f"[V4.8.9 GENERAL YOLOE] {tag} | table z {zt * 1000:+.0f} mm | {txt} | {dt:.2f} s")
         if self.on_perception is not None:
             try:
                 self.on_perception(out)
@@ -1451,11 +1614,18 @@ class RealEggSkills:
         p_rot = np.array([p_lift[0], p_lift[1], max(float(p_lift[2]), float(p_hi[2]))])
         tried = [f"直接：{where}只剩 {worst:.0f} mm"]
         for mode in ("high", "rotate_first"):
-            r_hi = self._fast.ik([q_above], p_hi, R_rel, iters=30)
-            if not r_hi or r_hi[0] is None:
-                tried.append("高处 IK 无解")
-                break
-            q_hi = list(r_hi[0])
+            q_hi = None
+            try:
+                import NERO_V487_CuRobo_IK as C487
+                q_hi, _ = C487.solve_pose(self._fast, q_above, p_hi, R_rel)
+            except Exception:
+                q_hi = None
+            if q_hi is None:
+                r_hi = self._fast.ik([q_above], p_hi, R_rel, iters=30)
+                if not r_hi or r_hi[0] is None:
+                    tried.append("高处 IK 无解")
+                    break
+                q_hi = list(r_hi[0])
             down = self._line_qs(q_hi, p_hi, p_above, R_rel)
             if not down:
                 tried.append("高处竖直下降 IK 断开")
@@ -1643,7 +1813,16 @@ class RealEggSkills:
         return True
 
     def _fast_ik_chain(self, waypoints, q_seed):
-        """Fast C-extension IK chain solver iterating over candidate seeds until a full joint-margin-valid chain is found."""
+        """V4.8.7: Default cuRobo GPU IK chain solver with automatic fallback to 45-seed FastArm IK."""
+        try:
+            import NERO_V487_CuRobo_IK as C487
+            qs_cu, chk_cu = C487.solve_chain(self._fast, self.CK.check_joint_path, waypoints, q_seed,
+                                             max_j1_deg=IK_EXTRA_MAX_J1_DEG)
+            if qs_cu and chk_cu:
+                self._last_ik_solver = "curobo"
+                return qs_cu, chk_cu
+        except Exception:
+            pass
         p0 = waypoints[0][1]
         a1 = math.atan2(float(p0[1]), float(p0[0]))
         a1 = a1 + math.pi if a1 < 0 else a1 - math.pi
@@ -1671,7 +1850,8 @@ class RealEggSkills:
         for sd in seeds:
             qs, chk = chain_from(sd)
             if qs:
-                return qs, chk
+                self._last_ik_solver = "fast_ik_45seeds"
+                return qs, dict(chk, ik_solver="fast_ik_45seeds")
         # V4.8.5 MORE ARM POSTURES: the 7-DoF arm has many postures for one gripper pose; the 5 seeds above miss the
         # ones with the elbow / wrist turned (user 11-12: an egg at yaw -139 deg -> "IK 无解" for all 6 grasp
         # directions; 300 random seeds found all 6 with 11-20 deg joint margin).  Structured + fixed random seeds;
@@ -1684,7 +1864,9 @@ class RealEggSkills:
                 continue
             key = (-int(float(chk.get("min_margin_deg", 0.0)) >= 6.0), float(np.linalg.norm(np.asarray(qs[0]) - q0)))
             if best_key is None or key < best_key:
-                best, best_key = (qs, dict(chk, extra_seed=True)), key
+                best, best_key = (qs, dict(chk, extra_seed=True, ik_solver="fast_ik_45seeds")), key
+        if best[0] is not None:
+            self._last_ik_solver = "fast_ik_45seeds"
         return best
 
     def _extra_ik_seeds(self, a1):
@@ -1817,6 +1999,15 @@ class RealEggSkills:
                 self._last_grasp_reject = f"指尖离桌 {(tip_z - zt) * 1000:.1f} mm < {TIP_PLAN_CLEAR_M * 1000:.0f} mm"
                 rej("指尖离桌面太近")
                 continue
+            tm_pre = self._tool_model()
+            if tm_pre is not None:
+                T_g_tcp = np.eye(4)
+                T_g_tcp[:3, :3], T_g_tcp[:3, 3] = R_g, p_g
+                ok_tm, dz_tm, part_tm = tm_pre.clear_of_table(T_g_tcp @ np.linalg.inv(self.CK.T_L7_TCP), zt)
+                if not ok_tm:
+                    self._last_grasp_reject = f"相机/支架 ({part_tm}) 离桌面仅 {dz_tm:.1f} mm"
+                    rej("相机 / 支架离桌面太近")
+                    continue
             p_pre = p_g + np.array([0.0, 0.0, EGG_PRE_M])
             p_lift = p_g + np.array([0.0, 0.0, EGG_LIFT_M])
             qs, chk = self._fast_ik_chain([("pre", p_pre, R_g), ("grasp", p_g, R_g), ("lift", p_lift, R_g)], q_seed)
@@ -1849,6 +2040,7 @@ class RealEggSkills:
                 "R_grasp": R_gr, "p_grasp_origin": p_a, "egg_in_G": egg_in_G,
                 "lowest_tip_z_mm": round((tip_z - float(zt)) * 1000.0, 1),
                 "gyaw": gyaw, "off_axis": abs(dyaw if abs(dyaw) <= 90 else abs(dyaw) - 180),
+                "ik_solver": chk.get("ik_solver", getattr(self, "_last_ik_solver", "fast_ik_45seeds")),
                 "margin": float(chk.get("min_margin_deg", 0.0)),
                 "grasp_pad_z_mm": round((float(p_egg[2]) - float(zt)) * 1000.0, 1),
                 "fingertip_z_mm": round((float(p_egg[2]) - float(self.CK.TIP_BEYOND_GRASP_M) - float(zt)) * 1000.0, 1),
@@ -1960,13 +2152,31 @@ class RealEggSkills:
                     if low < top:
                         _rej(pitch_deg, "carton", (round((low - top + self.AG.PAD_ABOVE_CARTON_M) * 1000.0, 1), "finger_a"))
                         continue
-                p_above = p_rel + np.array([0.0, 0.0, 0.065])
-                for sd in seeds:
-                    r1 = self._fast.ik([sd], p_above, R_rel, iters=30)
-                    if not r1 or r1[0] is None:
-                        _rej(pitch_deg, "ik")
+                tm_slot = self._tool_model()
+                if tm_slot is not None:
+                    T_rel_tcp = np.eye(4)
+                    T_rel_tcp[:3, :3], T_rel_tcp[:3, 3] = R_rel, p_rel
+                    ok_tm, dz_tm, part_tm = tm_slot.clear_of_table(T_rel_tcp @ np.linalg.inv(self.CK.T_L7_TCP), zt)
+                    if not ok_tm:
+                        _rej(pitch_deg, "tool", (dz_tm, part_tm))
                         continue
-                    q_above = list(r1[0])
+                p_above = p_rel + np.array([0.0, 0.0, 0.065])
+                cu_q_above = None
+                try:
+                    import NERO_V487_CuRobo_IK as C487
+                    cu_q_above, _ = C487.solve_pose(self._fast, q_from, p_above, R_rel)
+                except Exception:
+                    cu_q_above = None
+                trial_seeds = ([("curobo", cu_q_above)] if cu_q_above is not None else []) + [("fast_ik_45seeds", sd) for sd in seeds]
+                for solver_tag, sd in trial_seeds:
+                    if solver_tag == "curobo":
+                        q_above = list(sd)
+                    else:
+                        r1 = self._fast.ik([sd], p_above, R_rel, iters=30)
+                        if not r1 or r1[0] is None:
+                            _rej(pitch_deg, "ik")
+                            continue
+                        q_above = list(r1[0])
                     if q_above[1] < -0.20 or abs(q_above[0] - q_from[0]) > math.radians(85.0):
                         _rej(pitch_deg, "ik")
                         continue
@@ -1995,6 +2205,7 @@ class RealEggSkills:
                     egg_long_axis = R_rel_g[:, 0]
                     vert_err = math.degrees(math.acos(min(1.0, abs(float(egg_long_axis[2])))))
                     cands.append({
+                        "ik_solver": solver_tag,
                         "pyaw": float(pyaw),
                         "pitch_deg": float(pitch_deg),
                         "vert_err_deg": round(vert_err, 1),
@@ -2183,7 +2394,8 @@ class RealEggSkills:
                           "place_yaw_deg": best["place_yaw_deg"],
                           "place_pitch_deg": best["place_pitch_deg"],
                           "egg_long_axis_vertical_err_deg": best["egg_long_axis_vertical_err_deg"],
-                          "min_joint_margin_deg": best["min_joint_margin_deg"]},
+                          "min_joint_margin_deg": best["min_joint_margin_deg"],
+                          "ik_solver": best.get("ik_solver", "fast_ik_45seeds")},
                          nxt=["pick_egg"])
 
     def _plan_egg_pair(self, egg, zt, q_seed, half_len, source_egg, target_slot, zt_src=""):
@@ -2215,6 +2427,7 @@ class RealEggSkills:
                 continue
             margin = min(gc["margin"], sc["margin"])
             best = {
+                "ik_solver": "curobo" if (gc.get("ik_solver") == "curobo" or sc.get("ik_solver") == "curobo") else "fast_ik_45seeds",
                 "on_blunt": gc.get("on_blunt"), "egg_offset_mm": self._egg_offset_mm(),
                 "_transit": transit, "transit_note": t_note,
                 "source_egg": source_egg, "target_slot": cand_slot_id,
@@ -2264,7 +2477,7 @@ class RealEggSkills:
 
     def _wrist_recheck_egg_grasp(self, source_egg, W, Q):
         ws = self.io.wrist_snapshot() if hasattr(self.io, "wrist_snapshot") else None
-        if not ws or ws.get("rgb") is None or not ws.get("K") or not ws.get("calib_eih"):
+        if not ws or ws.get("rgb") is None or not ws.get("K") or ws.get("calib_eih") is None:
             return None
         import NERO_V386_Real_Wrist_Camera as RWC
         egg = self.cam.get(source_egg) or {}
@@ -2285,6 +2498,16 @@ class RealEggSkills:
         self.io.emit(f"[INFO] [V4.3 WRIST EGG] 抓蛋前腕部相机微调 {source_egg}：偏移 ({shift[0]*1000:+.1f}, {shift[1]*1000:+.1f}) mm ({shift_mm:.1f} mm)")
         if 1.5 <= shift_mm <= 6.0:
             d = np.array([shift[0], shift[1], 0.0])
+            zt_w = float((self.plan or {}).get("table_z_m", 0.0))
+            p_pre_new, R_pre_new = W["pregrasp"][0] + d, W["pregrasp"][1]
+            p_g_new, R_g_new = W["grasp"][0] + d, W["grasp"][1]
+            q_adj = self._ik_reachable(p_pre_new, R_pre_new, zt_w)
+            line_dn_adj = self._line_qs(q_adj, p_pre_new, p_g_new, R_g_new) if q_adj is not None else None
+            if q_adj is None or not line_dn_adj or not self._check_path_fence([self.io.current_q()] + line_dn_adj, zt_w):
+                self.io.emit(f"[WARN] [V4.8.8 WRIST GUARD] 抓蛋前腕部微调 ({shift[0]*1000:+.1f}, {shift[1]*1000:+.1f}) mm "
+                             "会触碰安全围栏或关节限位 → 取消微调，保持原主相机安全位姿")
+                chk["guard_rejected"] = True
+                return chk
             for k in ("pregrasp", "grasp", "lift"):
                 p, R = W[k]
                 W[k] = (p + d, R)
@@ -2298,7 +2521,7 @@ class RealEggSkills:
             # straight down at the slot; keep the fixed D435i's 3D slot position + SO-101 jaw-center offset.
             return None
         ws = self.io.wrist_snapshot() if hasattr(self.io, "wrist_snapshot") else None
-        if not ws or ws.get("rgb") is None or not ws.get("K") or not ws.get("calib_eih"):
+        if not ws or ws.get("rgb") is None or not ws.get("K") or ws.get("calib_eih") is None:
             return None
         import NERO_V386_Real_Wrist_Camera as RWC
         slot = self.cam.get(target_slot) or {}
@@ -2317,6 +2540,16 @@ class RealEggSkills:
         self.io.emit(f"[INFO] [V4.3 WRIST SLOT] 放蛋前腕部相机复查 {target_slot}：孔位偏移 ({shift[0]*1000:+.1f}, {shift[1]*1000:+.1f}) mm ({shift_mm:.1f} mm)")
         if 1.5 <= shift_mm <= 25.0:
             d = np.array([shift[0], shift[1], 0.0])
+            zt_w = float((self.plan or {}).get("table_z_m", 0.0))
+            p_ab_new, R_ab_new = W["above_target"][0] + d, W["above_target"][1]
+            p_rel_new, R_rel_new = W["release"][0] + d, W["release"][1]
+            q_adj = self._ik_reachable(p_ab_new, R_ab_new, zt_w)
+            line_ins_adj = self._line_qs(q_adj, p_ab_new, p_rel_new, R_rel_new) if q_adj is not None else None
+            if q_adj is None or not line_ins_adj or not self._check_path_fence([self.io.current_q()] + line_ins_adj, zt_w):
+                self.io.emit(f"[WARN] [V4.8.8 WRIST GUARD] 放蛋前腕部微调 ({shift[0]*1000:+.1f}, {shift[1]*1000:+.1f}) mm "
+                             "会触碰安全围栏或关节限位 → 取消微调，保持原主相机安全位姿")
+                chk["guard_rejected"] = True
+                return chk
             for k in ("above_target", "release"):
                 p, R = W[k]
                 W[k] = (p + d, R)
@@ -2326,17 +2559,23 @@ class RealEggSkills:
 
     # ------------------------------------------------------------------ V4.6 camera agreement helpers
     def _egg_cfg(self):
-        """V4.6.1: config/egg_carton.json (read only).  V4.8.1 AgxGripper: a clamped egg reads its width (~42 mm)"""
+        """V4.6.1: config/egg_carton.json (read only).  V4.8.1/V4.8.8 AgxGripper & Softfin: a clamped egg reads its
+        width (~42 mm on stock pads, >=30 mm on end-offset grasp; 8..46 mm on compliant Softfin fins)."""
         import NERO_V349_Real_Wrist_Camera as W49
         c = W49.egg_task_config()
         if getattr(self, "agx", False):
-            c = dict(c, held_gap_mm=float(c.get("held_gap_mm_agx", 42.0)), offcentre_margin_mm=8.0)
+            base_gap = float(c.get("held_gap_mm_agx", 42.0))
+            lo_gap, hi_gap = self.AG.egg_held_gap_mm()
+            margin = round(max(8.0, base_gap - float(lo_gap)), 1)
+            c = dict(c, held_gap_mm=base_gap, offcentre_margin_mm=margin,
+                     min_held_gap_mm=float(lo_gap), max_held_gap_mm=float(hi_gap),
+                     gripper_variant=self.AG.variant())
         return c
 
     def _wrist_frame(self):
         ws_fn = getattr(self.io, "wrist_snapshot", None)
         ws = ws_fn() if ws_fn is not None else None
-        if not ws or ws.get("rgb") is None or not ws.get("K") or not ws.get("calib_eih"):
+        if not ws or ws.get("rgb") is None or not ws.get("K") or ws.get("calib_eih") is None:
             return None
         return ws
 
@@ -2550,10 +2789,16 @@ class RealEggSkills:
                 self.io.emit(f"[INFO] [V4.6.1 EGG PICK] 夹紧读数 {float(gap_clamp):.1f} mm（基准 {base:.1f} mm，"
                              f"差 {float(gap_clamp) - base:+.1f} mm；判夹偏阈值 < {base - marg:.1f} mm）")
             offc = gap_clamp is not None and float(gap_clamp) < base - marg
-            if gap_clamp is not None and float(gap_clamp) > egg_long_axis_gap_mm():   # V4.6.9
-                self.io.emit(f"[WARN] [V4.6.9 EGG PICK] 夹紧读数 {float(gap_clamp):.1f} mm > {egg_long_axis_gap_mm():.0f} mm（正常夹住短轴时 "
-                             "约 26.5 mm）：很可能夹到了鸡蛋的长轴（鸡蛋朝向识别反了 90°）或空夹标定不对 → 放蛋时鸡蛋不会竖直；"
-                             "请看主相机画面里鸡蛋的方向，并重做「空夹标定」")
+            if gap_clamp is not None and float(gap_clamp) > egg_long_axis_gap_mm():   # V4.6.9 / V4.8.8
+                if getattr(self, "agx", False):
+                    lo_g, hi_g = self.AG.egg_held_gap_mm()
+                    self.io.emit(f"[WARN] [V4.6.9 EGG PICK] 夹紧读数 {float(gap_clamp):.1f} mm > {egg_long_axis_gap_mm():.0f} mm"
+                                 f"（NERO 原装夹爪正常夹住短轴/端头时约 {lo_g:.0f}–{hi_g:.0f} mm）：很可能夹到了鸡蛋的长轴"
+                                 "（鸡蛋朝向识别反了 90°）→ 请看主相机画面里鸡蛋的方向")
+                else:
+                    self.io.emit(f"[WARN] [V4.6.9 EGG PICK] 夹紧读数 {float(gap_clamp):.1f} mm > {egg_long_axis_gap_mm():.0f} mm（正常夹住短轴时 "
+                                 "约 26.5 mm）：很可能夹到了鸡蛋的长轴（鸡蛋朝向识别反了 90°）或空夹标定不对 → 放蛋时鸡蛋不会竖直；"
+                                 "请看主相机画面里鸡蛋的方向，并重做「空夹标定」")
             if offc and not ecfg["offcentre_regrasp"]:
                 self.io.emit(f"[WARN] [V4.6.1 EGG PICK] 夹紧读数 {float(gap_clamp):.1f} mm 比基准小 {base - float(gap_clamp):.1f} mm，"
                              "可能夹偏 → 只记录，继续（config/egg_carton.json → offcentre_regrasp=false）")
@@ -2599,7 +2844,7 @@ class RealEggSkills:
         from here. Untrusted / occluded / no wrist camera -> keep the fixed D435i slot position.  -> dict or None"""
         ws_fn = getattr(self.io, "wrist_snapshot", None)
         probe = ws_fn() if ws_fn is not None else None
-        if not probe or probe.get("rgb") is None or not probe.get("K") or not probe.get("calib_eih"):
+        if not probe or probe.get("rgb") is None or not probe.get("K") or probe.get("calib_eih") is None:
             self.io.emit("[INFO] [V4.5 WRIST SLOT] 腕部相机未就绪（未连接或未做手眼标定）→ 沿用主相机槽位")
             return None
         slot = self.cam.get(target_slot) or {}
@@ -2944,7 +3189,7 @@ class RealEggSkills:
         """V4.6.10: gripper pointing down 120 mm above (xy, z_top); the wrist camera looks for an egg top there"""
         ws_fn = getattr(self.io, "wrist_snapshot", None)
         probe = ws_fn() if ws_fn is not None else None
-        if not probe or probe.get("rgb") is None or not probe.get("K") or not probe.get("calib_eih"):
+        if not probe or probe.get("rgb") is None or not probe.get("K") or probe.get("calib_eih") is None:
             return {"ok": False, "reason": "腕部相机未就绪"}
         R_gr = np.asarray((self.plan or {}).get("R_grasp") if (self.plan or {}).get("R_grasp") is not None
                           else np.diag([1.0, -1.0, -1.0]), float)
@@ -3231,7 +3476,8 @@ class RealSortSkills:
         it = self.cam[item_id]
         p_it = it["rim"].copy()
         b_xy = self.SC.SORT_BINS[box]["centre"]
-        p_box = np.array([float(b_xy[0]), float(b_xy[1]), float((self.last_obs or {}).get("table_z_m") or 0.0) + 0.05], float)
+        zt_s, _zt_src, _zt_err = conservative_table_z(self.last_obs, try_harder=True)
+        p_box = np.array([float(b_xy[0]), float(b_xy[1]), float(zt_s) + 0.05], float)
         R_g = self.SK72.grasp_R(0.0)
         T_inv = np.linalg.inv(self.prof.T_tcp_grasp)
         def _tcp(pt):
@@ -3387,16 +3633,32 @@ def run_hover(io, source, target, knobs=None, skill=None, recorder=None, scene="
     steps = []
     try:
         if io.grip is not None:
-            io.gripper_open(sk.prof.open_mm)
-        for label, fn in (
-                (f"hover above {source} (pregrasp)", lambda: _hover_pregrasp(sk, io, source, W, Q)),
-                ("dwell", lambda: (io.sleep(float(io.cfg["hover_dwell_s"])), {"ok": True})[1]),
-                ("check", lambda: ((io.perceive_eggs(f"hover {source}") if scene == "fill_egg_holder" else (io.perceive_sort_items(f"hover {source}") if scene == "sort_items" else io.perceive(f"hover {source}"))), {"ok": True})[1]),
-                ("up to the lift height", lambda: io.move_line("V3.65 hover up", W["lift"][0],
-                                                               CK.R_to_quat_xyzw(W["lift"][1]), 0.05)),
+            io.gripper_open(egg_open_mm() if scene == "fill_egg_holder" else sk.prof.open_mm)
+        transit_steps = (sk.plan.get("_transit") or []) if scene == "fill_egg_holder" else []
+        if transit_steps:
+            carry_seq = [
+                (f"transit {st.get('label')} -> {target}", (
+                    (lambda st_=st: io.move_joints(f"V4.8.8 hover {st_.get('label')}", st_["q"]))
+                    if st.get("kind") == "joints" else
+                    (lambda st_=st: io.move_line(f"V4.8.8 hover {st_.get('label')}", st_["p"], CK.R_to_quat_xyzw(st_["R"]), 0.03))
+                ))
+                for st in transit_steps
+            ]
+        else:
+            carry_seq = [
                 ("rotate to the place orientation", lambda: io.move_joints("V3.65 hover rotate", Q["rotate"])),
                 (f"above {target}", lambda: io.move_joints(f"V3.65 hover {target}", Q["above_target"])),
-                ("dwell", lambda: (io.sleep(float(io.cfg["hover_dwell_s"])), {"ok": True})[1])):
+            ]
+        hover_seq = [
+            (f"hover above {source} (pregrasp)", lambda: _hover_pregrasp(sk, io, source, W, Q)),
+            ("dwell", lambda: (io.sleep(float(io.cfg["hover_dwell_s"])), {"ok": True})[1]),
+            ("check", lambda: ((io.perceive_eggs(f"hover {source}") if scene == "fill_egg_holder" else (io.perceive_sort_items(f"hover {source}") if scene == "sort_items" else io.perceive(f"hover {source}"))), {"ok": True})[1]),
+            ("up to the lift height", lambda: io.move_line("V3.65 hover up", W["lift"][0],
+                                                           CK.R_to_quat_xyzw(W["lift"][1]), 0.05)),
+        ] + carry_seq + [
+            ("dwell", lambda: (io.sleep(float(io.cfg["hover_dwell_s"])), {"ok": True})[1]),
+        ]
+        for label, fn in hover_seq:
             io.check_stop()
             r = fn()
             steps.append((label, bool(r.get("ok")), r.get("tcp_error_mm"), r.get("error") or r.get("why")))
@@ -4650,10 +4912,12 @@ class RealCupTaskTabUI:
             source, target = ("item_1", "blue" if "blue" in task.lower() and "red" not in task.lower() else "red")
         elif scene == "tidy_desk":                          # V4.8.3: the intent layer reads the whole sentence
             source, target = ("桌面", "容器")
+        elif scene == "general_pick_place":                 # V4.8.9: LLM plans every chunk dynamically
+            source, target = ("source", "target")
         else:
             source, target = parse_task_cups(task)
-        use_llm = bool(self.v_use_llm.get()) and mode == "execute"
-        # V4.6.10: egg / sort tasks always run the fixed flow (run_execute) - the summary said "(LLM)" anyway
+        use_llm = (True if scene == "general_pick_place" else bool(self.v_use_llm.get()) and mode == "execute")
+        # V4.6.10: egg / sort tasks always run the fixed flow (run_execute); V4.8.9: general_pick_place uses LLM
         llm_drives = use_llm and scene not in ("fill_egg_holder", "sort_items", "tidy_desk")
         mode_tag = (" (LLM)" if llm_drives else
                     (" (固定流程" + (" + Try harder" if try_harder else "") + ")") if mode == "execute" else "")
@@ -4714,12 +4978,20 @@ class RealCupTaskTabUI:
             self._log(f"[V3.65 REAL CUP TASK] mode={mode} | {source} -> {target} | skill [{skill.get('code')}] | "
                       f"gripper {io.prof.label} | joint {mc['joint_vmax_deg_s']} deg/s · line {mc['line_vmax_mm_s']} mm/s")
             if not perceive_only:
+                try:
+                    if hasattr(self.pipe, "ensure_curobo_server"):
+                        self.pipe.ensure_curobo_server(wait_s=15.0)
+                except Exception:
+                    pass
                 self._log(f"[INFO] [V3.69 REAL] 速度 {speed_desc}")
             if perceive_only:
                 if scene == "fill_egg_holder":
                     res = io.perceive_eggs("识别鸡蛋与蛋托")
                 elif scene in ("sort_items", "tidy_desk"):     # V4.8.3: the tidy desk uses the same YOLOE items
                     res = io.perceive_sort_items("识别分类物品")
+                elif scene == "general_pick_place":
+                    pr = [s.strip() for s in (self.v_cup_prompt.get() or "").split(",") if s.strip()] or ["object"]
+                    res = io.perceive_general("通用视觉识别", prompts=pr)
                 else:
                     res = io.perceive("识别杯子")
                 self.last_table_offset_mm = io.table_offset_mm
@@ -4765,6 +5037,13 @@ class RealCupTaskTabUI:
             try:
                 if scene == "tidy_desk":                    # V4.8.3 TIDY DESK: intent -> preview -> plan / hover / run
                     out = self._run_tidy(io, task, mode, llm if tidy_llm else None)
+                elif scene == "general_pick_place":         # V4.8.9 GENERAL PICK&PLACE: LLM orchestrates chunks
+                    import NERO_V2_7_1_Agent as AG
+                    import NERO_V489_General_Pick_Place as GPP
+                    agent = AG.NeroLLMAgent(emit=self._log, tool_runner=None)
+                    agent.provider = llm["provider"]
+                    self.agent = agent
+                    out = GPP.run_general_pick_place(io, task, mode=mode, agent=agent, llm_cfg=llm, recorder=rec)
                 elif mode == "plan":
                     out = run_plan_preview(io, source, target, knobs, skill, recorder=rec, scene=scene)
                 elif mode == "hover":

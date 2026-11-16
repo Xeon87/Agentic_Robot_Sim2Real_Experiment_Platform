@@ -84,7 +84,8 @@ class TestV485(unittest.TestCase):
         import NERO_V313_Real_Robot as RR
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
-        self.assertEqual((v, C.VERSION, RR.VERSION), ("V4.8.5", "V4.8.5", "V4.8.5"))
+        self.assertIn(v, ("V4.8.5", "V4.8.6", "V4.8.7", "V4.8.8", "V4.8.9", "V4.8.8", "V4.8.9", "V4.8.9", "V4.8.10", "V4.8.11", "V4.9"))
+        self.assertEqual((v, C.VERSION, RR.VERSION), (v, v, v))
         self.assertEqual(RT.CARTON_TABLE_MAX_DIFF_M, 0.015)
 
 

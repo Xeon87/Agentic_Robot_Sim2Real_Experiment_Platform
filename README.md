@@ -1,4 +1,38 @@
-# NERO V4.8.5 — single-folder release
+# NERO V4.9 — single-folder release
+
+**V4.9**（通用 pick & place：LLM 只拿测量事实——物体几何、手指试算、执行实测——没有写死的技能和经验；仿真里「夹住」按接触判断；随机场景测试）
+
+- **为什么 11-15 叠杯子失败**：仿真把「开口 ≥ 4 mm」当成夹住，前两次空夹也去抬升，报「抬升滑脱」，LLM 以为力不够；第三次手指插进杯壁，仿真发散。现在夹住 = 两个指垫都接触（或后端的夹持已生效），没夹住在夹紧这一步就如实报告，并附上测量值。
+- **LLM 看到的东西**（`perceive_objects`）：每个物体的中心 / 顶 / 底、占地方向和尺寸、俯视截面、侧面轮廓（不同高度的外 / 内半宽）、开口空腔、物体间关系（在里面 / 在上面），以及夹爪的几何尺寸。
+- **新工具 `preview_grasp`**（机械臂不动）：这样夹会不会撞到东西、哪个指垫先碰到、会把物体推多远。`plan_grasp_chunk` / `plan_place_chunk` 也只做检查不动，拒绝时写明原因（碰到谁、差几 mm、哪个关节到限位）。
+- **放置**：被夹物体按它自己的测量形状来放（最低点放到目标顶面上方 / 下方多少 mm），检查被夹物体和手指离其他物体的间隙、搬运路径的间隙；可以先竖直抬高再搬；搬运优先走姿态不变的直线。
+- **随机测试**：`tests/v49_random_eval.py`（需要 mujoco）在仿真孪生里随机摆放方块 / 罐 / 球 / 鸡蛋 / 杯子和盒子 / 碗 / 杯子 / 盘子。成功率见 CHANGELOG（随机 80 次成功 73 次：92 % / 90 %，杯子类任务最弱）。**注意：这是测试用的几何推理替身跑的，不是真实 LLM**（这台测试机没有 API key）。请在仿真里用真实模型再跑一次。
+- V4.8.8–V4.8.11 的内容见 CHANGELOG.md。
+
+## V4.8.7
+
+**V4.8.7**（`Agentic实机任务` 默认使用 `cuRobo` 规划 IK，保留 45 种子 `FastIK` 作为自动备选；实机启动时自动检查/拉起 `cuRobo`；`Smol VLA实机任务` 加载模型、闭环推理、微调训练及 YOLOE 训练前自动关闭 `cuRobo` 释放 GPU 显存）
+
+- **默认 cuRobo IK + 45 种子 FastIK 自动兜底（`NERO_V487_CuRobo_IK.py`）**：
+  - `Agentic实机任务`（抓鸡蛋、插蛋槽、高处避障搬运、叠杯子）默认优先调用 `cuRobo`（`127.0.0.1:8765`），并对返回的关节解继续执行全部实机安全门禁（3D 围栏、腕部相机/支架桌面净空、指尖高度、鸡蛋胶囊体扫掠碰撞）；规划结果中会输出 `"ik_solver": "curobo"` 或 `"fast_ik_45seeds"`。
+  - 当 `cuRobo` 未运行、正在被 SmolVLA 释放或某个方向需回退时，自动无缝切换到 45 种子 `FastIK`，任务不会中断。
+- **启动实机时自动检查并拉起 cuRobo**：
+  - `NERO_GPU_Planner_Server.py` 已从 `NERO_V313_Real_Robot.py` 的残留清理黑名单移出；在「实机NERO调试」执行「环境检查」或「▶ 一键启动」（以及在 `Agentic实机任务` 点击运行）时，都会自动检查 `cuRobo` 是否在线，未运行则按需在后台启动预热。
+- **SmolVLA / 训练前自动关闭 cuRobo 释放显存**：
+  - 在 `Smol VLA实机任务` 点击「① 加载 SmolVLA」、「一键准备」（加载模型步）、「启动 SmolVLA 闭环」、「顶层 Agent 任务 (smolvla)」、「开始训练 (lerobot-train)」以及相机高级测试启动 YOLOE 训练前，都会自动调用 `stop_curobo_server()` 关停 `cuRobo` 守护进程，立即释放约 1.5–2.2 GB 显存。
+
+## V4.8.6
+
+**V4.8.6**（开机默认连接 NERO 原装夹爪；「实机NERO调试」一键启动同步启动主相机和腕部相机；「Camera调试」默认全选可选精调模型、不选时显示「原模型」；修复 `crash.log` / `native_crash.log` 与点击「Smol VLA实机任务」页面的 Xft/X11 段错误）
+
+- **开机默认连接夹爪**：启动控制台时默认把当前夹爪设为 **NERO 原装 AgxGripper（CAN）**，并在界面就绪后自动在后台线程发起夹爪通讯连接（`NERO_GRIPPER_KEEP_SAVED=1` 可保留上次保存的夹爪类型，`NERO_NO_STARTUP_GRIPPER_CONNECT=1` 可关闭自动连接）。
+- **一键启动顺道启动双相机**：「实机NERO调试」页点击「▶ 一键启动」时，除执行 6 步机械臂启动与连接夹爪外，还会在 Tk 主线程同步触发主相机（D435i）和腕部相机连接启动。
+- **Camera调试模型选择默认全选 + 不选显示「原模型」**：通过 `NERO_V472_Wrist_Calib.py` 在 `CameraTabUI` 类上注入补丁（`NERO_V325_Camera.py` 冻结未改），开机在读取 `locate_settings.json` 后默认把当前目录下所有可选精调模型全部勾选；统一归一化绝对路径与相对路径，消除勾选框与 `v_ymodel` 不一致；当精调模型全部取消勾选时，按钮固定显示 **「原模型」**（不再显示「原模型 + 2 精调模型」或 `yoloe-26s-seg.pt`）。
+- **Crash 与点击 Smol VLA 页面闪退修复**：
+  1. `crash.log` 第 5–23 行的 `AttributeError: 'str' object has no attribute 'winfo_class'`：滚轮经过 `ttk.Combobox` 弹出下拉列表（Tcl popdown）时 `e.widget` 是字符串路径，现由 `_wheel_skip_widget` 安全解析并跳过。
+  2. `crash.log` / `native_crash.log` 的两次 `signal 11` 段错误（`libX11.so.6(_XReply+0x37f)` <- `XSync` <- `Tk_DeleteErrorHandler` <- `Tk_MeasureChars`）与点击「Smol VLA实机任务」页面直接闪退：Ubuntu 22.04 的 `libXft 2.3.4` 在测量 `TkFixedFont (Ubuntu Mono)` 或 `Noto Sans CJK SC` 缺失的符号字符（`✗`、`⚠`、`▶` 等）时，Fontconfig 回退到彩色位图字体 `NotoColorEmoji.ttf`，引发 XRender `BadGlyph (error 144, request 138.22)`，并在 `Tk_DeleteErrorHandler` 每满 10 次调用 `XSync` 时崩溃。点击「Smol VLA实机任务」首次构建约 90 个控件会瞬间凑满 10 次触发崩溃。现通过 Fontconfig 拒绝 `NotoColorEmoji`、将 `TkFixedFont` 统一设为 `Noto Sans CJK SC`、清理残留 Emoji 并推迟 VLA 后台线程启动彻底修复。
+
+## V4.8.5
 
 **V4.8.5**（鸡蛋夹得更靠中间：蛋托按相机实测的桌面算；IK 多试手臂姿态，不再轻易「无解」；失败时写清原因）
 

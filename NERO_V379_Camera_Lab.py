@@ -1883,7 +1883,7 @@ class CameraLab:
         self.v_vpinfo = self._var("视觉样例：还没有（复核时框好一张图 →「用这张图做视觉样例」）")
         ttk.Label(r1b, textvariable=self.v_vpinfo, foreground="#555").pack(side="left")
         ttk.Checkbutton(r2, text="同时存深度图", variable=self.v_cdepth).pack(side="left")
-        ttk.Button(r2, text="📷 拍一张", command=self.on_shot).pack(side="left", padx=(10, 2))
+        ttk.Button(r2, text="拍一张", command=self.on_shot).pack(side="left", padx=(10, 2))
         ttk.Label(r2, text="连拍").pack(side="left", padx=(8, 0))
         ttk.Entry(r2, textvariable=self.v_bn, width=4).pack(side="left", padx=2)
         ttk.Label(r2, text="张，间隔").pack(side="left")
