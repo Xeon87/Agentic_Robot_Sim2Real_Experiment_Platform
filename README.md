@@ -1,4 +1,19 @@
-# NERO V4.9.1 — single-folder release
+# NERO V4.9.2 — single-folder release
+
+**V4.9.2**（上真机之前的准备：仿真孪生里模拟真机相机的误差和遮挡；可以用你的 API key 批量评测真实 LLM；工具结果更短、更省 token）
+
+- **怎么用真实 LLM 批量评测**（需要 mujoco；会调用模型，产生费用）：
+  ```bash
+  export OPENAI_API_KEY=...
+  python3 tests/v49_llm_eval.py --model gpt-6.1-sol --effort high --scene user --repeat 3 --out sol_high_user.json
+  python3 tests/v49_llm_eval.py --model gpt-6.1-sol --effort high --seeds 201-210 --noise --out sol_high_noise.json
+  ```
+  `--dry` 只列出要跑的任务；结果逐条写进 `.jsonl`，最后打印成功率、平均调用次数、平均 token。
+- **模拟真机感知**：孪生加 `--noise`（`tests/v49_random_eval.py … --noise`）时，物体由一台模拟的固定深度相机测量：有深度噪声、丢点、物体背面看不到、位置有几毫米误差。看不到的区域不当障碍物，但手指伸进去时会如实告诉 LLM。
+- **工具结果压缩**：重复观察时没动过的物体只回一行，夹爪尺寸只给一次。
+- **孪生实测（测试替身，不是真实 LLM）**：同一批 30 个随机场景，仿真真值几何 24/30，模拟真机感知 15/30。差距主要在两处：测量误差让抓取方向变了、放置时手臂够不着；夹持点偏几毫米时仿真夹爪推不正物体（真机夹爪力大得多，这一项仿真偏悲观）。
+
+## V4.9.1
 
 **V4.9.1**（规划通过的路径执行时不会再因关节限位被拒；规划失败时告诉 LLM 哪些方向 / 参数能行）
 

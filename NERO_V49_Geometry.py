@@ -291,6 +291,84 @@ class MjProbe:
                     own[iy, ix] = self.names.index(oid)
         return HeightMap(x0, y0, res, H, own, self.names, table_z)
 
+    def camera_heightmap(self, cam_pos, bounds=(-0.80, -0.10, -0.45, 0.45), res=0.003, table_z=0.0, rng=None,
+                         depth_k=0.0025, dropout=0.02) -> "HeightMap":
+        """V4.9.2 SIMULATED DEPTH CAMERA: the height map a fixed RGB-D camera at cam_pos would give.  One ray per
+        cell (aimed at the table point of that cell); the first hit lands in the cell under the hit point, with
+        depth noise sigma = depth_k * d^2 along the ray and random dropouts.  Small holes inside an object are
+        filled from its neighbours; cells nobody saw behind an object (its shadow) keep the table height in the
+        object map and get hm.Hu = the camera line grazing the object in front (the most hidden material there can
+        reach); unobserved_depth() reports gripper / held-object points below that line (facts, not a refusal)."""
+        rng = rng if rng is not None else np.random.default_rng(0)
+        x0, x1, y0, y1 = bounds
+        nx, ny = int(math.ceil((x1 - x0) / res)), int(math.ceil((y1 - y0) / res))
+        H = np.full((ny, nx), float(table_z))
+        own = np.full((ny, nx), -1, int)
+        known = np.zeros((ny, nx), bool)
+        c = np.asarray(cam_pos, float)
+        for iy in range(ny):
+            y = y0 + (iy + 0.5) * res
+            for ix in range(nx):
+                if rng.random() < dropout:
+                    continue
+                x = x0 + (ix + 0.5) * res
+                v = np.array([x, y, table_z]) - c
+                L = float(np.linalg.norm(v))
+                v /= L
+                dist, g = self._ray(c, v)
+                if g < 0:
+                    continue
+                d = dist + float(rng.normal(0.0, depth_k * dist * dist))
+                p = c + v * d
+                jx, jy = int(math.floor((p[0] - x0) / res)), int(math.floor((p[1] - y0) / res))
+                if not (0 <= jx < nx and 0 <= jy < ny):
+                    continue
+                known[jy, jx] = True
+                oid = self.geom_obj[g]
+                if oid and oid != "__ghost__" and p[2] > table_z + 1e-4 and p[2] > H[jy, jx]:
+                    H[jy, jx], own[jy, jx] = p[2], self.names.index(oid)
+        # fill small holes from the neighbours (two passes, like a depth hole filter)
+        for _ in range(2):
+            Hn, On, Kn = H.copy(), own.copy(), known.copy()
+            for iy, ix in zip(*np.nonzero(~known[1:-1, 1:-1])):
+                    iy, ix = iy + 1, ix + 1
+                    o = own[iy - 1:iy + 2, ix - 1:ix + 2]
+                    k = known[iy - 1:iy + 2, ix - 1:ix + 2]
+                    if k.sum() >= 5:
+                        vals = o[k]
+                        top = int(np.bincount(vals + 1).argmax()) - 1
+                        Kn[iy, ix] = True
+                        if top >= 0:
+                            On[iy, ix] = top
+                            Hn[iy, ix] = float(np.median(H[iy - 1:iy + 2, ix - 1:ix + 2][k & (o == top)]))
+            H, own, known = Hn, On, Kn
+        # shadows (nobody saw them): the most anything hidden there can be is the camera line grazing the object
+        # in front of it -> Hu (upper bound of hidden material); the cell itself stays "table" for the object map
+        Hu = np.full((ny, nx), -1.0)
+        cxy, zc = c[:2], float(c[2])
+        for iy, ix in zip(*np.nonzero(~known)):
+            p = np.array([x0 + (ix + 0.5) * res, y0 + (iy + 0.5) * res])
+            Dp = float(np.linalg.norm(cxy - p))
+            u = (cxy - p) / max(Dp, 1e-9)
+            bound = None
+            for s_ in np.arange(res, 0.30, res):
+                q = p + u * s_
+                jx, jy = int(math.floor((q[0] - x0) / res)), int(math.floor((q[1] - y0) / res))
+                if not (0 <= jx < nx and 0 <= jy < ny):
+                    break
+                if known[jy, jx] and own[jy, jx] >= 0:
+                    Dq = Dp - s_
+                    z_line = zc - (zc - float(H[jy, jx])) * Dp / max(Dq, 1e-6)
+                    bound = z_line if bound is None else max(bound, z_line)
+            if bound is not None and bound > table_z:
+                Hu[iy, ix] = bound
+        names = list(self.names)
+        hm = HeightMap(x0, y0, res, H, own, names, table_z)
+        hm.known = known
+        hm.Hu = Hu
+        hm.noisy = True
+        return hm
+
     def bottom_z(self, oid: str) -> Optional[float]:
         zs = []
         for gi, o in enumerate(self.geom_obj):
@@ -351,10 +429,19 @@ def describe(hm: HeightMap, oid: str, bottom_z: Optional[float] = None, side_fn=
     tz = hm.table_z
     xy = cells[:, :2]
     mu = xy.mean(axis=0)
-    cov = np.cov((xy - mu).T) if len(xy) > 3 else np.eye(2)
-    w, V = np.linalg.eigh(cov)
-    ax = V[:, int(np.argmax(w))]
-    yaw = math.degrees(math.atan2(ax[1], ax[0]))
+    # V4.9.2 MIN-AREA RECTANGLE: the footprint axes = the rectangle of least area around the cells (PCA is
+    # undefined for square / round footprints and could put a square block's axes on its diagonal)
+    rel = xy - mu
+    best = None
+    for deg in np.arange(0.0, 90.0, 1.0):
+        t = math.radians(float(deg))
+        u = rel @ np.array([math.cos(t), math.sin(t)])
+        v = rel @ np.array([-math.sin(t), math.cos(t)])
+        ext_u, ext_v = float(u.max() - u.min()), float(v.max() - v.min())
+        area = ext_u * ext_v
+        if best is None or area < best[0] - 1e-9:
+            best = (area, float(deg), ext_u, ext_v)
+    yaw = best[1] if best[2] >= best[3] else best[1] + 90.0   # axis a = the longer side
     yaw = (yaw + 90.0) % 180.0 - 90.0                    # an axis, not a direction
     a = math.radians(yaw)
     ua, ub = np.array([math.cos(a), math.sin(a)]), np.array([-math.sin(a), math.cos(a)])
@@ -363,7 +450,9 @@ def describe(hm: HeightMap, oid: str, bottom_z: Optional[float] = None, side_fn=
     lo_a, hi_a, lo_b, hi_b = pa.min() - half, pa.max() + half, pb.min() - half, pb.max() + half
     ctr = mu + ua * (lo_a + hi_a) / 2.0 + ub * (lo_b + hi_b) / 2.0
     ext_a, ext_b = float(hi_a - lo_a) / 2.0, float(hi_b - lo_b) / 2.0
-    top = float(cells[:, 2].max())
+    # V4.9.2: with a noisy depth map the maximum is biased upward by the noise -> a high percentile
+    top = float(np.percentile(cells[:, 2], 97.0)) if getattr(hm, "noisy", False) and len(cells) > 40 \
+        else float(cells[:, 2].max())
     bot = float(bottom_z) if bottom_z is not None else tz
     k = hm.index_of(oid)
 
@@ -475,6 +564,24 @@ def _pts_world(p, R, lo, hi, step):
     return g, (R @ g.T).T + np.asarray(p, float)
 
 
+def unobserved_depth(hm: HeightMap, P: np.ndarray) -> float:
+    """V4.9.2: how far (m) the deepest point of P is below the upper bound of what could hide in unseen space
+    (0 when the map has no unseen space or nothing is below it)"""
+    Hu = getattr(hm, "Hu", None)
+    if Hu is None:
+        return 0.0
+    xy = np.asarray(P, float)[:, :2]
+    ix = np.floor((xy[:, 0] - hm.x0) / hm.res).astype(int)
+    iy = np.floor((xy[:, 1] - hm.y0) / hm.res).astype(int)
+    ok = (ix >= 0) & (ix < hm.nx) & (iy >= 0) & (iy < hm.ny)
+    if not ok.any():
+        return 0.0
+    hu = np.full(len(xy), -1.0)
+    hu[ok] = Hu[iy[ok], ix[ok]]
+    d = np.where(hu > hm.table_z, hu - np.asarray(P, float)[:, 2], 0.0)
+    return float(max(0.0, d.max()))
+
+
 def penetration(hm: HeightMap, P: np.ndarray, ignore: Sequence[int] = ()) -> Tuple[np.ndarray, np.ndarray]:
     """per point: how far it is below the surface of an object (m, > 0 = inside), and that object index"""
     h, o = hm.at(P[:, :2])
@@ -485,21 +592,25 @@ def penetration(hm: HeightMap, P: np.ndarray, ignore: Sequence[int] = ()) -> Tup
 
 
 def preview_grasp(hm: HeightMap, fm: FingerModel, p_grasp, yaw_deg: float, pitch_deg: float, open_mm: float,
-                  target: Optional[str], step_m: float = 0.0025, table_clear_m: float = 0.0) -> Dict[str, Any]:
+                  target: Optional[str], step_m: float = 0.0025, table_clear_m: float = 0.0,
+                  margin_m: float = 0.0005) -> Dict[str, Any]:
     R = grasp_R(yaw_deg, pitch_deg)
     p = np.asarray(p_grasp, float)
     tk = hm.index_of(target) if target else -2
     boxes = fm.boxes(open_mm)
-    coll, parts = [], {}
+    coll, parts, unseen = [], {}, []
     min_table = 1e9
     for name, lo, hi in boxes:
         g, P = _pts_world(p, R, lo, hi, step_m if name.startswith("pad") else 2 * step_m)
         parts[name] = (g, P)
         pen, o = penetration(hm, P)
-        for k in set(o[pen > 0.0005].tolist()):
+        for k in set(o[pen > margin_m].tolist()):
             dmax = float(pen[(o == k)].max())
             coll.append({"part": name, "object": hm.names[k], "depth_mm": round(dmax * 1000.0, 1)})
         min_table = min(min_table, float(P[:, 2].min()) - hm.table_z)
+        du = unobserved_depth(hm, P)
+        if du > margin_m:
+            unseen.append({"part": name, "below_unseen_bound_mm": round(du * 1000.0, 1)})
     table_hit = min_table < table_clear_m - 1e-6
     # closing: each pad slides toward the other until it meets material (static map)
     pads = [(n, parts[n]) for n in parts if n.startswith("pad")]
@@ -512,7 +623,7 @@ def preview_grasp(hm: HeightMap, fm: FingerModel, p_grasp, yaw_deg: float, pitch
         for s in np.arange(0.0, face + 1e-9, 0.0005):
             Ps = P + (sgn * s) * yG[None, :]
             pen, o = penetration(hm, Ps)
-            m = pen > 0.0005
+            m = pen > margin_m
             if m.any():
                 ks = o[m]
                 k = int(np.bincount(ks).argmax())
@@ -533,6 +644,10 @@ def preview_grasp(hm: HeightMap, fm: FingerModel, p_grasp, yaw_deg: float, pitch
         "touches_table": bool(table_hit),
         "pad_pos_y": a, "pad_neg_y": b,
     }
+    if unseen:
+        res["enters_unobserved_space"] = {
+            "parts": unseen, "note": "these parts go into space the camera could not see (behind another object), "
+                                     "below the highest point anything hidden there could reach"}
     if a and b:
         sa, sb = a["contact_after_travel_mm"], b["contact_after_travel_mm"]
         res["first_contact_pushes_object_mm"] = round(abs(sa - sb), 1)
@@ -566,6 +681,9 @@ def held_cloud_from_desc(desc: Dict[str, Any], step_m: float = 0.004) -> np.ndar
     levels = []
     for r in rows:
         vals = {k: (float(v) / 1000.0 if v is not None else None) for k, v in r["outer_half_width_mm"].items()}
+        seen = [v for v in vals.values() if v is not None]
+        if seen:                                  # V4.9.2: an unmeasured side = the largest measured one there
+            vals = {k: (v if v is not None else max(seen)) for k, v in vals.items()}
         levels.append((float(r["z_m"]), vals))
     boxy = not levels
     if boxy:
@@ -597,7 +715,7 @@ def held_cloud_from_desc(desc: Dict[str, Any], step_m: float = 0.004) -> np.ndar
     return np.array(pts, float)
 
 
-def cloud_clearance(hm: HeightMap, P: np.ndarray, ignore: Sequence[str] = ()) -> Dict[str, Any]:
+def cloud_clearance(hm: HeightMap, P: np.ndarray, ignore: Sequence[str] = (), margin_m: float = 0.0005) -> Dict[str, Any]:
     """vertical clearance of points above the height map (objects other than `ignore`, and the table)"""
     ign = [hm.index_of(n) for n in ignore]
     h, o = hm.at(P[:, :2])
@@ -606,11 +724,14 @@ def cloud_clearance(hm: HeightMap, P: np.ndarray, ignore: Sequence[str] = ()) ->
     for k in ign:
         mask_obj &= o != k
     out = {"min_clearance_above_table_mm": round(float((P[:, 2] - hm.table_z).min()) * 1000.0, 1)}
+    du = unobserved_depth(hm, P)
+    if du > margin_m:
+        out["below_unobserved_space_bound_mm"] = round(du * 1000.0, 1)
     if mask_obj.any():
         i = int(np.argmin(np.where(mask_obj, gap, 1e9)))
         out["min_clearance_above_other_objects_mm"] = round(float(gap[i]) * 1000.0, 1)
         out["closest_object_below"] = hm.names[int(o[i])]
-        pen = gap < -0.0005
+        pen = gap < margin_m
         hit = sorted({hm.names[int(k)] for k in o[pen & mask_obj]})
         out["penetrates"] = hit
     else:

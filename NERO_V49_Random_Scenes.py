@@ -227,11 +227,14 @@ def sample_scene(seed: int, n_distractors: Optional[int] = None) -> Scene:
     return sc
 
 
-def make_twin(scene: Scene, log=None):
+def make_twin(scene: Scene, log=None, noise=None):
+    """noise: None = simulator-true geometry; True / dict = V4.9.2 real-like perception (GP.REAL_LIKE_NOISE)"""
     import NERO_V343_Scenes as SC
     import NERO_V489_General_Pick_Place as GP
+    if noise is True:
+        noise = dict(GP.REAL_LIKE_NOISE, seed=int(scene.seed))
     return GP.TwinGeneralIO(log=log, world_xml=scene.world_xml, hold_names=scene.hold_names, assets=SC.CUP_ASSETS,
-                            slots=None)
+                            slots=None, noise=noise)
 
 
 # ------------------------------------------------------------------------------------------------ truth check

@@ -30,8 +30,9 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-VERSION = "V4.9.1"
+VERSION = "V4.9.2"
 MARKER_V491 = "V4.9.1 DENSE LINES + REACHABILITY"
+MARKER_V492 = "V4.9.2 REAL-LIKE PERCEPTION + LLM EVAL + COMPACT OUTPUTS"
 MARKER = "V4.8.9 GENERAL PICK&PLACE CHUNK LLM"
 MARKER_V49 = "V4.9 GENERAL FACTS"
 PLAN_BUDGET_S = 2.0
@@ -308,6 +309,13 @@ class GeneralPickPlaceSkills:
     # V4.9 GENERAL FACTS: perception = measured geometry (height map, cross sections, side profile, cavity, relations);
     # preview_grasp / plan_* never move the arm; execute_* report what was measured (contacts, forces, object motion)
 
+    def _meas_margin_m(self) -> float:
+        """V4.9.2: collision checks count anything closer than this as touching (perception error); 0.5 mm with
+        simulator-true geometry, 4 mm with the real-like (noisy) twin perception, 6 mm on the real robot"""
+        if getattr(self.io, "perception_noise", None):
+            return 0.004
+        return 0.0005 if self.is_sim else 0.006
+
     def _tip_clear_m(self) -> float:
         return float(getattr(self.RT, "TIP_PLAN_CLEAR_M", 0.005)) + 0.0005
 
@@ -365,6 +373,7 @@ class GeneralPickPlaceSkills:
         if hm is None:
             hm = G49.HeightMap.from_boxes(descs, zt)
         self.hm = hm
+        prev_desc = dict(getattr(self, "desc", None) or {})
         self.desc = {d["object_id"]: d for d in descs}
         self.cam = {oid: self._cam_entry(d) for oid, d in self.desc.items()}
         rel = res.get("relations")
@@ -373,7 +382,7 @@ class GeneralPickPlaceSkills:
         seen, other = [], []
         for d in descs:
             if self._matches(d["label"], d["object_id"], p_list):
-                seen.append({k: v for k, v in d.items() if not k.startswith("_") and k not in ("det_id", "kind")})
+                seen.append(self._compact_desc(d, prev_desc.get(d["object_id"])))
             else:
                 other.append({"object_id": d["object_id"], "center_xyz_m": d["center_xyz_m"], "top_z_m": d["top_z_m"],
                               "size_mm": d.get("size_mm"), "note": "seen by the depth camera, not matched by the prompts"})
@@ -381,10 +390,45 @@ class GeneralPickPlaceSkills:
             self.stage = "OBSERVED"
         spec = self._fingers().llm_spec()
         spec["min_fingertip_above_table_mm"] = round(self._tip_clear_m() * 1000.0, 1)
+        spec["collision_margin_mm"] = round(self._meas_margin_m() * 1000.0, 1)
+        extra = {"objects": seen, "other_objects": other, "relations": rel}
+        # V4.9.2 COMPACT OUTPUTS: the gripper geometry and the field legend once per task, then a pointer
+        if not getattr(self, "_spec_sent", False):
+            extra.update(gripper=spec, legend=DESC_LEGEND)
+            self._spec_sent = True
+        else:
+            extra["gripper"] = "unchanged (see the first perceive_objects result)"
         return self._res("perceive_objects", True,
-                         {"prompts": p_list, "count": len(seen), "table_z_m": round(zt, 4), "gripper": spec},
-                         nxt=["preview_grasp"] if seen else ["perceive_objects"],
-                         objects=seen, other_objects=other, relations=rel, gripper=spec, gripper_specs=spec)
+                         {"prompts": p_list, "count": len(seen), "table_z_m": round(zt, 4)},
+                         nxt=["preview_grasp"] if seen else ["perceive_objects"], **extra)
+
+    def _compact_desc(self, d, prev=None):
+        """V4.9.2 COMPACT OUTPUTS: what the LLM gets for one object (internal keys dropped, the legend is sent once);
+        an object that has not moved (< 3 mm, < 3 deg, same size) since the last look is a one-line entry"""
+        if prev is not None:
+            dc = float(np.linalg.norm(np.asarray(d["center_xyz_m"], float) - np.asarray(prev["center_xyz_m"], float)))
+            dy = abs(((float(d.get("axis_a_yaw_deg") or 0) - float(prev.get("axis_a_yaw_deg") or 0) + 90.0) % 180.0) - 90.0)
+            ds = max(abs(float(a) - float(b)) for a, b in zip(d.get("size_mm") or [0, 0], prev.get("size_mm") or [0, 0]))
+            if dc < 0.003 and dy < 3.0 and ds < 4.0:
+                return {"object_id": d["object_id"], "label": d.get("label"), "center_xyz_m": d["center_xyz_m"],
+                        "top_z_m": d["top_z_m"], "unchanged": "same pose and geometry as the previous look"}
+        out = {}
+        for k, v in d.items():
+            if k.startswith("_") or k in ("det_id", "kind", "size_axes", "yaw_deg", "conf", "trusted", "measurement"):
+                continue
+            if k == "top_surface_segments_mm":
+                v = {kk: vv for kk, vv in v.items() if kk != "format"}
+            elif k == "open_cavity" and v:
+                v = {kk: vv for kk, vv in v.items() if kk != "note"}
+            elif k == "side_profile":
+                v = [{"z_above_table_mm": r["z_above_table_mm"],
+                      "outer_half_width_mm": {kk: vv for kk, vv in r["outer_half_width_mm"].items() if vv is not None},
+                      "inner_half_width_mm": {kk: vv for kk, vv in r["inner_half_width_mm"].items() if vv is not None}}
+                     for r in v]
+            out[k] = v
+        if d.get("measurement"):
+            out["measured_by"] = "depth camera (noisy, unseen sides missing)"
+        return out
 
     # -- grasp geometry
     def _grasp_point(self, object_id, xy_offset_mm, grasp_z_offset_from_top_mm):
@@ -405,7 +449,7 @@ class GeneralPickPlaceSkills:
         p, _ = self._grasp_point(object_id, xy_offset_mm, grasp_z_offset_from_top_mm)
         om = min(float(open_mm), self._fingers().max_open_mm)
         pv = G49.preview_grasp(self.hm, self._fingers(), p, float(closing_yaw_deg), float(pitch_deg or 0.0), om, object_id,
-                               table_clear_m=self._tip_clear_m())
+                               table_clear_m=self._tip_clear_m(), margin_m=self._meas_margin_m())
         pv["grasp_point_above_table_mm"] = round((p[2] - self.hm.table_z) * 1000.0, 1)
         if float(open_mm) > om:
             pv["open_mm_clipped_to"] = om
@@ -455,7 +499,8 @@ class GeneralPickPlaceSkills:
                 if r.get("ok"):
                     st = f"plans (joint margin {pv.get('min_joint_margin_deg')} deg)"
                 else:
-                    st = "; ".join(pv.get("rejects", [])[:1])[:120] or str(r.get("reason"))
+                    st = re.sub(r"^yaw [+-]?\d+: ", "", "; ".join(pv.get("rejects", [])[:1]))[:100] or str(r.get("reason"))
+                    st = st.replace("no arm posture (IK) for pregrasp -> grasp -> lift", "no arm posture (IK)")
                     pre0, lift0 = float(args.get("pregrasp_height_mm") or 80.0), float(args.get("lift_height_mm") or 100.0)
                     if "IK" in st or "line fails" in st or "joint" in st:   # lower pregrasp / lift?
                         for pre, lift in ((min(pre0, 40.0), round(lift0 * 0.6)), (30.0, 40.0)):
@@ -463,7 +508,7 @@ class GeneralPickPlaceSkills:
                                 continue
                             r2 = self._plan_grasp_core(**dict(a_turn, pregrasp_height_mm=pre, lift_height_mm=lift))
                             if r2.get("ok"):
-                                st += f" | plans with pregrasp_height_mm {pre:.0f} and lift_height_mm {lift:.0f}"
+                                st += f" | plans with pregrasp {pre:.0f} / lift {lift:.0f} mm"
                                 break
                 rows.append({"turn_deg": d, "xy_offset_mm": off, "closing_yaw_deg": round(yaw, 1), "status": st})
         finally:
@@ -508,7 +553,8 @@ class GeneralPickPlaceSkills:
             if time.time() > deadline:
                 rej.append("planning time budget used up")
                 break
-            pv = G49.preview_grasp(self.hm, fm, p_a, gyaw, float(pitch_deg or 0.0), om, object_id)
+            pv = G49.preview_grasp(self.hm, fm, p_a, gyaw, float(pitch_deg or 0.0), om, object_id,
+                                   margin_m=self._meas_margin_m())
             if geo_first is None:
                 geo_first = pv
             if pv["collisions_at_grasp_pose"]:
@@ -781,7 +827,7 @@ class GeneralPickPlaceSkills:
             h0 = args.get("held_bottom_above_target_top_mm")
             h0 = float(h0 if h0 is not None else (args.get("release_above_target_mm") or 20.0))
             out["held_bottom_above_target_top_mm"] = {f"{h:+.0f}": status(dict(args, held_bottom_above_target_top_mm=h))
-                                                      for h in sorted({round(h0 + d) for d in (-40, -20, 0, 20, 40, 60)})}
+                                                      for h in sorted({round(h0 + d) for d in (-40, -20, 0, 20, 40, 60)} | {0, 10, 20})}
         finally:
             self._probing = False
             self.place_plan, self.stage, self.plan = saved
@@ -849,9 +895,9 @@ class GeneralPickPlaceSkills:
             "held_object_bottom_z_m": round(z_bottom, 4),
             "held_object_bottom_above_target_top_mm": float(held_bottom_above_target_top_mm),
             "grasp_point_at_release_xyz_m": [round(float(v), 4) for v in p_rel_g],
-            "held_object_clearance": G49.cloud_clearance(hm_wo, held_w),
-            "fingers_clearance_closed": G49.cloud_clearance(hm_wo, fing_closed),
-            "fingers_clearance_when_opened_to_release_mm": G49.cloud_clearance(hm_wo, fing_open),
+            "held_object_clearance": G49.cloud_clearance(hm_wo, held_w, margin_m=self._meas_margin_m()),
+            "fingers_clearance_closed": G49.cloud_clearance(hm_wo, fing_closed, margin_m=self._meas_margin_m()),
+            "fingers_clearance_when_opened_to_release_mm": G49.cloud_clearance(hm_wo, fing_open, margin_m=self._meas_margin_m()),
             "release_open_mm": g_open,
         }
         if tgt_name and (self.desc or {}).get(tgt_name):
@@ -908,7 +954,7 @@ class GeneralPickPlaceSkills:
             worst_, at_ = None, None
             for T in Ts:
                 P = (T[:3, :3] @ pts_G.T).T + T[:3, 3]
-                cc = G49.cloud_clearance(hm_wo, P)
+                cc = G49.cloud_clearance(hm_wo, P, margin_m=self._meas_margin_m())
                 v = cc.get("min_clearance_above_other_objects_mm")
                 v = 1e9 if v is None else v
                 v = min(v, cc["min_clearance_above_table_mm"])
@@ -1439,25 +1485,121 @@ def _slot_objects(slots: Optional[Dict[str, Tuple[float, float, float]]]):
     return out
 
 
+DESC_LEGEND = {                        # V4.9.2: sent once per task instead of inside every object
+    "size_mm": "[along axis a, along axis b]; axis a yaw = axis_a_yaw_deg, axis b = axis a + 90 deg",
+    "top_surface_segments_mm": "cross sections through center_xyz_m seen from above: [from_offset_mm, to_offset_mm, "
+                               "surface height above table mm (null = not this object)]",
+    "side_profile": "at each height above the table: outer / inner half width (mm) from center_xyz_m along +a, -a, "
+                    "+b, -b; a missing direction was not measured",
+    "open_cavity": "the surface inside the footprint is lower than its rim (measured from above)",
+    "unchanged": "the object has not moved since the previous look; its full description is in that result",
+    "enters_unobserved_space": "part of the gripper / held object would be in space the camera could not see (behind "
+                               "an object), below the highest point anything hidden there could reach; collision "
+                               "checks only use what was seen",
+}
+
+REAL_LIKE_NOISE = {                    # V4.9.2 REAL-LIKE PERCEPTION (twin): what a fixed D435i would roughly give
+    "cam_pos": (-0.95, 0.0, 0.72),     # the backend's fixed camera (NERO_V308 camera_config)
+    "pos_sigma_mm": 1.0,               # per look, per object (2 mm per frame, 5-frame average as V3.83 / V3.84)
+    "yaw_sigma_deg": 1.5,
+    "bias_sigma_mm": 3.0,              # per episode, all objects (hand-eye calibration error)
+    "depth_k": 0.0025,                 # depth sigma = k * d^2 (2.3 mm at 0.95 m)
+    "dropout": 0.02,
+    "side_sigma_mm": 1.5,
+    "seed": 0,
+}
+
+
 class ProbeVision:
     """V4.9 PROBE VISION: the sim scene objects in a robot-free MuJoCo copy, posed from the simulator before every
-    look; ray-cast height map + descriptors + relations.  pose_fn(body) -> (xyz, quat_wxyz)."""
+    look; ray-cast height map + descriptors + relations.  pose_fn(body) -> (xyz, quat_wxyz).
+    V4.9.2: noise=REAL_LIKE_NOISE (or a dict) -> the height map comes from a simulated fixed depth camera (shadows
+    = unobserved space, depth noise, dropouts), object poses get look / episode errors, the side profile keeps only
+    the sides the camera sees (outer: facing it, inner: the far wall seen through an opening), the bottom is not
+    measured (table, or the floor of the opening it stands in)."""
 
-    def __init__(self, world_xml, assets, pose_fn, slots=None):
+    def __init__(self, world_xml, assets, pose_fn, slots=None, noise=None):
         self.probe = G49.MjProbe(world_xml, assets)
         self.pose_fn = pose_fn
         self.slots = slots
+        self.noise = dict(REAL_LIKE_NOISE, **noise) if isinstance(noise, dict) else (dict(REAL_LIKE_NOISE) if noise else None)
+        if self.noise:
+            self.rng = np.random.default_rng(int(self.noise.get("seed", 0)))
+            self.bias = self.rng.normal(0.0, float(self.noise["bias_sigma_mm"]) / 1000.0, 3)
+
+    def _noisy_pose(self, body):
+        p, q = self.pose_fn(body)
+        if p is None or not self.noise:
+            return p, q
+        n = self.noise
+        p = np.asarray(p, float) + self.bias + np.r_[self.rng.normal(0.0, n["pos_sigma_mm"] / 1000.0, 2),
+                                                     self.rng.normal(0.0, 0.5 * n["pos_sigma_mm"] / 1000.0)]
+        if q is not None:
+            a = math.radians(float(self.rng.normal(0.0, n["yaw_sigma_deg"]))) / 2.0
+            w0, x0, y0, z0 = [float(v) for v in q]
+            w1, z1 = math.cos(a), math.sin(a)                       # q_noise (about z) * q
+            q = [w1 * w0 - z1 * z0, w1 * x0 - z1 * y0, w1 * y0 + z1 * x0, w1 * z0 + z1 * w0]
+        return list(p), q
+
+    def _side_fn(self, cam_xy):
+        probe, n, rng = self.probe, self.noise, getattr(self, "rng", None)
+
+        def fn(oid, ctr, yaw, levels, reach, floor_z):
+            rows = probe.side_profile(oid, ctr, yaw, levels, reach, floor_z)
+            if not n:
+                return rows
+            a = math.radians(yaw)
+            dirs = {"+a": (math.cos(a), math.sin(a)), "-a": (-math.cos(a), -math.sin(a)),
+                    "+b": (-math.sin(a), math.cos(a)), "-b": (math.sin(a), -math.cos(a))}
+            to_cam = np.asarray(cam_xy, float) - np.asarray(ctr, float)[:2]
+            to_cam /= max(float(np.linalg.norm(to_cam)), 1e-9)
+            for r in rows:
+                for k, (ux, uy) in dirs.items():
+                    facing = ux * to_cam[0] + uy * to_cam[1]
+                    o, i = r["outer_half_width_mm"].get(k), r["inner_half_width_mm"].get(k)
+                    r["outer_half_width_mm"][k] = (round(o + float(rng.normal(0.0, n["side_sigma_mm"])), 1)
+                                                   if (o is not None and facing > 0.2) else None)
+                    r["inner_half_width_mm"][k] = (round(i + float(rng.normal(0.0, n["side_sigma_mm"])), 1)
+                                                   if (i is not None and facing < -0.2) else None)
+            return rows
+        return fn
 
     def look(self, table_z=0.0):
-        self.probe.set_poses(self.pose_fn)
-        hm = self.probe.heightmap(table_z=table_z)
+        if not self.noise:
+            self.probe.set_poses(self.pose_fn)
+            hm = self.probe.heightmap(table_z=table_z)
+            descs = []
+            for oid in self.probe.names:
+                d = G49.describe(hm, oid, self.probe.bottom_z(oid), self.probe.side_profile)
+                if d is not None:
+                    descs.append(d)
+            return hm, descs, G49.relations(descs)
+        self.probe.set_poses(self._noisy_pose)
+        cam = self.noise["cam_pos"]
+        hm = self.probe.camera_heightmap(cam, table_z=table_z, rng=self.rng, depth_k=self.noise["depth_k"],
+                                         dropout=self.noise["dropout"])
+        side = self._side_fn(cam[:2])
         descs = []
         for oid in self.probe.names:
-            d = G49.describe(hm, oid, self.probe.bottom_z(oid), self.probe.side_profile)
+            d = G49.describe(hm, oid, table_z, side)
             if d is not None:
+                d["measurement"] = ("simulated fixed depth camera: position / depth noise, unseen sides not "
+                                    "measured, bottom not measured (table or the floor of the opening it is in)")
                 descs.append(d)
-        rel = G49.relations(descs)
-        return hm, descs, rel
+        for d in descs:                        # bottom: the floor of an opening it stands in, else the table
+            for e in descs:
+                cav = e.get("open_cavity")
+                if e is d or not cav:
+                    continue
+                dxy = np.asarray(d["center_xyz_m"][:2]) - np.asarray(e["center_xyz_m"][:2])
+                r_open = min(v for v in cav["opening_half_width_mm"].values()) / 1000.0
+                if float(np.linalg.norm(dxy)) < r_open and float(d["top_z_m"]) < float(e["top_z_m"]) + 0.08:
+                    fz = table_z + float(cav["floor_z_above_table_mm"]) / 1000.0
+                    if fz < float(d["top_z_m"]) - 0.005:
+                        d["bottom_z_m"] = round(fz, 4)
+                        d["height_mm"] = round((float(d["top_z_m"]) - fz) * 1000.0, 1)
+                        d["center_xyz_m"][2] = round((float(d["top_z_m"]) + fz) / 2.0, 4)
+        return hm, descs, G49.relations(descs)
 
     def perceive(self, prompts=None):
         hm, descs, rel = self.look()
@@ -1477,7 +1619,7 @@ class ProbeVision:
     def position(self, oid):
         for b in self.probe.free:
             if G49.object_id_for(b, "") == oid:
-                p, _q = self.pose_fn(b)
+                p, _q = self._noisy_pose(b) if self.noise else self.pose_fn(b)
                 return p
         return None
 
@@ -1662,7 +1804,7 @@ def _make_twin_io_class():
         tip_drop_m = 0.030
 
         def __init__(self, log=None, start_tcp=None, motion_allowed=True, world_xml=None, hold_names=None,
-                     assets=None, slots="default"):
+                     assets=None, slots="default", noise=None):
             wx = world_xml if world_xml is not None else SC.general_world_xml(bare=True)
             super().__init__(
                 log=log,
@@ -1680,7 +1822,9 @@ def _make_twin_io_class():
             self.home_q = list(self.q)
             self.last_perception = None
             sl = SC.GENERAL_SLOTS if (slots == "default" and world_xml is None) else (None if slots == "default" else slots)
-            self._vision = ProbeVision(wx, (assets if assets is not None else SC.CUP_ASSETS), self._pose_wxyz, slots=sl)
+            self._vision = ProbeVision(wx, (assets if assets is not None else SC.CUP_ASSETS), self._pose_wxyz, slots=sl,
+                                       noise=noise)
+            self.perception_noise = self._vision.noise
 
         def _pose_wxyz(self, body_name):
             try:

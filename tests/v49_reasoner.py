@@ -26,6 +26,19 @@ class GeometricReasoner:
     def call(self, name, **args):
         r = self.sk.run_tool(name, args)
         self.calls.append((name, args, bool(r.get("ok")), r.get("reason")))
+        if name == "perceive_objects":          # V4.9.2: remember full descriptions ("unchanged" = see last look)
+            mem = self.__dict__.setdefault("_mem", {})
+            if isinstance(r.get("gripper"), dict):
+                self._gripper = r["gripper"]
+            objs = []
+            for o in r.get("objects") or []:
+                if o.get("unchanged") and o["object_id"] in mem:
+                    o = mem[o["object_id"]]
+                else:
+                    mem[o["object_id"]] = o
+                objs.append(o)
+            r["objects"] = objs
+            r["gripper"] = getattr(self, "_gripper", r.get("gripper"))
         return r
 
     # ------------------------------------------------------------------ helpers
@@ -55,9 +68,9 @@ class GeometricReasoner:
             r_in = float(np.mean([ow[k] for k in ow]))
             r_out = (sa + sb) / 4.0
             z = max(z_floor, top - 0.020)
-            rows = [r for r in (o.get("side_profile") or []) if r.get("z_m") is not None]
+            rows = [r for r in (o.get("side_profile") or []) if r.get("z_above_table_mm") is not None]
             if rows:                                          # the wall where the pads will be
-                row = min(rows, key=lambda r: abs(float(r["z_m"]) - z))
+                row = min(rows, key=lambda r: abs(table_z + float(r["z_above_table_mm"]) / 1000.0 - z))
                 outs = [v for v in row["outer_half_width_mm"].values() if v is not None]
                 ins = [v for v in row["inner_half_width_mm"].values() if v is not None]
                 if outs:
@@ -106,6 +119,12 @@ class GeometricReasoner:
             if o is None:
                 return {"ok": False, "why": f"{source} not seen"}
             cands = self._grasp_candidates(o, gripper, table_z)
+            tried = getattr(self, "_tried_yaws", [])
+            if tried:                                  # a failed clamp: try other closing directions first
+                cands.sort(key=lambda c: min([abs(((c["yaw"] - t + 90.0) % 180.0) - 90.0) for t in tried]) < 20.0)
+            sh = getattr(self, "_shift", (0.0, 0.0))
+            for c in cands:
+                c["xy_offset_mm"] = [round(c["xy_offset_mm"][0] + sh[0], 1), round(c["xy_offset_mm"][1] + sh[1], 1)]
             planned = False
             for c in cands:
                 off_z = round((c["z"] - float(o["top_z_m"])) * 1000.0, 1)
@@ -136,6 +155,17 @@ class GeometricReasoner:
             if r.get("reason") == "LIFT_FAILED" and self.sk.held:
                 held = True
                 break
+            # one pad touched, the other closed on nothing: the object is nearer that pad -> shift toward it
+            pvf = (r.get("physical_verification") or {}).get("planned_finger_preview") or {}
+            if pvf:
+                self.__dict__.setdefault("_tried_yaws", []).append(float(pvf.get("closing_yaw_deg", 0.0)))
+            cl = (r.get("physical_verification") or {}).get("clamp") or {}
+            gp = (r.get("physical_verification") or {}).get("planned_finger_preview") or {}
+            if bool(cl.get("contact_left")) != bool(cl.get("contact_right")) and gp:
+                yaw = math.radians(float(gp.get("closing_yaw_deg", 0.0)))
+                sgn = 1.0 if cl.get("contact_left") else -1.0          # left = finger 1 = the +y_G pad
+                self._shift = (getattr(self, "_shift", (0.0, 0.0))[0] + sgn * 3.0 * math.cos(yaw),
+                               getattr(self, "_shift", (0.0, 0.0))[1] + sgn * 3.0 * math.sin(yaw))
             perc = self.call("perceive_objects", prompts=["object"], use_finetuned=True)
         if not held:
             return {"ok": False, "why": "grasp failed"}

@@ -21,13 +21,13 @@ class TestV4811PureGeometryAndAABB(unittest.TestCase):
 
         v = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
         self.assertEqual((v, RR.VERSION), (C.VERSION, C.VERSION))
-        self.assertIn(v, ("V4.8.11", "V4.9", "V4.9.1"))
-        self.assertIn(GP.VERSION, ("V4.8.11", "V4.9", "V4.9.1"))
+        self.assertIn(v, ("V4.8.11", "V4.9", "V4.9.1", "V4.9.2"))
+        self.assertIn(GP.VERSION, ("V4.8.11", "V4.9", "V4.9.1", "V4.9.2"))
 
         io = T10._MockSimGeneralIO()
         sk = GP.GeneralPickPlaceSkills(io)
         obs = sk.perceive_objects(prompts=["egg", "cup"], use_finetuned=True)
-        gs = obs["gripper_specs"]
+        gs = obs.get("gripper_specs") or obs["gripper"]     # V4.9.2: one copy ("gripper")
         # V4.9: the gripper geometry comes from the collision model (NERO_V49_Geometry.FingerModel); no held-gap rule
         self.assertIn("max_opening_mm", gs)
         self.assertIn("fingertip_below_grasp_point_mm", gs)

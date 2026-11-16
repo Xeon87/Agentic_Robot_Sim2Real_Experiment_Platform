@@ -110,6 +110,7 @@ grep -qF 'def set_choice' NERO_V48_Gripper.py && grep -qF 'SOFTFIN_GRASP_FROM_TI
 grep -qF 'def _carton_base_z' NERO_V365_Real_Cup_Task.py && grep -qF 'def _extra_ik_seeds' NERO_V365_Real_Cup_Task.py || { echo "[FAIL] V4.8.5 markers missing"; exit 1; }
 grep -qF 'V4.9 GENERAL GEOMETRY' NERO_V49_Geometry.py && grep -qF 'V4.9 GENERAL FACTS' NERO_V489_General_Pick_Place.py && grep -qF 'V4.9 RANDOM PICK PLACE SCENES' NERO_V49_Random_Scenes.py || { echo "[FAIL] V4.9 markers missing"; exit 1; }
 grep -qF 'V4.9.1 DENSE LINES + REACHABILITY' NERO_V489_General_Pick_Place.py && grep -qF 'def _dense_line' NERO_V489_General_Pick_Place.py || { echo "[FAIL] V4.9.1 markers missing"; exit 1; }
+grep -qF 'V4.9.2 REAL-LIKE PERCEPTION + LLM EVAL + COMPACT OUTPUTS' NERO_V489_General_Pick_Place.py && grep -qF 'def camera_heightmap' NERO_V49_Geometry.py || { echo "[FAIL] V4.9.2 markers missing"; exit 1; }
 grep -qF 'V4.8.6 STARTUP GRIPPER + CAMERAS + YMODEL + XFT CRASH FIX' NERO_V312_Console.py && grep -qF 'V4.8.6 CAMERA YMODEL MENU + STARTUP DEFAULTS' NERO_V472_Wrist_Calib.py || { echo "[FAIL] V4.8.6 markers missing"; exit 1; }
 grep -qF 'V4.8.7 CUROBO REAL IK + SMOLVLA VRAM RELEASE' NERO_V487_CuRobo_IK.py && grep -qF 'ensure_curobo_server' NERO_V313_Real_Robot.py && grep -qF '_release_curobo_vram' NERO_V4_Console_Tab.py || { echo "[FAIL] V4.8.7 markers missing"; exit 1; }
 grep -qF 'V3.81 YOLOE TRAIN' NERO_V381_Yolo_Train.py && grep -qF 'V3.81 PROFILE FILES + TRAIN PAGE' NERO_V379_Camera_Lab.py && grep -qF 'NERO_V381_Yolo_Train.py' start_nero.sh || { echo "[FAIL] V3.81 train marker missing"; exit 1; }
@@ -217,4 +218,5 @@ python3 tests/test_v4_8_11.py 2>&1 | tail -1  # V4.8.11 geometry-only gripper fa
 python3 tests/test_v4_9.py 2>&1 | tail -1     # V4.9 measured geometry, preview_grasp, contact hold, no hints, place checks, carton walls
 python3 tests/test_v4_9_twin.py 2>&1 | tail -1  # V4.9 general pick & place in the MuJoCo twin: user scene + random scenes (skips without mujoco; minutes)
 python3 tests/test_v4_9_1.py 2>&1 | tail -1   # V4.9.1 dense line checks (plan == execution), grasp / place reachability maps
+python3 tests/test_v4_9_2.py 2>&1 | tail -1   # V4.9.2 min-area footprint, compact outputs, collision margins, real-like twin perception, LLM eval plumbing
 python3 tests/test_v4_6_1_gui.py | tail -1   # skips without tkinter / DISPLAY

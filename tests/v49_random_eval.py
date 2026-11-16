@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """V4.9 random pick & place evaluation in the MuJoCo twin (needs the mujoco package).
 
-    python3 tests/v49_random_eval.py [first_seed] [n_episodes] [out.json]
+    python3 tests/v49_random_eval.py [first_seed] [n_episodes] [out.json] [--noise]
+    --noise: V4.9.2 real-like perception (simulated fixed depth camera, pose / depth noise, unseen sides)
 
 Each episode: NERO_V49_Random_Scenes.sample_scene(seed) -> twin -> GeneralPickPlaceSkills driven by the test
 stand-in tests/v49_reasoner.GeometricReasoner -> success from the simulator truth (check_success).
@@ -21,14 +22,14 @@ for p in (HERE, TESTS):
 os.environ.setdefault("NERO_CALIB_DIR", os.path.join(os.path.expanduser("~"), ".cache", "nero_v49_eval_calib"))
 
 
-def episode(seed, verbose=False):
+def episode(seed, verbose=False, noise=None):
     import NERO_V49_Random_Scenes as RS
     import NERO_V489_General_Pick_Place as GP
     from v49_reasoner import GeometricReasoner
     t0 = time.time()
     sc = RS.sample_scene(seed)
     logs = []
-    io = RS.make_twin(sc, log=logs.append)
+    io = RS.make_twin(sc, log=logs.append, noise=noise)
     sk = GP.GeneralPickPlaceSkills(io)
     rs = GeometricReasoner(sk, log=print if verbose else (lambda *_: None))
     try:
@@ -45,12 +46,14 @@ def episode(seed, verbose=False):
 
 
 def main():
-    s0 = int(sys.argv[1]) if len(sys.argv) > 1 else 1
-    n = int(sys.argv[2]) if len(sys.argv) > 2 else 10
-    out = sys.argv[3] if len(sys.argv) > 3 else None
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    noise = True if "--noise" in sys.argv else None          # V4.9.2: real-like perception
+    s0 = int(args[0]) if len(args) > 0 else 1
+    n = int(args[1]) if len(args) > 1 else 10
+    out = args[2] if len(args) > 2 else None
     res = []
     for seed in range(s0, s0 + n):
-        r = episode(seed)
+        r = episode(seed, noise=noise)
         res.append(r)
         print(f"[{'OK ' if r['success'] else 'BAD'}] seed {seed:3d} {r['task']:<34} {r['detail']:<70} "
               f"calls {r['tool_calls']:3d} {r['seconds']:5.1f}s {'' if r['success'] else r['reasoner'].get('why', '')} "
