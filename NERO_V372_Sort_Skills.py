@@ -1227,7 +1227,7 @@ def run_sort_task(agent, skills, task, model, api_key="", reasoning_effort="low"
 # =============================================================================================== backend entry (A2 block)
 def gui_run_task(ctx):
     """called from NERO_V2_7_1_Unified_Backend.llm_run_task_cmd (its RUN TASK `# V3.43 A2` hook) when NERO_SCENE=sort_items"""
-    if SC.selected_variant() == "general_pick_place":   # V4.8.10 GENERAL PICK&PLACE SIM
+    if SC.selected_variant() in ("general_pick_place", "household_pick_place"):   # V4.8.10 / V4.10 GENERAL SIM
         import NERO_V489_General_Pick_Place as _V489
         return _V489.gui_run_sim_task(ctx)
     log = ctx["log"]

@@ -173,7 +173,7 @@ class TestV492(unittest.TestCase):
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
         self.assertEqual((v, RR.VERSION, GP.VERSION), (C.VERSION, C.VERSION, C.VERSION))
-        self.assertIn(v, ("V4.9.2", "V4.9.3"))
+        self.assertIn(v, ("V4.9.2", "V4.9.3", "V4.10"))
         self.assertEqual(GP.MARKER_V492, "V4.9.2 REAL-LIKE PERCEPTION + LLM EVAL + COMPACT OUTPUTS")
 
 

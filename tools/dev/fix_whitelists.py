@@ -2,7 +2,7 @@
 Append the new release to NEW first. Extend version whitelists in V3/V4 tests: every tuple of "Vx.y" literals on a line that mentions VERSION gets the
 V4.x releases appended (test logic untouched)."""
 import re, sys, glob
-NEW = ["V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4", "V4.6.5", "V4.6.6", "V4.6.8", "V4.6.9", "V4.6.10", "V4.6.11", "V4.6.12", "V4.6.13", "V4.7", "V4.7.1", "V4.7.2", "V4.7.3", "V4.7.4", "V4.8", "V4.8.1", "V4.8.2", "V4.8.3", "V4.8.4", "V4.8.5", "V4.8.6", "V4.8.7", "V4.8.8", "V4.8.9", "V4.8.10", "V4.8.11", "V4.9", "V4.9.1", "V4.9.2", "V4.9.3"]
+NEW = ["V4.1", "V4.2", "V4.3", "V4.4", "V4.5", "V4.5.1", "V4.6", "V4.6.1", "V4.6.2", "V4.6.3", "V4.6.4", "V4.6.5", "V4.6.6", "V4.6.8", "V4.6.9", "V4.6.10", "V4.6.11", "V4.6.12", "V4.6.13", "V4.7", "V4.7.1", "V4.7.2", "V4.7.3", "V4.7.4", "V4.8", "V4.8.1", "V4.8.2", "V4.8.3", "V4.8.4", "V4.8.5", "V4.8.6", "V4.8.7", "V4.8.8", "V4.8.9", "V4.8.10", "V4.8.11", "V4.9", "V4.9.1", "V4.9.2", "V4.9.3", "V4.10"]
 TUP = re.compile(r'\((\s*"V\d+\.\d+(?:\.\d+)?"\s*(?:,\s*"V\d+\.\d+(?:\.\d+)?"\s*)*,?\s*)\)')
 n_files = n_tuples = 0
 for p in sorted(glob.glob(sys.argv[1] + "/tests/test_*.py")):

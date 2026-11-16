@@ -30,7 +30,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-VERSION = "V4.9.3"
+VERSION = "V4.10"
 MARKER_V493 = "V4.9.3 TASK-START RECOVERY + SAFETY STOP + SINGULARITY + EGG ROLL"
 MARKER_V491 = "V4.9.1 DENSE LINES + REACHABILITY"
 MARKER_V492 = "V4.9.2 REAL-LIKE PERCEPTION + LLM EVAL + COMPACT OUTPUTS"
@@ -1866,8 +1866,8 @@ def _make_sim_io_class():
             if getattr(self, "_vision", None) is None:
                 try:
                     import NERO_V343_Scenes as SC
-                    self._vision = ProbeVision(SC.general_world_xml(bare=True), SC.CUP_ASSETS, _pose_wxyz,
-                                               slots=SC.GENERAL_SLOTS)
+                    wx, asx, sl = SC.general_probe_spec()      # V4.10: this scene's bodies (household / general)
+                    self._vision = ProbeVision(wx, asx, _pose_wxyz, slots=sl)
                 except Exception as e:
                     self._vision = False
                     self.emit(f"[WARN] [V4.9 GENERAL] probe vision unavailable ({e}); boxes from the old perception")

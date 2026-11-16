@@ -2285,4 +2285,10 @@ def add_sim_strategy_tab(tk, ttk, notebook, log=None):
     if log is not None:
         log(f"[V3.60 SKILL TAB] 本次仿真按启动时注入的技能运行：{run or '未注入（后端默认 = EB）'}"
             f"{' ' + os.environ.get('NERO_V360_SKILL_NAME', '') if run else ''}；在此页「应用」的技能下次启动仿真时生效")
+    try:   # V4.10 SIM BRIDGE: console LLM settings shown read-only in NERO SimAgent + task file channel (backend untouched)
+        import NERO_V410_Sim_Bridge as _B410
+        _B410.attach_from_notebook(notebook, log or (lambda s: None))
+    except Exception as exc:
+        if log is not None:
+            log(f"[WARN] [V4.10 SIM BRIDGE] not attached: {exc}")
     return ui

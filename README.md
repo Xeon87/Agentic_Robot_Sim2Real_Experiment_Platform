@@ -1,4 +1,15 @@
-# NERO V4.9.3 — single-folder release
+# NERO V4.10 — single-folder release
+
+**V4.10**（家居物品场景 + LLM 设置挪到控制台 + 场景选择对话框 + 复位桌面物品；Sim DOE 页在下一版）
+
+- **怎么用**：控制台「仿真 (MuJoCo)」页：
+  1. 先在「LLM 设置」区选提供方、模型、思考档位，填 API key（可「保存到钥匙串」，下次自动读出；key 失效时「删除已保存的 key」再填新的）。
+  2. 场景下拉框选 `general_pick_place` 或 `household_pick_place`，点「启动仿真」，在弹出的对话框里选原通用场景、固定家居场景 H1–H5，或者随机场景（种子）。
+  3. 仿真里 NERO SimAgent 的 LLM 设置是只读的（由控制台传入），照常输入任务、RUN TASK。
+  4. 想再试一次同一个桌面，点「复位桌面物品」（约 2 秒内生效）。
+- **钥匙串**：需要 `python3-keyring` 和桌面的密钥服务（Ubuntu 一般自带 GNOME Keyring；没有的话 `sudo apt install python3-keyring`）。不可用时界面会说明原因，key 只在本次运行期间有效。
+- **夹爪开口**：原装夹爪行程 70 mm，两指之间最多约 62 mm。苹果、瓶子按这个尺寸缩小了；马克杯和碗只能夹杯沿 / 碗沿。
+- **离线评测**：`python3 tests/v410_household_eval.py H1 H2 H3 H4 H5` 或 `seed:1-20`（需要 mujoco；测试替身推理，不是 LLM）。
 
 **V4.9.3**（通用场景：一次任务失败后，下一个任务开始时自动恢复（STOP+RECOVER、松开夹持、回家、小探测运动），只有仿真真的不响应时才提示重启；执行中发生安全停止立即停下并报告，不再自动换一种运动继续；规划时避开奇异位形；仿真鸡蛋加滚动摩擦，掉下后不再滚个不停）
 

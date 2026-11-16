@@ -192,8 +192,14 @@ case "$SCENE344" in
   tidy_desk)                                     # V4.8.3 TIDY DESK (variant of sort_items, official gripper, intent layer)
     python3 -m py_compile "$HERE/NERO_V372_Sort_Skills.py" "$HERE/NERO_V375_Collision_Check.py" "$HERE/NERO_V483_Tidy.py" "$HERE/NERO_V481_Agx_Geom.py" || fatal "py_compile failed: NERO_V372_Sort_Skills.py / NERO_V375_Collision_Check.py / NERO_V483_Tidy.py / NERO_V481_Agx_Geom.py (V4.8.3 TIDY DESK)" ;;
   general_pick_place)                            # V4.8.10 GENERAL PICK&PLACE (eggs + carton + cups, official gripper)
-    python3 -m py_compile "$HERE/NERO_V489_General_Pick_Place.py" "$HERE/NERO_V49_Geometry.py" "$HERE/NERO_V372_Sort_Skills.py" "$HERE/NERO_V375_Collision_Check.py" "$HERE/NERO_V481_Agx_Geom.py" || fatal "py_compile failed: NERO_V489_General_Pick_Place.py (V4.8.10 GENERAL PICK&PLACE)" ;;
-  *) fatal "Unknown NERO_SCENE='$SCENE344' (known: fill_egg_holder, store_in_safe, stack_cups, stack_cups_so101, sort_items, tidy_desk, general_pick_place)";;
+    python3 -m py_compile "$HERE/NERO_V489_General_Pick_Place.py" "$HERE/NERO_V49_Geometry.py" "$HERE/NERO_V372_Sort_Skills.py" "$HERE/NERO_V375_Collision_Check.py" "$HERE/NERO_V481_Agx_Geom.py" "$HERE/NERO_V410_Household_Scenes.py" "$HERE/NERO_V410_Sim_Bridge.py" || fatal "py_compile failed: NERO_V489_General_Pick_Place.py (V4.8.10 GENERAL PICK&PLACE)" ;;
+  household_pick_place)                          # V4.10 HOUSEHOLD PICK&PLACE (scanned everyday objects, official gripper)
+    python3 -m py_compile "$HERE/NERO_V489_General_Pick_Place.py" "$HERE/NERO_V49_Geometry.py" "$HERE/NERO_V372_Sort_Skills.py" "$HERE/NERO_V375_Collision_Check.py" "$HERE/NERO_V481_Agx_Geom.py" "$HERE/NERO_V410_Household_Scenes.py" "$HERE/NERO_V410_Sim_Bridge.py" || fatal "py_compile failed: NERO_V410_Household_Scenes.py (V4.10 HOUSEHOLD PICK&PLACE)"
+    for f410 in apple bottle mug bowl tray storage_box; do
+      [[ -f "$HERE/assets/household/$f410/meta.json" ]] || fatal "Missing household asset assets/household/$f410 (V4.10 HOUSEHOLD PICK&PLACE)"
+    done
+    echo "[V4.10 SCENE] household layout: ${NERO_V410_HOUSEHOLD:-fixed:H1}" ;;
+  *) fatal "Unknown NERO_SCENE='$SCENE344' (known: fill_egg_holder, store_in_safe, stack_cups, stack_cups_so101, sort_items, tidy_desk, general_pick_place, household_pick_place)";;
 esac
 export NERO_SCENE="$SCENE344"
 status INFO "V3.44 MuJoCo scene: $SCENE344 (chosen in the NERO console before start; default fill_egg_holder)"

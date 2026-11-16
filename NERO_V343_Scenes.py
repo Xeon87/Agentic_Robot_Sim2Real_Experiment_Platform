@@ -63,7 +63,15 @@ SCENES = {
         "summary": "2 eggs, 4-slot egg carton, and 2 party cups on the table for General Pick&Place LLM verification",
         "base": "sort_items",
     },
+    # V4.10 HOUSEHOLD PICK&PLACE: everyday objects (GSO / YCB scans) for the same general pick & place harness; the
+    # layout (fixed H1-H5 or a random seed) comes from NERO_V410_HOUSEHOLD (console scene dialog)
+    "household_pick_place": {
+        "label": "household_pick_place - 家居物品 Pick&Place · NERO 原装夹爪（遥控器 / 苹果 / 瓶子 / 马克杯 / 碗 / 托盘 / 收纳盒）",
+        "summary": "everyday objects (scans) on the table, fixed or random layout, for the general pick & place harness",
+        "base": "sort_items",
+    },
 }
+HOUSEHOLD = "household_pick_place"     # V4.10
 SCENES_REV = "V3.76"       # VERSION above stays "V3.44" (tests pin it); stack_cups V3.61, stack_cups_so101 V3.64, sort_items V3.72 (bins V3.75)
 HERE = Path(__file__).resolve().parent
 
@@ -119,6 +127,8 @@ def tf_body_map():
         return {n: n for n in CUP_NAMES}
     if selected_variant() == "general_pick_place":      # V4.8.10 GENERAL PICK&PLACE SCENE
         return {n: n for n in GENERAL_OBJECT_NAMES}
+    if selected_variant() == HOUSEHOLD:                 # V4.10 HOUSEHOLD PICK&PLACE
+        return {n: n for n in _household().body_names()}
     if active_scene() == "sort_items":                  # V3.72 SORT ITEMS SCENE
         return {n: n for n in SORT_ITEM_NAMES}
     return {"obj_valuables_box": "obj_valuables_box", "obj_safe_handle": "obj_safe_handle",
@@ -130,6 +140,8 @@ def hold_object_names():
         return list(CUP_NAMES) + list(LEGACY_HIDDEN)
     if selected_variant() == "general_pick_place":      # V4.8.10 GENERAL PICK&PLACE SCENE
         return list(GENERAL_OBJECT_NAMES) + list(LEGACY_HIDDEN)
+    if selected_variant() == HOUSEHOLD:                 # V4.10 HOUSEHOLD PICK&PLACE
+        return _household().hold_names() + list(LEGACY_HIDDEN)
     if active_scene() == "sort_items":                  # V3.72 SORT ITEMS SCENE
         return list(SORT_ITEM_NAMES) + list(LEGACY_HIDDEN)
     return ["obj_valuables_box", "obj_safe_handle"] + list(LEGACY_HIDDEN)
@@ -167,6 +179,8 @@ def planning_boxes(model=None, data=None):
         return []
     if selected_variant() == "general_pick_place":      # V4.8.10: carton floor box
         return [("general_egg_carton_base", (-0.53, 0.0, 0.010), (0.11, 0.13, 0.020))]
+    if selected_variant() == HOUSEHOLD:                 # V4.10: every object is movable (like the cups): none fixed
+        return []
     if active_scene() == "sort_items":                  # V3.72: the two open bins (walls + floor) are fixed obstacles
         return [(n, c, tuple(2.0 * v for v in h)) for n, c, h, _rgba in sort_bin_boxes()]
     return [(n, c, tuple(2.0 * v for v in h)) for n, c, h in static_boxes()]
@@ -197,6 +211,12 @@ def door_angle(model, data):
 
 
 def planning_rotated_boxes(model, data):
+    if selected_variant() in ("general_pick_place", HOUSEHOLD):    # V4.10 OBJECT RESET (see NERO_V410_Household_Scenes)
+        try:
+            import NERO_V410_Household_Scenes as _HS410
+            _HS410.reset_hook(model, data)
+        except Exception as exc:
+            print(f"[V4.10 RESET] failed: {exc}", flush=True)
     if active_scene() in ("stack_cups", "sort_items", "general_pick_place"):  # V3.61 / V3.72 / V4.8.10: no hinged door
         return []
     return door_boxes(door_angle(model, data))
@@ -345,6 +365,8 @@ def make_store_in_safe_xml(original_xml_path, visual_quality=None):
         return make_stack_cups_xml(original_xml_path, visual_quality=visual_quality)
     if selected_variant() == "general_pick_place":      # V4.8.10 GENERAL PICK&PLACE SCENE
         return make_general_pick_place_xml(original_xml_path, visual_quality=visual_quality)
+    if selected_variant() == HOUSEHOLD:                 # V4.10 HOUSEHOLD PICK&PLACE
+        return make_general_pick_place_xml(original_xml_path, visual_quality=visual_quality, household=True)
     if active_scene() == "sort_items":                  # V3.72 SORT ITEMS SCENE
         return make_sort_items_xml(original_xml_path, visual_quality=visual_quality)
     import numpy as np
@@ -1066,18 +1088,48 @@ def general_carton_geoms_xml():
     )
 
 
-def general_world_xml(bare=False):
+def _household():
+    """V4.10: the household layout of this run (NERO_V410_HOUSEHOLD = fixed:H1 .. H5 | seed:<n>)"""
+    import NERO_V410_Household_Scenes as HS
+    return HS.scene_from_env()
+
+
+def general_probe_spec():
+    """V4.10: (world_xml, assets, slots) the general pick & place perception casts its rays on, for this scene"""
+    if selected_variant() == HOUSEHOLD:
+        import NERO_V410_Household_Scenes as HS
+        return HS.probe_spec()
+    return general_world_xml(bare=True), CUP_ASSETS, GENERAL_SLOTS
+
+
+def general_world_xml(bare=False, household=False):
+    header = payload = None
+    if household:                                       # V4.10 HOUSEHOLD PICK&PLACE: the scanned objects instead
+        sc = _household()
+        if bare:
+            return sc.world_xml(visual=False)
+        header = f"V4.10 household_pick_place SCENE - {sc.sid}: {sc.summary()}, table top z = 0"
+        payload = f"""<!-- {sc.label} -->
+    {sc.world_xml(visual=True)}"""
     eggs = "\n    ".join(general_egg_body_xml(n, xy) for n, xy in GENERAL_EGG_XY.items())
     cups = "\n    ".join(cup_body_xml(n, xy, origin=CUP_ORIGIN) for n, xy in GENERAL_CUP_XY.items())
     carton = general_carton_geoms_xml()
     if bare:
         return carton + "\n    " + eggs + "\n    " + cups
+    if header is None:
+        header = "NERO V4.8.10 general_pick_place SCENE - eggs + carton + cups, table top z = 0"
+        payload = f"""<!-- 4-slot egg carton -->
+    {carton}
+    <!-- 2 eggs -->
+    {eggs}
+    <!-- 2 party cups -->
+    {cups}"""
     legacy = "\n".join(
         f'    <body name="{n}" pos="{-8 - 0.1 * i:.1f} -8 -8"><freejoint/><geom name="{n}_geom" type="sphere" size="0.001" '
         f'mass="0.001" rgba="0 0 0 0" contype="0" conaffinity="0"/></body>' for i, n in enumerate(LEGACY_HIDDEN))
     return f"""
     <!-- ============================================================
-         NERO V4.8.10 general_pick_place SCENE - eggs + carton + cups, table top z = 0
+         {header}
          ============================================================ -->
     <geom name="v5_grid_floor" type="plane" pos="0 0 -0.28" size="6 6 0.1"
           material="v343_floor_mat" friction="1.2 0.01 0.001" contype="1" conaffinity="1"/>
@@ -1090,12 +1142,7 @@ def general_world_xml(bare=False):
           rgba="0.15 0.16 0.18 1" contype="0" conaffinity="0"/>
     <geom name="nero_support_lower_jaw" type="box" pos="-0.080 0 -0.134" size="0.030 0.085 0.008"
           rgba="0.15 0.16 0.18 1" contype="0" conaffinity="0"/>
-    <!-- 4-slot egg carton -->
-    {carton}
-    <!-- 2 eggs -->
-    {eggs}
-    <!-- 2 party cups -->
-    {cups}
+    {payload}
     <!-- legacy hidden bodies -->
 {legacy}
     <light name="eggscene_key" pos="0.25 -0.65 2.20" dir="-0.30 0.22 -1" directional="true" castshadow="true"
@@ -1105,8 +1152,9 @@ def general_world_xml(bare=False):
 """
 
 
-def make_general_pick_place_xml(original_xml_path, visual_quality=None):
-    """V4.8.10: MJCF builder for the general_pick_place simulation scene (official gripper)."""
+def make_general_pick_place_xml(original_xml_path, visual_quality=None, household=False):
+    """V4.8.10: MJCF builder for the general_pick_place simulation scene (official gripper).
+    V4.10: household=True -> the household_pick_place layout (scanned objects, NERO_V410_HOUSEHOLD)."""
     import re
     import numpy as np
     src = Path(original_xml_path).resolve()
@@ -1127,15 +1175,19 @@ def make_general_pick_place_xml(original_xml_path, visual_quality=None):
               shininess="0.08"/>
     <material name="v343_table_mat" texture="v343_table_tex" texrepeat="2.2 1.7" reflectance="0.05"
               specular="0.25" shininess="0.2"/>
-""" + CUP_ASSETS
+""" + CUP_ASSETS + (_household().assets(visual=True) if household else "")
     if re.search(r"<asset\b[^>]*/>", xml):
         xml = re.sub(r"<asset\b[^>]*/>", "<asset>\n" + assets + "\n</asset>", xml, count=1)
     elif "<asset" in xml:
         xml = re.sub(r"(<asset\b[^>]*>)", lambda m: m.group(1) + "\n" + assets, xml, count=1)
     else:
         xml = xml.replace("<worldbody>", "<asset>\n" + assets + "\n</asset>\n\n<worldbody>", 1)
-    print("[V4.8.10 SCENE] general_pick_place: 2 eggs + 4-slot carton + 2 cups, official AgileX gripper", flush=True)
-    xml = xml.replace("<worldbody>", "<worldbody>\n" + general_world_xml(), 1)
+    if household:
+        print(f"[V4.10 SCENE] household_pick_place: {_household().sid} - {_household().summary()}, official AgileX gripper",
+              flush=True)
+    else:
+        print("[V4.8.10 SCENE] general_pick_place: 2 eggs + 4-slot carton + 2 cups, official AgileX gripper", flush=True)
+    xml = xml.replace("<worldbody>", "<worldbody>\n" + general_world_xml(household=household), 1)
     if visual_quality is not None:
         xml = visual_quality(xml)
     eq = "\n        ".join(
@@ -1145,6 +1197,7 @@ def make_general_pick_place_xml(original_xml_path, visual_quality=None):
         xml = xml.replace("</equality>", "        " + eq + "\n    </equality>", 1)
     else:
         xml = xml.replace("</mujoco>", "    <equality>\n        " + eq + "\n    </equality>\n</mujoco>", 1)
-    out = src.with_name("_nero_motor_v343_general_pick_place_tmp.xml")
+    out = src.with_name("_nero_motor_v343_household_pick_place_tmp.xml" if household
+                        else "_nero_motor_v343_general_pick_place_tmp.xml")
     out.write_text(xml, encoding="utf-8")
     return str(out)

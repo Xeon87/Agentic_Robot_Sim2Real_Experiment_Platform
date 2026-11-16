@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.9.3"
+VERSION = "V4.10"
 # V3.12 baseline: VERSION = "V3.12"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
@@ -48,7 +48,8 @@ SIM_SCENES = [("fill_egg_holder", "fill_egg_holder - 鸡蛋放入蛋托 (默认)
               ("stack_cups_so101", "stack_cups_so101 - 叠杯子 · SO-101 夹爪 (7 mm 转接环, 偏转 45°)"),  # V3.64 SO-101 GRIPPER ON NERO
               ("sort_items", "sort_items - 物品分类放入红框 / 蓝框 · SO-101 夹爪（香蕉 / 苹果 / 鼠标 / 马克笔）"),  # V3.72 SORT ITEMS SCENE
               ("tidy_desk", "tidy_desk - 桌面整理（听懂弦外之音）· NERO 原装夹爪（7 件物品 / 4 个容器）"),  # V4.8.3 TIDY DESK
-              ("general_pick_place", "general_pick_place - 通用 Pick&Place · NERO 原装夹爪（鸡蛋 / 蛋托 / 杯子）")]  # V4.8.10 GENERAL PICK&PLACE
+              ("general_pick_place", "general_pick_place - 通用 Pick&Place · NERO 原装夹爪（鸡蛋 / 蛋托 / 杯子）"),  # V4.8.10 GENERAL PICK&PLACE
+              ("household_pick_place", "household_pick_place - 家居物品 Pick&Place · NERO 原装夹爪（遥控器 / 苹果 / 瓶子 / 马克杯 / 碗 / 托盘 / 收纳盒）")]  # V4.10
 DEFAULT_SIM_SCENE = "fill_egg_holder"
 
 
@@ -179,6 +180,7 @@ class SimRunner:
         env["PYTHONUNBUFFERED"] = "1"
         env.update(extra_env or {})
         env.update(getattr(self, "strategy_env", None) or {})     # V3.60: applied skill -> backend env (only diffs)
+        env.update(getattr(self, "v410_env", None) or {})         # V4.10: household layout, reset file, LLM settings
         self._stop_requested = False
         self.exit_code = None
         self.proc = subprocess.Popen(
@@ -811,16 +813,24 @@ def run_console(initial_tab="sim"):
     btn_sim_start = ttk.Button(sim_bar, text="▶ 启动仿真")
     btn_sim_stop = ttk.Button(sim_bar, text="■ 停止仿真", state="disabled")
     btn_sim_copy = ttk.Button(sim_bar, text="Copy Log")
+    btn_sim_reset = ttk.Button(sim_bar, text="复位桌面物品", state="disabled")   # V4.10 OBJECT RESET
     btn_sim_start.pack(side="left")
     btn_sim_stop.pack(side="left", padx=6)
+    btn_sim_reset.pack(side="left", padx=6)
     btn_sim_copy.pack(side="left", padx=6)
     sim_status = tk.StringVar(value="未运行")
     ttk.Label(sim_bar, textvariable=sim_status, font=("TkDefaultFont", 10, "bold")).pack(side="left", padx=16)
     ttk.Label(sim_tab, text="仿真 GUI（Agent / Skill Test 等）在后端启动后作为单独窗口打开；关闭那个窗口或点"
                             "「停止仿真」都会停止全部仿真进程。完整日志: logs/launcher.log",
               foreground="#555555", wraplength=1000, justify="left").pack(anchor="w")
+    # V4.10 CONSOLE LLM SETTINGS: provider / model / effort / steps / dry run / API key (keyring) for the simulation
+    import NERO_V410_Console_Sim as CS410
+    llm410 = CS410.LLMSettingsPanel(tk, ttk, sim_tab, root, log=lambda m: log_append(sim_log, m), messagebox=messagebox)
+    llm410.frame.pack(fill="x", pady=(6, 4))
+    scene410 = {"scene": None, "spec": None}
     sim_log = make_log(sim_tab)
     btn_sim_copy.configure(command=lambda: copy_text(sim_log))
+    btn_sim_reset.configure(command=lambda: CS410.request_reset(lambda m: log_append(sim_log, m), root))
 
     tracker = SimStepTracker()
     runner = SimRunner(SIM_SCRIPT, log_path=console_log)
@@ -1422,6 +1432,12 @@ def run_console(initial_tab="sim"):
             sim_scene_box.configure(state="disabled" if runner.running() else "readonly")   # V3.44: fixed while running
         except Exception:
             pass
+        try:                                        # V4.10: settings fixed while running; reset only for general scenes
+            llm410.set_locked(runner.running())
+            btn_sim_reset.configure(state="normal" if runner.running() and scene410["scene"] in CS410.GENERAL_SCENES
+                                    else "disabled")
+        except Exception:
+            pass
         if runner.running():
             mode_var.set("当前模式: 仿真运行中（实机锁定）")
         elif pipe.active():
@@ -1435,6 +1451,14 @@ def run_console(initial_tab="sim"):
         if pipe.active():
             log_append(sim_log, "[FAIL] 实机进程正在运行：仿真被互斥锁定（两者都会发布 /feedback/joint_states）")
             return
+        scene = sim_scene_by_label.get(sim_scene_var.get(), DEFAULT_SIM_SCENE)
+        spec410 = None
+        if scene in CS410.GENERAL_SCENES:           # V4.10 SCENE DIALOG: original / fixed household / random seed
+            pick = CS410.ask_scene(tk, ttk, root, current=scene410.get("spec"))
+            if pick is None:
+                log_append(sim_log, "[INFO] [V4.10 SCENE] 已取消：没有启动仿真")
+                return
+            scene, spec410 = pick
         if not v377_clear_stale():
             return
         tracker.start()
@@ -1442,8 +1466,9 @@ def run_console(initial_tab="sim"):
         sim_log.configure(state="normal")
         sim_log.delete("1.0", "end")
         sim_log.configure(state="disabled")
-        scene = sim_scene_by_label.get(sim_scene_var.get(), DEFAULT_SIM_SCENE)
-        log_append(sim_log, f"[V3.12 CONSOLE] starting {SIM_SCRIPT} | V3.44 scene={scene}")
+        log_append(sim_log, f"[V3.12 CONSOLE] starting {SIM_SCRIPT} | V3.44 scene={scene}"
+                            + (f" | V4.10 layout={spec410}" if spec410 else ""))
+        log_append(sim_log, "[V4.10 LLM] " + llm410.summary())
         runner.strategy_env = {}
         try:                                        # V3.60 SIM ENV INJECTION (applied skill; baseline EB injects nothing)
             prof360 = ST59.read_active_strategy_file() or strat_tab.profile
@@ -1458,6 +1483,11 @@ def run_console(initial_tab="sim"):
             runner.strategy_env = {}
             log_append(sim_log, f"[WARN] [V3.60 策略] 技能注入失败，按后端默认参数启动：{exc}")
         try:
+            import NERO_V410_Household_Scenes as HS410
+            env410 = dict(CS410.scene_extra_env(scene, spec410, HS410.reset_file()))
+            env410.update(llm410.env())            # never logged (holds the API key)
+            runner.v410_env = env410               # V4.10: merged by SimRunner.start after scene_env
+            scene410.update(scene=scene, spec=spec410 or scene410.get("spec"))
             pid = runner.start(extra_env=scene_env(scene))
         except Exception as exc:
             log_append(sim_log, f"[FAIL] [V3.12 CONSOLE] could not start: {exc}")
