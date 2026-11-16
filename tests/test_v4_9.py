@@ -195,7 +195,8 @@ class TestV49(unittest.TestCase):
         import NERO_V489_General_Pick_Place as GP
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
-        self.assertEqual((v, C.VERSION, RR.VERSION, GP.VERSION), ("V4.9", "V4.9", "V4.9", "V4.9"))
+        self.assertEqual((v, RR.VERSION, GP.VERSION), (C.VERSION, C.VERSION, C.VERSION))
+        self.assertIn(v, ("V4.9", "V4.9.1"))
         self.assertEqual(G.MARKER, "V4.9 GENERAL GEOMETRY")
 
 

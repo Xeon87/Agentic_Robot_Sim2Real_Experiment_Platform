@@ -21,8 +21,8 @@ class TestV4811PureGeometryAndAABB(unittest.TestCase):
 
         v = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
         self.assertEqual((v, RR.VERSION), (C.VERSION, C.VERSION))
-        self.assertIn(v, ("V4.8.11", "V4.9"))
-        self.assertIn(GP.VERSION, ("V4.8.11", "V4.9"))
+        self.assertIn(v, ("V4.8.11", "V4.9", "V4.9.1"))
+        self.assertIn(GP.VERSION, ("V4.8.11", "V4.9", "V4.9.1"))
 
         io = T10._MockSimGeneralIO()
         sk = GP.GeneralPickPlaceSkills(io)

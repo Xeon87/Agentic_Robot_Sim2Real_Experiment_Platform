@@ -30,12 +30,14 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-VERSION = "V4.9"
+VERSION = "V4.9.1"
+MARKER_V491 = "V4.9.1 DENSE LINES + REACHABILITY"
 MARKER = "V4.8.9 GENERAL PICK&PLACE CHUNK LLM"
 MARKER_V49 = "V4.9 GENERAL FACTS"
 PLAN_BUDGET_S = 2.0
 MIN_PLAN_MARGIN_DEG = 8.0      # V4.9: the executed path is checked at >= 4 deg; plan with room to spare
 GOOD_PLAN_MARGIN_DEG = 14.0
+DENSE_LINE_MARGIN_DEG = 5.0    # V4.9.1: every straight line the IO will execute, checked point by point (exec >= 4)
 MIN_PLACE_MARGIN_DEG = 5.0     # V4.9: release / above-target (the executed lowering line is checked at >= 4 deg)
 
 import NERO_V49_Geometry as G49  # noqa: E402
@@ -198,7 +200,9 @@ class GeneralPickPlaceSkills:
         if time.time() > deadline:
             return None, None
 
-        # 2) cuRobo GPU IK
+        # 2) cuRobo GPU IK (not for the V4.9.1 reachability maps)
+        if getattr(self, "_probing", False):
+            return None, None
         try:
             import NERO_V487_CuRobo_IK as C487
             qs_cu, chk_cu = C487.solve_chain(self._fast, self.CK.check_joint_path, waypoints, q_seed, max_j1_deg=120.0)
@@ -223,6 +227,31 @@ class GeneralPickPlaceSkills:
             if qs:
                 return qs, dict(chk, ik_solver="fast_ik_45seeds")
         return None, None
+
+    def _dense_line(self, q_start, p_end, R_end, step_m=0.004):
+        """V4.9.1 DENSE LINE CHECK: the straight TCP line the IO will execute (IK continuity from q_start, one point
+        every 4 mm / 2 deg, like SimGeneralIO.move_line) -> (qs or None, check dict)"""
+        q0 = list(q_start)
+        T0 = self._fast.fk(np.asarray(q0, float))
+        p0, R0 = T0[:3, 3].copy(), T0[:3, :3].copy()
+        p1 = np.asarray(p_end, float)
+        R1 = np.asarray(R_end, float)
+        dist = float(np.linalg.norm(p1 - p0))
+        turn = math.degrees(math.acos(max(-1.0, min(1.0, (float(np.trace(R1 @ R0.T)) - 1.0) / 2.0))))
+        n = int(min(80, max(4, math.ceil(dist / step_m), math.ceil(turn / 2.0))))
+        pts = self.SK72._turning_segment("s", p0, R0, p1, R1, n) + [("~end", p1, R1)]
+        qs, qp = [q0], q0
+        for _nm, pk, Rk in pts:
+            r = self._fast.ik([qp], pk, Rk, iters=30)
+            if not r or r[0] is None:
+                return None, {"ok": False, "why": f"the straight line breaks after {len(qs) - 1} of {len(pts)} points "
+                                                  "(no continuous arm posture)"}
+            if max(abs(a - b) for a, b in zip(r[0], qp)) > math.radians(8.0):
+                return None, {"ok": False, "why": "the arm posture flips on the straight line (IK branch change)"}
+            qp = list(r[0])
+            qs.append(qp)
+        chk = self.CK.check_joint_path(qs, margin_deg=DENSE_LINE_MARGIN_DEG, jump_deg=8.0)
+        return (qs if chk.get("ok") else None), chk
 
     def _unlatch_if_needed(self, label: str) -> Tuple[bool, str]:
         if hasattr(self.io, "latch_pending") and self.io.latch_pending():
@@ -270,8 +299,9 @@ class GeneralPickPlaceSkills:
         if reason:
             out["reason"] = reason
         out.update(extra)
-        self.io.emit(f"[{'OK' if ok else 'FAIL'}] [V4.8.9 GENERAL] {tool}: " + (reason or "done")
-                     + (f" | {json.dumps(v, ensure_ascii=False)[:240]}" if v else ""))
+        if not getattr(self, "_probing", False):
+            self.io.emit(f"[{'OK' if ok else 'FAIL'}] [V4.8.9 GENERAL] {tool}: " + (reason or "done")
+                         + (f" | {json.dumps(v, ensure_ascii=False, default=str)[:240]}" if v else ""))
         return out
 
     # ------------------------------------------------------------------ V4.9 chunk tools (facts in, LLM decides)
@@ -384,6 +414,66 @@ class GeneralPickPlaceSkills:
     def plan_grasp_chunk(self, object_id="obj_1", xy_offset_mm=None, grasp_z_offset_from_top_mm=-20.0,
                          closing_yaw_deg=None, yaw_tolerance_deg=0.0, pitch_deg=0.0, open_mm=60.0,
                          pregrasp_height_mm=80.0, lift_height_mm=100.0, yaw_deg=None, **_):
+        args = dict(object_id=object_id, xy_offset_mm=xy_offset_mm, grasp_z_offset_from_top_mm=grasp_z_offset_from_top_mm,
+                    closing_yaw_deg=closing_yaw_deg, yaw_tolerance_deg=yaw_tolerance_deg, pitch_deg=pitch_deg,
+                    open_mm=open_mm, pregrasp_height_mm=pregrasp_height_mm, lift_height_mm=lift_height_mm, yaw_deg=yaw_deg)
+        r = self._plan_grasp_core(**args)
+        if not r.get("ok") and r.get("reason") == "GRASP_PLAN_FAILED":
+            try:
+                r.setdefault("physical_verification", {})["reachability"] = self._grasp_reach_map(args)
+            except Exception as e:
+                r.setdefault("physical_verification", {})["reachability"] = {"error": repr(e)[:120]}
+        return r
+
+    def _grasp_reach_map(self, args):
+        """V4.9.1 GRASP REACHABILITY: the same grasp turned about the object's vertical axis through center_xyz_m in
+        30 deg steps (offset and closing direction turn together; with a zero offset only the closing direction
+        turns), each checked like plan_grasp_chunk without cuRobo: plans / collision / no arm posture / joint limit"""
+        if args["object_id"] not in self.cam:
+            return {}
+        t_end = time.time() + 6.0
+        dx, dy = 0.0, 0.0
+        xy = args.get("xy_offset_mm")
+        if isinstance(xy, (list, tuple)) and len(xy) >= 2:
+            dx, dy = float(xy[0]), float(xy[1])
+        y0 = args.get("closing_yaw_deg")
+        y0 = float(y0 if y0 is not None else (float(self.cam[args["object_id"]]["yaw_deg"]) + 90.0))
+        rows = []
+        self._probing = True
+        saved = (self.grasp_plan, self.plan, self.stage)
+        try:
+            for d in range(0, 360, 30):
+                if time.time() > t_end:
+                    rows.append({"turn_deg": d, "status": "not checked (time)"})
+                    continue
+                a = math.radians(d)
+                off = [round(dx * math.cos(a) - dy * math.sin(a), 1), round(dx * math.sin(a) + dy * math.cos(a), 1)]
+                yaw = ((y0 + d + 180.0) % 360.0) - 180.0
+                a_turn = dict(args, xy_offset_mm=off, closing_yaw_deg=yaw, yaw_tolerance_deg=0.0)
+                r = self._plan_grasp_core(**a_turn)
+                pv = r.get("physical_verification", {})
+                if r.get("ok"):
+                    st = f"plans (joint margin {pv.get('min_joint_margin_deg')} deg)"
+                else:
+                    st = "; ".join(pv.get("rejects", [])[:1])[:120] or str(r.get("reason"))
+                    pre0, lift0 = float(args.get("pregrasp_height_mm") or 80.0), float(args.get("lift_height_mm") or 100.0)
+                    if "IK" in st or "line fails" in st or "joint" in st:   # lower pregrasp / lift?
+                        for pre, lift in ((min(pre0, 40.0), round(lift0 * 0.6)), (30.0, 40.0)):
+                            if time.time() > t_end or (pre >= pre0 and lift >= lift0):
+                                continue
+                            r2 = self._plan_grasp_core(**dict(a_turn, pregrasp_height_mm=pre, lift_height_mm=lift))
+                            if r2.get("ok"):
+                                st += f" | plans with pregrasp_height_mm {pre:.0f} and lift_height_mm {lift:.0f}"
+                                break
+                rows.append({"turn_deg": d, "xy_offset_mm": off, "closing_yaw_deg": round(yaw, 1), "status": st})
+        finally:
+            self._probing = False
+            self.grasp_plan, self.plan, self.stage = saved
+        return {"note": "the requested grasp turned about the object's vertical axis; facts only", "around_object": rows}
+
+    def _plan_grasp_core(self, object_id="obj_1", xy_offset_mm=None, grasp_z_offset_from_top_mm=-20.0,
+                         closing_yaw_deg=None, yaw_tolerance_deg=0.0, pitch_deg=0.0, open_mm=60.0,
+                         pregrasp_height_mm=80.0, lift_height_mm=100.0, yaw_deg=None, **_):
         if not self.last_obs:
             return self._res("plan_grasp_chunk", False, reason="OBSERVE_FIRST", nxt=["perceive_objects"])
         if object_id not in self.cam:
@@ -453,6 +543,15 @@ class GeneralPickPlaceSkills:
             if m < MIN_PLAN_MARGIN_DEG:
                 rej.append(f"yaw {gyaw:+.0f}: joint {chk.get('binding')} only {m:.1f} deg from its limit")
                 continue
+            qd, chd = self._dense_line(qs[0], p_g, R_g)                  # V4.9.1: descent, as executed
+            ql, chl = (self._dense_line(qd[-1], p_lift, R_g) if qd else (None, {}))   # and the lift
+            if not qd or not ql:
+                bad = chd if not qd else chl
+                rej.append(f"yaw {gyaw:+.0f}: the {'descent' if not qd else 'lift'} line fails: {bad.get('why')}")
+                continue
+            qs = [qs[0], qd[-1], ql[-1]]
+            m = min(m, float(chd.get("min_margin_deg") or 99.0), float(chl.get("min_margin_deg") or 99.0))
+            chk = dict(chk, min_margin_deg=round(m, 1))
             cand = {"yaw": gyaw, "pv": pv, "qs": qs, "chk": chk, "p_g": p_g, "R_g": R_g, "p_pre": p_pre, "p_lift": p_lift}
             if best is None or m > float(best["chk"].get("min_margin_deg") or 0.0):
                 best = cand
@@ -481,6 +580,8 @@ class GeneralPickPlaceSkills:
             "_q": {"pregrasp": qs[0], "grasp": qs[1], "lift": qs[2]},
             "_preview": best["pv"],
         }
+        if getattr(self, "_probing", False):
+            return self._res("plan_grasp_chunk", True, {"min_joint_margin_deg": chosen["min_joint_margin_deg"]})
         self.grasp_plan = chosen
         self.plan = chosen
         self.stage = "GRASP_PLANNED"
@@ -643,6 +744,52 @@ class GeneralPickPlaceSkills:
     def plan_place_chunk(self, target_id_or_xyz="obj_2", xy_offset_mm=None, held_bottom_above_target_top_mm=None,
                          yaw_change_deg=0.0, approach_height_mm=60.0, release_open_mm=None,
                          carry_lift_mm=0.0, release_above_target_mm=None, **_):
+        args = dict(target_id_or_xyz=target_id_or_xyz, xy_offset_mm=xy_offset_mm,
+                    held_bottom_above_target_top_mm=held_bottom_above_target_top_mm, yaw_change_deg=yaw_change_deg,
+                    approach_height_mm=approach_height_mm, release_open_mm=release_open_mm, carry_lift_mm=carry_lift_mm,
+                    release_above_target_mm=release_above_target_mm)
+        r = self._plan_place_core(**args)
+        if not r.get("ok") and r.get("reason") in ("PLACE_PLAN_FAILED", "CARRY_COLLISION", "PLACE_COLLISION"):
+            try:
+                r.setdefault("physical_verification", {})["reachability"] = self._place_reach_map(args)
+            except Exception as e:                       # the map is extra information only
+                r.setdefault("physical_verification", {})["reachability"] = {"error": repr(e)[:120]}
+        return r
+
+    def _place_reach_map(self, args):
+        """V4.9.1 PLACE REACHABILITY: the same place with other yaw_change_deg / carry_lift_mm values (no motion, no
+        cuRobo): which ones would plan, and why the others would not"""
+        t_end = time.time() + 6.0
+        out = {"note": "the same place request re-planned with one parameter changed; facts only"}
+        self._probing = True
+        saved = (self.place_plan, self.stage, self.plan)
+        try:
+            def status(a):
+                if time.time() > t_end:
+                    return "not checked (time)"
+                r = self._plan_place_core(**a)
+                if r.get("ok"):
+                    return f"plans (joint margin {r['physical_verification'].get('min_joint_margin_deg')} deg)"
+                pv = r.get("physical_verification", {})
+                return f"{r.get('reason')}: {'; '.join(pv.get('problems', []))[:110]}"
+            y0 = float(args.get("yaw_change_deg") or 0.0)
+            out["yaw_change_deg"] = {f"{((y0 + d + 180.0) % 360.0) - 180.0:+.0f}":
+                                     status(dict(args, yaw_change_deg=((y0 + d + 180.0) % 360.0) - 180.0))
+                                     for d in range(0, 360, 30)}
+            out["carry_lift_mm"] = {f"{cl:.0f}": status(dict(args, carry_lift_mm=cl))
+                                    for cl in (0.0, 20.0, 40.0, 60.0, 80.0, 100.0)}
+            h0 = args.get("held_bottom_above_target_top_mm")
+            h0 = float(h0 if h0 is not None else (args.get("release_above_target_mm") or 20.0))
+            out["held_bottom_above_target_top_mm"] = {f"{h:+.0f}": status(dict(args, held_bottom_above_target_top_mm=h))
+                                                      for h in sorted({round(h0 + d) for d in (-40, -20, 0, 20, 40, 60)})}
+        finally:
+            self._probing = False
+            self.place_plan, self.stage, self.plan = saved
+        return out
+
+    def _plan_place_core(self, target_id_or_xyz="obj_2", xy_offset_mm=None, held_bottom_above_target_top_mm=None,
+                         yaw_change_deg=0.0, approach_height_mm=60.0, release_open_mm=None,
+                         carry_lift_mm=0.0, release_above_target_mm=None, **_):
         if not self.last_obs:
             return self._res("plan_place_chunk", False, reason="OBSERVE_FIRST", nxt=["perceive_objects"])
         virtual = False
@@ -731,10 +878,9 @@ class GeneralPickPlaceSkills:
         if float(carry_lift_mm or 0.0) > 0.5:          # V4.9 CARRY LIFT: straight up first, then carry
             T_now = self._fast.fk(np.asarray(q_now, float))
             p_via = T_now[:3, 3] + np.array([0.0, 0.0, float(carry_lift_mm) / 1000.0])
-            qv, chv = self._solve_chain([("lift_more", T_now[:3, 3] + np.array([0.0, 0.0, 0.001]), T_now[:3, :3]),
-                                         ("via", p_via, T_now[:3, :3])], q_now, deadline)
+            qv, chv = self._dense_line(q_now, p_via, T_now[:3, :3])       # V4.9.1: as executed, point by point
             if not qv:
-                facts["problems"] = [f"no arm posture to lift {float(carry_lift_mm):.0f} mm straight up from here"]
+                facts["problems"] = [f"the {float(carry_lift_mm):.0f} mm straight-up lift fails: {chv.get('why')}"]
                 return self._res("plan_place_chunk", False, facts, reason="PLACE_PLAN_FAILED", nxt=["plan_place_chunk"])
             via = (p_via, T_now[:3, :3], qv[-1])
             q_now = list(qv[-1])
@@ -747,6 +893,11 @@ class GeneralPickPlaceSkills:
         if not ok_f or float(chk.get("min_margin_deg") or 0.0) < MIN_PLACE_MARGIN_DEG:
             facts["problems"] = [why_f or f"joint {chk.get('binding')} only {chk.get('min_margin_deg')} deg from its limit"]
             return self._res("plan_place_chunk", False, facts, reason="PLACE_PLAN_FAILED", nxt=["plan_place_chunk"])
+        ql, chl = self._dense_line(qs[0], p_rel, R_tcp)                   # V4.9.1: the vertical lowering line
+        if not ql:
+            facts["problems"] = [f"the lowering line above-target -> release fails: {chl.get('why')}"]
+            return self._res("plan_place_chunk", False, facts, reason="PLACE_PLAN_FAILED", nxt=["plan_place_chunk"])
+        qs = [qs[0], ql[-1]]
         # carry: V4.9 prefers a straight line at the lift orientation (no turn about the vertical, a held object
         # does not swing); else the joint-space move (slowed).  Held object + closed fingers vs the scene for both.
         Cg = getattr(self, "_held_cloud_G", None)
@@ -791,10 +942,15 @@ class GeneralPickPlaceSkills:
             return self._res("plan_place_chunk", False, facts, reason="CARRY_COLLISION",
                              nxt=["verify_and_park_chunk", "plan_place_chunk"])
         facts["carry_lift_mm"] = float(carry_lift_mm or 0.0)
+        mins = [float(chk.get("min_margin_deg") or 0.0), float(chl.get("min_margin_deg") or 99.0)]
+        if via is not None:
+            mins.append(float(chv.get("min_margin_deg") or 99.0))
         chosen = {"target": str(target_id_or_xyz), "release_open_mm": g_open, "_via": via, "_carry_line": line_ok,
-                  "min_joint_margin_deg": chk.get("min_margin_deg"), "ik_solver": chk.get("ik_solver", "fast_ik"),
+                  "min_joint_margin_deg": round(min(mins), 1), "ik_solver": chk.get("ik_solver", "fast_ik"),
                   "_wps": {"above_target": (p_above, R_tcp), "release": (p_rel, R_tcp)},
                   "_q": {"above_target": qs[0], "release": qs[1]}}
+        if getattr(self, "_probing", False):
+            return self._res("plan_place_chunk", True, {"min_joint_margin_deg": chosen["min_joint_margin_deg"]})
         self.place_plan = chosen
         if self.plan is None:
             self.plan = {}
