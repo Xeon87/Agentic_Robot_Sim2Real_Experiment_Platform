@@ -30,10 +30,11 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-VERSION = "V4.10.2"
+VERSION = "V4.10.3"
 MARKER_V493 = "V4.9.3 TASK-START RECOVERY + SAFETY STOP + SINGULARITY + EGG ROLL"
 MARKER_V4101 = "V4.10.1 PITCH CHANGE + RIGID TWIN HOLD + BRIDGE FIX"
 MARKER_V4102 = "V4.10.2 RIGID WELD HOLD IN THE GUI SIMULATION"
+MARKER_V4103 = "V4.10.3 SOFT WELD + SHORT BOX WALLS + AUTO RESET AFTER A BLOW-UP"
 MARKER_V491 = "V4.9.1 DENSE LINES + REACHABILITY"
 MARKER_V492 = "V4.9.2 REAL-LIKE PERCEPTION + LLM EVAL + COMPACT OUTPUTS"
 MARKER = "V4.8.9 GENERAL PICK&PLACE CHUNK LLM"
@@ -1276,6 +1277,11 @@ class GeneralPickPlaceSkills:
                 pv["safety_events"] = {"count": n1 - n0, "note": "the safety guard stopped the arm during this tool "
                                        "(runaway joint speed / unstable contact in the simulator)"}
                 self.io.emit(f"[WARN] [V4.9 GENERAL] {name}: {n1 - n0} safety stop(s) during this tool")
+            if n1 - n0 > BLOWUP_TRIPS:               # V4.10.3 AUTO RESET: the simulation blew up during this tool
+                _V4103_BLOWUP["pending"] = True
+                _V4103_BLOWUP["why"] = f"{name}: {n1 - n0} safety stops in one tool call"
+                self.io.emit(f"[WARN] [V4.10.3 AUTO RESET] {n1 - n0} safety stops in {name} (> {BLOWUP_TRIPS}): "
+                             "the table objects will be put back to their start poses when the next task starts")
         return res
 
 
@@ -1784,6 +1790,26 @@ def _make_sim_io_class():
         def gripper_profile(self):
             return CK.OFFICIAL_PROFILE
 
+        def reset_objects(self, timeout_s=8.0):
+            """V4.10.3 AUTO RESET: ask the physics loop (NERO_V410_Household_Scenes.reset_hook) to put the objects
+            back; returns (ok, message) once it answers"""
+            import NERO_V410_Household_Scenes as HS
+            f = HS.request_reset()
+            t0 = time.time()
+            while time.time() - t0 < float(timeout_s):
+                if os.path.exists(f + ".done"):
+                    try:
+                        with open(f + ".done") as fh:
+                            return True, str(json.load(fh).get("message", "objects reset"))
+                    except Exception:
+                        return True, "objects reset"
+                time.sleep(0.2)
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+            return False, f"the simulation did not answer the reset request within {timeout_s:.0f} s"
+
         def _ensure_unlatched(self, label):
             if self.latch_pending():
                 ok, why = self.clear_latch(f"V4.8.10 auto-unlatch before {label}")
@@ -1987,7 +2013,9 @@ def _make_twin_io_class():
             self.m.eq_data[eq, 0:3] = 0.0
             self.m.eq_data[eq, 3:6] = R1.T @ (self.d.xpos[bid] - self.d.xpos[self.l7])
             self.m.eq_data[eq, 6:10] = rq
-            self.m.eq_data[eq, 10] = 1.0
+            tc, dr, ts = SC.weld_params()              # V4.10.3 SOFT WELD (same as the GUI simulation)
+            self.m.eq_data[eq, 10] = ts
+            self.m.eq_solref[eq, 0:2] = (tc, dr)
             self.d.eq_active[eq] = 1
             self.hold = name
 
@@ -2044,6 +2072,26 @@ TwinGeneralIO = _make_twin_io_class()
 
 
 _V493_SEEN = {"trips": 0}
+BLOWUP_TRIPS = 5                     # V4.10.3 AUTO RESET: more safety stops than this in one tool call = blown up
+_V4103_BLOWUP = {"pending": False, "why": ""}
+
+
+def _auto_reset_objects(io):
+    """V4.10.3 AUTO RESET: after a blow-up (objects flung, left lying next to the arm) put the table objects back to
+    their start poses at the next task start, with the arm at home; the same request as the console's reset button"""
+    if not _V4103_BLOWUP["pending"]:
+        return None
+    why = _V4103_BLOWUP["why"]
+    _V4103_BLOWUP["pending"] = False
+    if not hasattr(io, "reset_objects"):
+        io.emit(f"[INFO] [V4.10.3 AUTO RESET] ({why}) not available in this simulator - objects stay where they are")
+        return False
+    try:
+        ok, msg = io.reset_objects()
+    except Exception as exc:
+        ok, msg = False, str(exc)[:160]
+    io.emit(f"[{'INFO' if ok else 'WARN'}] [V4.10.3 AUTO RESET] after the blow-up ({why}): {msg}")
+    return bool(ok)
 
 
 def recover_for_task(io, probe=True) -> Tuple[bool, str]:
@@ -2100,6 +2148,7 @@ def recover_for_task(io, probe=True) -> Tuple[bool, str]:
         elif not ok:
             why = f"home failed: {r.get('error')}"
         if ok and int(trips() or 0) == n0:
+            _auto_reset_objects(io)                      # V4.10.3: arm at home, simulator follows -> reset objects
             _V493_SEEN["trips"] = int(trips() or 0)
             emit(f"[INFO] [V4.9.3 RECOVER] simulator follows commands (try {attempt}) - task can start")
             return True, "ok"

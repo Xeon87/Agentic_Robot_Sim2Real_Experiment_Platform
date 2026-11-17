@@ -1,4 +1,6 @@
-# NERO V4.10.2 — single-folder release
+# NERO V4.10.3 — single-folder release
+
+**V4.10.3**（weld 夹持稍软：0.008 → 0.012 s；收纳盒 / 托盘墙段变短，不再被后端削矮；一次工具调用安全停止超过 5 次时，下个任务开始自动复位桌面物品；后端未改）
 
 **V4.10.2**（GUI 仿真里 general_pick_place / household_pick_place 的夹持改成刚性：夹住的物体跟着夹爪转，所以 `pitch_change_deg` 在 GUI 里也能用了；其他场景仍是球铰）
 

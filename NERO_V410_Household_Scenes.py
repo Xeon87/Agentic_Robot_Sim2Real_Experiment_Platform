@@ -158,9 +158,10 @@ def _ring(name, r_out, z0, z1, t, n=16, cx=0.0, cy=0.0):
                         yaw=2 * math.pi * i / n) for i in range(n))
 
 
-def _walls(name, hx, hy, h, t, z0, seg=0.075):
+def _walls(name, hx, hy, h, t, z0, seg=0.040):
     """rectangular rim walls (outer half sizes hx, hy) cut into <= 2*seg long pieces (the backend's frozen V2-44 R2
-    basket-rim rule thins thin boxes with half length >= 45 mm near the old basket)"""
+    basket-rim rule thins thin boxes with half length >= 45 mm near the old basket; V4.10.3: seg 0.075 -> 0.040, the
+    0.075 pieces of the storage box / tray were thinned to 14 mm in the GUI simulation)"""
     out = []
     for side, (L, fixed, along_x) in {"x0": (hy, -hx + t / 2, False), "x1": (hy, hx - t / 2, False),
                                      "y0": (hx - t, -hy + t / 2, True), "y1": (hx - t, hy - t / 2, True)}.items():

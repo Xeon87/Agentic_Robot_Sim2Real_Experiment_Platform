@@ -1100,6 +1100,29 @@ def rigid_hold():
     return selected_variant() in ("general_pick_place", HOUSEHOLD)
 
 
+WELD_SOLREF = (0.012, 1.0)       # V4.10.3 SOFT WELD: time constant 0.008 -> 0.012 s (less fight with the pad contacts)
+WELD_TORQUESCALE = 1.0           # V4.10.3: kept - 0.3 let an end-gripped remote droop and miss the mug (tests/test_v4_10_3)
+
+
+def weld_params():
+    """V4.10.3 SOFT WELD: (solref timeconst, dampratio, torquescale) of the rigid hold; overrides for testing:
+    NERO_V4103_WELD_SOLREF="0.012 1", NERO_V4103_WELD_TORQUESCALE="1.0" (set before starting the simulation)"""
+    tc, dr = WELD_SOLREF
+    ts = WELD_TORQUESCALE
+    try:
+        v = os.environ.get("NERO_V4103_WELD_SOLREF", "").split()
+        if len(v) == 2:
+            tc, dr = float(v[0]), float(v[1])
+    except ValueError:
+        pass
+    try:
+        if os.environ.get("NERO_V4103_WELD_TORQUESCALE"):
+            ts = float(os.environ["NERO_V4103_WELD_TORQUESCALE"])
+    except ValueError:
+        pass
+    return float(tc), float(dr), float(ts)
+
+
 def wrap_activate_hold(orig, model, data, hold_eq_by_body, link7_bid, deactivate_all):
     """V4.10.2: the backend's activate_connect_hold for weld equalities (called from its A2 block): relpose = the
     object's pose in link7 right now (no jump); connect equalities go to the original function unchanged"""
@@ -1119,7 +1142,9 @@ def wrap_activate_hold(orig, model, data, hold_eq_by_body, link7_bid, deactivate
         model.eq_data[eqid, 0:3] = 0.0
         model.eq_data[eqid, 3:6] = R1.T @ (np.array(data.xpos[int(obj_bid)], dtype=float) - np.array(data.xpos[l7], dtype=float))
         model.eq_data[eqid, 6:10] = rq
-        model.eq_data[eqid, 10] = 1.0
+        tc, dr, ts = weld_params()                     # V4.10.3 SOFT WELD
+        model.eq_data[eqid, 10] = ts
+        model.eq_solref[eqid, 0:2] = (tc, dr)
         data.eq_active[eqid] = 1
         return True
     return activate
@@ -1222,8 +1247,11 @@ def make_general_pick_place_xml(original_xml_path, visual_quality=None, househol
     if visual_quality is not None:
         xml = visual_quality(xml)
     eq = "\n        ".join(
-        f'<{"weld" if rigid_hold() else "connect"} name="hold_{o}" body1="link7" body2="{o}" anchor="0 0 0" '
-        f'active="false" solref="0.008 1" solimp="0.98 0.995 0.001"/>' for o in hold_object_names())
+        (f'<weld name="hold_{o}" body1="link7" body2="{o}" anchor="0 0 0" active="false" '
+         f'solref="{weld_params()[0]:g} {weld_params()[1]:g}" torquescale="{weld_params()[2]:g}" '
+         f'solimp="0.98 0.995 0.001"/>' if rigid_hold() else                 # V4.10.3 SOFT WELD
+         f'<connect name="hold_{o}" body1="link7" body2="{o}" anchor="0 0 0" '
+         f'active="false" solref="0.008 1" solimp="0.98 0.995 0.001"/>') for o in hold_object_names())
     if "</equality>" in xml:
         xml = xml.replace("</equality>", "        " + eq + "\n    </equality>", 1)
     else:
