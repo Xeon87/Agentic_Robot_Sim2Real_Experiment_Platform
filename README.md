@@ -1,8 +1,9 @@
-# NERO V4.10.1 — single-folder release
+# NERO V4.10.2 — single-folder release
+
+**V4.10.2**（GUI 仿真里 general_pick_place / household_pick_place 的夹持改成刚性：夹住的物体跟着夹爪转，所以 `pitch_change_deg` 在 GUI 里也能用了；其他场景仍是球铰）
 
 **V4.10.1**（放置工具新增 `pitch_change_deg`：搬运中让夹爪绕两指连线转动，被夹物体跟着转，例如把遥控器竖着插进马克杯；孪生改用刚性夹持；修好仿真窗口的桥接；被夹物体的碰撞检查保留长方形的角）
 
-- **GUI 仿真里仍不能转被夹物体**：后端的夹持是球铰，后端文件又被锁定，所以 GUI 仿真里俯仰变化会被拒绝，并说明原因。孪生（`tests/v410_household_eval.py`）和真机可以用。
 - 启动仿真后，日志里应出现 `[V4.10 LLM] settings from the console` 和 `[V4.10 TASK CHANNEL] watching`。
 
 **V4.10**（家居物品场景 + LLM 设置挪到控制台 + 场景选择对话框 + 复位桌面物品；Sim DOE 页在下一版）

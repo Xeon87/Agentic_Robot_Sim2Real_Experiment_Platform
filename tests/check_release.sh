@@ -114,6 +114,7 @@ grep -qF 'V4.9.2 REAL-LIKE PERCEPTION + LLM EVAL + COMPACT OUTPUTS' NERO_V489_Ge
 grep -qF 'V4.9.3 TASK-START RECOVERY + SAFETY STOP + SINGULARITY + EGG ROLL' NERO_V489_General_Pick_Place.py && grep -qF 'def recover_for_task' NERO_V489_General_Pick_Place.py || { echo "[FAIL] V4.9.3 markers missing"; exit 1; }
 grep -qF 'V4.10 HOUSEHOLD SCENES' NERO_V410_Household_Scenes.py && grep -qF 'V4.10 CONSOLE LLM SETTINGS + SCENE DIALOG' NERO_V410_Console_Sim.py && grep -qF 'V4.10 SIM BRIDGE' NERO_V410_Sim_Bridge.py && grep -qF 'import NERO_V410_Sim_Bridge as _B410' NERO_V359_Strategy.py && test -f assets/household/apple/meta.json || { echo "[FAIL] V4.10 markers missing"; exit 1; }
 grep -qF 'V4.10.1 PITCH CHANGE + RIGID TWIN HOLD + BRIDGE FIX' NERO_V489_General_Pick_Place.py && grep -qF 'pitch_change_deg' NERO_V489_General_Pick_Place.py && grep -qF 'root.after(1500, later)' NERO_V410_Sim_Bridge.py || { echo "[FAIL] V4.10.1 markers missing"; exit 1; }
+grep -qF 'V4.10.2 RIGID WELD HOLD IN THE GUI SIMULATION' NERO_V489_General_Pick_Place.py && grep -qF '_V343.wrap_activate_hold(activate_connect_hold' NERO_V2_7_1_Unified_Backend.py && grep -qF 'def wrap_activate_hold' NERO_V343_Scenes.py || { echo "[FAIL] V4.10.2 markers missing"; exit 1; }
 grep -qF 'V4.8.6 STARTUP GRIPPER + CAMERAS + YMODEL + XFT CRASH FIX' NERO_V312_Console.py && grep -qF 'V4.8.6 CAMERA YMODEL MENU + STARTUP DEFAULTS' NERO_V472_Wrist_Calib.py || { echo "[FAIL] V4.8.6 markers missing"; exit 1; }
 grep -qF 'V4.8.7 CUROBO REAL IK + SMOLVLA VRAM RELEASE' NERO_V487_CuRobo_IK.py && grep -qF 'ensure_curobo_server' NERO_V313_Real_Robot.py && grep -qF '_release_curobo_vram' NERO_V4_Console_Tab.py || { echo "[FAIL] V4.8.7 markers missing"; exit 1; }
 grep -qF 'V3.81 YOLOE TRAIN' NERO_V381_Yolo_Train.py && grep -qF 'V3.81 PROFILE FILES + TRAIN PAGE' NERO_V379_Camera_Lab.py && grep -qF 'NERO_V381_Yolo_Train.py' start_nero.sh || { echo "[FAIL] V3.81 train marker missing"; exit 1; }
@@ -225,4 +226,5 @@ python3 tests/test_v4_9_2.py 2>&1 | tail -1   # V4.9.2 min-area footprint, compa
 python3 tests/test_v4_9_3.py 2>&1 | tail -1   # V4.9.3 singularity guard, safety stop = stop, task-start recovery, egg rolling friction
 python3 tests/test_v4_10.py 2>&1 | tail -1   # V4.10 household assets / scenes / reset, console LLM settings, sim bridge
 python3 tests/test_v4_10_1.py 2>&1 | tail -1   # V4.10.1 pitch change during the carry, rigid twin hold, covered-opening relation, bridge fix
+python3 tests/test_v4_10_2.py 2>&1 | tail -1   # V4.10.2 weld hold in the general / household GUI scenes (backend A2 block 12)
 python3 tests/test_v4_6_1_gui.py | tail -1   # skips without tkinter / DISPLAY

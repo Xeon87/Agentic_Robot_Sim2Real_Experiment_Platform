@@ -1,7 +1,7 @@
-# NERO 项目开发与交接文档（V4.10.1 · 交接版）
+# NERO 项目开发与交接文档（V4.10.2 · 交接版）
 
 > 本文件放在仓库根目录，名为 `AGENTS.md`（Codex 和其他开发 Agent 会自动读取）。
-> 更新时间：2026-11-16。当前交付版本：**V4.10.1**（通用 pick & place 只给 LLM 测量事实，见 H8）。V4.8.6–V4.8.11 是用户在别的开发会话里做的，本文件按它们的 CHANGELOG 补录（第二部分第 0 节）。仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`，开发分支 `claude/charming-euler-eoqyme`。
+> 更新时间：2026-11-16。当前交付版本：**V4.10.2**（通用 pick & place 只给 LLM 测量事实，见 H8）。V4.8.6–V4.8.11 是用户在别的开发会话里做的，本文件按它们的 CHANGELOG 补录（第二部分第 0 节）。仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`，开发分支 `claude/charming-euler-eoqyme`。
 > “用户”指项目所有者 Jimmy。文件分两部分：
 > - **第一部分**：交接速览，给接手工程师先读，约 15 分钟。
 > - **第二部分**：详细规则、不变量和逐版本记录。原文档持续追加，第 1、2、4 节仍然有效。
@@ -220,7 +220,7 @@ V3.60 之前的模块见第二部分第 5 节。文件名里的版本号是该�
 19. **后端时间空档重同步（选项 E，等用户同意，要改后端）**：V4.9.2 GUI 运行里 J5 失控前，diag CSV 的仿真时间线有 2.3 s 空档（151.911 → 154.209 s），随后多行相同、力矩跳变、J5 力矩饱和并加速；之前已有 J5 抖振（qacc_act ±177 对命令 ±3），全程 hold = 1。空档原因未查明。V4.9.3 的奇异检查防不住这次事故。
 
 20. **Sim DOE 页（V4.11，用户已确认方案）**：控制台新 tab「Sim DOE」，在「仿真 (MuJoCo)」右边。因子设计 → 批量生成 prompt（可增删改，含判定目标）→ 逐条运行（任务文件通道 `logs/sim_tasks`，复位物品代替重启）→ 状态灯（灰 / 绿闪 / 绿 / 红 / 黄 / 蓝 = 未判定）→ DOE 日志（设计参数、模型信息）+ 总结报告（`logs/doe/<时间>/`）。V4.10 已准备好：任务通道、复位、场景库、控制台 LLM 设置。
-21. **GUI 仿真夹持仍是球铰**：V4.10.1 起孪生可用刚性夹持（`TwinGeneralIO(rigid_hold=True)`，家居场景默认），GUI 仿真要改得动后端（整文件哈希锁定），需要用户同意。工具用 `hold_kind` / `held_object_turns_with_gripper` 如实告诉 LLM。
+21. **夹持**：V4.10.2 起 GUI 仿真的 general / household 场景是 weld 刚性夹持（`SC.rigid_hold()` / `SC.wrap_activate_hold`），其他场景仍是球铰。孪生默认球铰，家居场景孪生默认刚性。工具用 `hold_kind` / `held_object_turns_with_gripper` 如实告诉 LLM。
 22. **桥接在真实后端界面上未实测**：找控件的测试用的是按后端布局搭的面板；用户启动后看日志 `[V4.10 LLM] settings from the console` / `[V4.10 TASK CHANNEL] watching`。
 
 **已知限制（不是 bug）**
@@ -260,7 +260,7 @@ V3.60 之前的模块见第二部分第 5 节。文件名里的版本号是该�
 - **奇异位形**（V4.9.3）：NERO 的奇异位形是 J4 = 0（肘）和 J6 = ±90°（腕，J5 ∥ J7）；**J6 = 0 不是**。规划用雅可比最小奇异值 ≥ `SINGULAR_SIGMA_MIN`（0.08）检查（`_sing_check`，在 `_dense_line` 和关节空间搬运里）。
 - **任务开始自恢复**（V4.9.3）：GUI 每次 RUN TASK 先 `recover_for_task`（STOP+RECOVER → 松夹持 → 回家 → J1 ±2° 探测，失败重试一次），只有仍不响应才报「restart the simulation」。
 - **家居场景**（V4.10）：`NERO_V410_Household_Scenes.py` + `assets/household/`（GSO / YCB 扫描，来源和许可在 meta.json）。原装夹爪行程 **70 mm**（两指之间最多约 62 mm）。扫描只作显示，碰撞体不透明、放在 group 3（mj_ray 跳过 alpha 0 的几何体）。场景有固定 H1–H5 和随机种子，带结构化目标（仿真真值判定）。复位物品挂在 `SC.planning_rotated_boxes`（后端物理循环每 2 秒调用一次）。
-- **后端整个文件被哈希钉死**（test_v3_63–v3_82 等 14 个测试；V3.62 以来一字未改），「只改 A2 块」也不行。要在仿真界面里加东西，从后端已经调用的外部模块挂（V4.10：`NERO_V359_Strategy.add_sim_strategy_tab` → `NERO_V410_Sim_Bridge`，按控件树找 SimAgent 控件）。
+- **后端整个文件被哈希钉死**（17 个测试 + test_v3_61/62/63/72 的去钩子哈希；V4.10.2 经用户同意改过一次并更新了这些哈希），没有用户同意不要改。要在仿真界面里加东西，从后端已经调用的外部模块挂（V4.10：`NERO_V359_Strategy.add_sim_strategy_tab` → `NERO_V410_Sim_Bridge`，按控件树找 SimAgent 控件）。
 - **被夹物体的形状**（V4.10.1）：放置碰撞用的点云 = 侧面轮廓各高度的椭圆 + 感知占地轮廓里超出椭圆一个格子以上的部分（`_outline_ab`，内部字段，不发给 LLM）。不要退回固定 24 点椭圆：长方形物体的角会漏掉（遥控器宽度少算约 30 mm）。
 - **测试替身**：`tests/v49_reasoner.py` 是一段几何推理，只读工具返回值，用来离线验证「工具给的信息够不够」。它的规则不能搬进产品代码或提示词。
 - **真实 LLM 评测**（V4.9.2）：`tests/v49_llm_eval.py`，用法见 README 顶部；替身评测加 `--noise` 模拟真机感知。
@@ -384,6 +384,8 @@ NERO 7 自由度机械臂（AgileX）+ MuJoCo 仿真 + GPT Agent 做“鸡蛋放
 
 - **V4.10.1（2026-11-17）**：用户 GUI 实测 V4.10：苹果进马克杯、遥控器放杯上成功；「遥控器插进马克杯」LLM 判断做不到（工具不能转被夹物体，仿真球铰也转不动）。用户：「改这两个点」。放置工具加 `pitch_change_deg`（夹爪绕两指连线转，物体跟着转；夹爪说明加 `held_object_turns_with_gripper`；球铰时如实拒绝）；孪生刚性夹持（weld）；孪生实测遥控器竖插马克杯成功，验证识别为 inside（杯口被挡时改用轮廓判断）。顺带发现并修了被夹物体椭圆模型漏掉长方形角的问题（改为椭圆 + 测到的轮廓）；修了 V4.10 桥接 `delay_ms` bug（日志 `not attached`）。
 
+- **V4.10.2（2026-11-17）**：用户：「球铰改成刚性，你改啊」。general / household 场景的夹持约束改成 weld；后端加第 12 个 A2 块（`activate_connect_hold` 之后，换成 `SC.wrap_activate_hold`），B 段不动；按用户同意更新测试里钉死的后端哈希和 A2 块数。MuJoCo 实测：link7 转 90°，物体跟着转，位置误差 < 0.5 mm。真实 GUI 未实测。
+
 ## 1. 用户的沟通规则（必须遵守，原话优先）
 
 1. **用中文、简洁地回答。** 结论先说，再给依据；不要长篇复述。
@@ -450,7 +452,7 @@ NERO 7 自由度机械臂（AgileX）+ MuJoCo 仿真 + GPT Agent 做“鸡蛋放
 
 1. **`NERO_V308_Camera_Perception.py` 一字不改**，sha256 前缀 = `020cc6680f181872`（所有版本测试均校验）。
 2. **后端 `run_sim` 的逐步物理循环“B 段”**（从 `with mujoco.viewer.launch_passive(model, data) as viewer:` 到 `run_sim` 结束）与 V3.42 字节级一致，sha256 = `2b1f124e838087f65a4e93e65ed1ceba169ea3c725bbea99ff87998ad8cd7252`（`test_v3_44` C1）。
-3. **后端去掉 11 个 `# V3.43 A2 BEGIN/END` 块后与 V3.42 字节级一致**（`test_v3_44` C2）；默认鸡蛋场景生成的 XML sha256 = `31c52c06965826a06612c970d1b522a05396d9da9b5c9d0919c8824c832a3ef2`（C3）。如果新阶段需要让仿真读取外部策略包（`StrategyProfile`），必须通过环境变量/配置文件钩子在 A2 块或独立桥接模块中非侵入式注入，或者同步维护 C2 块标记，绝不破坏 `test_v3_44` 校验。
+3. **后端去掉 12 个 `# V3.43 A2 BEGIN/END` 块后与 V3.42 字节级一致**（V4.10.2 经用户同意加了第 12 个：`activate_connect_hold` 之后，general / household 场景用 weld 刚性夹持；整文件哈希和 A2 块数已在各测试里更新）（`test_v3_44` C2）；默认鸡蛋场景生成的 XML sha256 = `31c52c06965826a06612c970d1b522a05396d9da9b5c9d0919c8824c832a3ef2`（C3）。如果新阶段需要让仿真读取外部策略包（`StrategyProfile`），必须通过环境变量/配置文件钩子在 A2 块或独立桥接模块中非侵入式注入，或者同步维护 C2 块标记，绝不破坏 `test_v3_44` 校验。
 4. **Qt 环境保护（V3.46）**：控制台进程里 `import cv2` 只能走 `NERO_V325_Camera._import_cv2()`；所有子进程用 `clean_child_env()`。
 5. **实机腕部相机独立性**：实机腕部相机逻辑全部位于 `NERO_V349_Real_Wrist_Camera.py` 与 `NERO_V325_Camera.py`，绝不改动仿真腕部相机 `NERO_V326_Wrist_Camera.py`。
 6. **发布包运行时只读（V3.60）**：程序运行时绝不写发布文件夹里的任何文件（`config/strategies/` 只读）；例外只有运行时输出目录 `logs/` 和（V3.68 起，用户要求放在项目文件夹内的）`task/`，两者都在 `.gitignore` 里、不进校验和，测试用 `NERO_V368_TASK_DIR` 指到临时目录；当前技能写 `logs/v360_active_strategy.json`，用户技能写 `~/Downloads/cameracalib/strategies/`（`NERO_V360_USER_STRATEGY_DIR`）。`test_v3_60` F6 / `test_v3_60_gui` H6 会校验。

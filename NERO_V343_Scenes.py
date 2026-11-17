@@ -1094,6 +1094,37 @@ def _household():
     return HS.scene_from_env()
 
 
+def rigid_hold():
+    """V4.10.2 RIGID HOLD (user 11-17: 「球铰改成刚性」): the general / household pick & place scenes hold with a WELD
+    (the object keeps its pose in the gripper and turns with it); every other scene keeps the CONNECT ball joint"""
+    return selected_variant() in ("general_pick_place", HOUSEHOLD)
+
+
+def wrap_activate_hold(orig, model, data, hold_eq_by_body, link7_bid, deactivate_all):
+    """V4.10.2: the backend's activate_connect_hold for weld equalities (called from its A2 block): relpose = the
+    object's pose in link7 right now (no jump); connect equalities go to the original function unchanged"""
+    import numpy as np
+    import mujoco
+
+    def activate(obj_bid):
+        eqid = hold_eq_by_body.get(int(obj_bid), -1)
+        if eqid < 0 or int(model.eq_type[eqid]) != int(mujoco.mjtEq.mjEQ_WELD):
+            return orig(obj_bid)
+        deactivate_all()
+        l7 = int(link7_bid)
+        R1 = np.array(data.xmat[l7], dtype=float).reshape(3, 3)
+        q1 = np.array(data.xquat[l7], dtype=float) * np.array([1.0, -1.0, -1.0, -1.0])
+        rq = np.zeros(4)
+        mujoco.mju_mulQuat(rq, q1, np.array(data.xquat[int(obj_bid)], dtype=float))
+        model.eq_data[eqid, 0:3] = 0.0
+        model.eq_data[eqid, 3:6] = R1.T @ (np.array(data.xpos[int(obj_bid)], dtype=float) - np.array(data.xpos[l7], dtype=float))
+        model.eq_data[eqid, 6:10] = rq
+        model.eq_data[eqid, 10] = 1.0
+        data.eq_active[eqid] = 1
+        return True
+    return activate
+
+
 def general_probe_spec():
     """V4.10: (world_xml, assets, slots) the general pick & place perception casts its rays on, for this scene"""
     if selected_variant() == HOUSEHOLD:
@@ -1191,8 +1222,8 @@ def make_general_pick_place_xml(original_xml_path, visual_quality=None, househol
     if visual_quality is not None:
         xml = visual_quality(xml)
     eq = "\n        ".join(
-        f'<connect name="hold_{o}" body1="link7" body2="{o}" anchor="0 0 0" active="false" '
-        f'solref="0.008 1" solimp="0.98 0.995 0.001"/>' for o in hold_object_names())
+        f'<{"weld" if rigid_hold() else "connect"} name="hold_{o}" body1="link7" body2="{o}" anchor="0 0 0" '
+        f'active="false" solref="0.008 1" solimp="0.98 0.995 0.001"/>' for o in hold_object_names())
     if "</equality>" in xml:
         xml = xml.replace("</equality>", "        " + eq + "\n    </equality>", 1)
     else:

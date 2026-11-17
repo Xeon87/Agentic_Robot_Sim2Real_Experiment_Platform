@@ -30,9 +30,10 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-VERSION = "V4.10.1"
+VERSION = "V4.10.2"
 MARKER_V493 = "V4.9.3 TASK-START RECOVERY + SAFETY STOP + SINGULARITY + EGG ROLL"
 MARKER_V4101 = "V4.10.1 PITCH CHANGE + RIGID TWIN HOLD + BRIDGE FIX"
+MARKER_V4102 = "V4.10.2 RIGID WELD HOLD IN THE GUI SIMULATION"
 MARKER_V491 = "V4.9.1 DENSE LINES + REACHABILITY"
 MARKER_V492 = "V4.9.2 REAL-LIKE PERCEPTION + LLM EVAL + COMPACT OUTPUTS"
 MARKER = "V4.8.9 GENERAL PICK&PLACE CHUNK LLM"
@@ -1759,7 +1760,13 @@ def _make_sim_io_class():
     class SimGeneralIO(CK.BackendIO):
         """V4.8.10: BackendIO adapter for GeneralPickPlaceSkills in MuJoCo simulation."""
         name = "sim_general"
-        hold_kind = "ball"                 # V4.10.1: the backend's CONNECT hold (frozen backend)
+        @property
+        def hold_kind(self):               # V4.10.2: weld (rigid) in the general / household scenes
+            try:
+                import NERO_V343_Scenes as SC
+                return "rigid" if SC.rigid_hold() else "ball"
+            except Exception:
+                return "ball"
         is_sim = True
         is_agx = True
         tip_drop_m = 0.030

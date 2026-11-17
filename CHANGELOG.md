@@ -1,3 +1,22 @@
+## V4.10.2 (2026-11-17) — GUI 仿真的夹持改成刚性（weld）
+
+用户：「球铰改成刚性，你改啊」（同意改后端）。
+
+- **范围**：只改 general_pick_place 和 household_pick_place 两个场景；其余场景（鸡蛋、叠杯子、分类、整理桌面、保险箱）仍是 connect 球铰，行为不变。
+- **场景模块**（`NERO_V343_Scenes.py`）：这两个场景的夹持约束从 `<connect>` 换成 `<weld>`；新增 `rigid_hold()` 和 `wrap_activate_hold()`。后者在夹住的那一刻，把物体在 link7 里的当前位姿写进 weld 的相对位姿，所以激活时没有跳变；遇到 connect 约束仍交给后端原来的函数处理。
+- **后端**（`NERO_V2_7_1_Unified_Backend.py`）：在 `activate_connect_hold` 定义之后加了一个新的 `# V3.43 A2` 块（第 12 个），非鸡蛋场景时用上面的包装替换夹持激活函数。
+  - 物理循环（B 段）没动，B 段哈希不变。
+  - 去掉 A2 块后仍与 V3.42 逐字节一致（test_v3_44 C2 仍通过）。
+- **测试里钉死的哈希按用户同意更新**：
+  - 17 个测试记录的后端整文件哈希。
+  - test_v3_61 / 62 / 63 / 72 里「后端去掉叠杯子钩子」后的哈希。
+  - test_v3_44 / 60 / 62 / 63 / 72 里的 A2 块数（11 → 12）。
+  - test_v4_8_10 里 general 场景的夹持约束检查（connect → weld）。
+- **通用 pick & place**：GUI 仿真里 `hold_kind` 在这两个场景为 rigid，夹爪说明里 `held_object_turns_with_gripper = true`，所以 `pitch_change_deg`（搬运中转动被夹物体）在 GUI 里也能用了。
+- **验证**：在 MuJoCo 里用家居场景的 MJCF 和后端同样的调用实测：激活 weld 后，把 link7 转 90°，遥控器跟着转，相对 link7 的位置误差 < 0.5 mm、姿态不变。connect 约束仍走后端原函数。
+- **未在真实 GUI 里实测**：后端需要 ROS / MoveIt，容器里起不来。请在 GUI 里试「把遥控器插进马克杯」。
+- 测试：新 `tests/test_v4_10_2.py`（R1–R3）。
+
 ## V4.10.1 (2026-11-17) — 搬运中改变夹爪俯仰；孪生刚性夹持；桥接修复
 
 起因：用户 11-17 GUI 实测 V4.10。「把遥控器插进马克杯」被 LLM 判断为做不到：工具在搬运中只能绕竖直轴转，平放的遥控器（175 mm）进不了口径 92 mm 的杯子；而且仿真的球铰夹持即使转动夹爪，物体也不会跟着转。另外日志显示仿真窗口这一侧没有接上（`not attached: name 'delay_ms' is not defined`）。

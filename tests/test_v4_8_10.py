@@ -129,7 +129,7 @@ class TestV4810GeneralPickPlaceSim(unittest.TestCase):
         import NERO_V312_Console as C
         import NERO_V343_Scenes as SC
 
-        self.assertIn(C.VERSION, ("V4.8.10", "V4.8.11", "V4.9", "V4.9.1", "V4.9.2", "V4.9.3", "V4.10", "V4.10.1"))
+        self.assertIn(C.VERSION, ("V4.8.10", "V4.8.11", "V4.9", "V4.9.1", "V4.9.2", "V4.9.3", "V4.10", "V4.10.1", "V4.10.2"))
         keys = [k for k, _lbl in C.SIM_SCENES]
         self.assertIn("general_pick_place", keys)
         self.assertIn("general_pick_place", SC.SCENES)
@@ -172,7 +172,7 @@ class TestV4810GeneralPickPlaceSim(unittest.TestCase):
                 bodies = {b.get("name") for b in tree.findall(".//body")}
                 for n in SC.GENERAL_OBJECT_NAMES:
                     self.assertIn(n, bodies)
-                eq_names = {e.get("name") for e in tree.findall(".//equality/connect")}
+                eq_names = {e.get("name") for e in tree.findall(".//equality/weld")}   # V4.10.2: weld (rigid) holds
                 for n in SC.GENERAL_OBJECT_NAMES:
                     self.assertIn(f"hold_{n}", eq_names)
         finally:

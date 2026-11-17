@@ -1771,6 +1771,11 @@ def run_sim(
             # Activate. Constraint will be rebuilt by the next step1.
             data.eq_active[eqid] = 1
             return True
+        # V3.43 A2 BEGIN
+        if _v343_scene_name() != "fill_egg_holder":   # V4.10.2 RIGID HOLD: weld holds (general / household scenes)
+            activate_connect_hold = _V343.wrap_activate_hold(activate_connect_hold, model, data, hold_eq_by_body,
+                                                             link7_bid, deactivate_all_holds)
+        # V3.43 A2 END
 
         def gripper_contact_sides():
             """

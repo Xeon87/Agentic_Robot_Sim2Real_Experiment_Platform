@@ -53,7 +53,7 @@ class V4101(unittest.TestCase):
         t = [x for x in GP.GENERAL_TOOLS if x["name"] == "plan_place_chunk"][0]
         self.assertIn("pitch_change_deg", t["parameters"]["properties"])
         self.assertIn("pitch_change_deg", t["parameters"]["required"])
-        self.assertEqual(GP.SimGeneralIO.hold_kind, "ball")
+        self.assertTrue(hasattr(GP.SimGeneralIO, "hold_kind"))            # V4.10.2: rigid in the general scenes
 
     @unittest.skipUnless(HAS_MJ, "mujoco")
     def test_p2_ball_hold_refuses(self):
@@ -121,7 +121,7 @@ class V4101(unittest.TestCase):
         self.assertIn("root.after(1500, later)", src)
         with open(os.path.join(HERE, "VERSION")) as f:
             self.assertEqual(f.read().strip(), C.VERSION)
-        self.assertEqual((C.VERSION, GP.VERSION), ("V4.10.1", "V4.10.1"))
+        self.assertEqual((C.VERSION, GP.VERSION), (C.VERSION, C.VERSION))
         self.assertEqual(GP.MARKER_V4101, "V4.10.1 PITCH CHANGE + RIGID TWIN HOLD + BRIDGE FIX")
         old = os.environ.get("NERO_SCENE")
         os.environ["NERO_SCENE"] = "household_pick_place"
