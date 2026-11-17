@@ -514,6 +514,13 @@ def describe(hm: HeightMap, oid: str, bottom_z: Optional[float] = None, side_fn=
             "format": "cross sections through center_xyz seen from above: [from_offset_mm, to_offset_mm, "
                       "surface height above table mm (null = not this object)]"},
         "open_cavity": cavity,
+        # V4.10.1 MEASURED OUTLINE (internal, not sent to the LLM): the footprint's boundary cells in the object's
+        # (a, b) frame, normalised by its half sizes - the held-object cloud uses this shape instead of a model
+        "_outline_ab": _outline_ab(xy, ctr, ua, ub, ext_a, ext_b, hm.res),
+        # footprint area / its rectangle (rectangle ~1.0, ellipse ~0.79): the fallback shape when no outline
+        # (the rectangle without the half cell each side adds: a true rectangle gives ~1.0, not 0.93)
+        "_footprint_fill": round(min(1.0, float(len(cells)) * hm.res * hm.res /
+                                     max((2.0 * ext_a - hm.res) * (2.0 * ext_b - hm.res), 1e-9)), 3),
         # kept for the V4.8.x callers
         "yaw_deg": round(yaw, 1),
     }
@@ -552,6 +559,14 @@ def relations(descs: Sequence[Dict[str, Any]]) -> List[Dict[str, str]]:
                     out.append({"object": A["object_id"], "relation": "inside", "of": B["object_id"]})
                     continue
             sa, sb = [float(v) / 2000.0 for v in B["size_mm"]]
+            if not cav and abs(da) <= 0.8 * sa and abs(db) <= 0.8 * sb and \
+                    float(A["bottom_z_m"]) < float(B["top_z_m"]) - 0.005 and \
+                    float(A["bottom_z_m"]) > float(B["bottom_z_m"]) + 0.002 and float(A["top_z_m"]) > float(B["top_z_m"]):
+                # V4.10.1: B's opening is not visible (A sticks out of it): A's bottom is below B's top inside B's
+                # outline, which only a hollow B allows
+                out.append({"object": A["object_id"], "relation": "inside", "of": B["object_id"],
+                            "note": f"{B['object_id']}'s opening is covered; judged from its outline and heights"})
+                continue
             if abs(da) <= sa and abs(db) <= sb and \
                     float(B["top_z_m"]) - 0.012 <= float(A["bottom_z_m"]) <= float(B["top_z_m"]) + 0.020:
                 out.append({"object": A["object_id"], "relation": "on", "of": B["object_id"]})
@@ -667,6 +682,47 @@ def preview_grasp(hm: HeightMap, fm: FingerModel, p_grasp, yaw_deg: float, pitch
 
 
 # ============================================================================================ held object model
+def _outline_ab(xy, ctr, ua, ub, ext_a, ext_b, res, max_pts=240):
+    """boundary cells of a footprint (cells with a missing 4-neighbour), pushed out by half a cell, as (a, b)
+    normalised by the half sizes; at most max_pts points (evenly thinned)"""
+    ij = np.round((np.asarray(xy) - np.asarray(xy).min(axis=0)) / res).astype(int)
+    S = {(int(i), int(j)) for i, j in ij}
+    edge = [k for k, (i, j) in enumerate(ij) if not all(((i + di), (j + dj)) in S
+                                                       for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)))]
+    if not edge:
+        return []
+    P = np.asarray(xy)[edge] - np.asarray(ctr)[None, :]
+    nrm = np.linalg.norm(P, axis=1, keepdims=True)
+    P = P * (1.0 + (res / 2.0) / np.maximum(nrm, 1e-6))          # half a cell outward, along the radius
+    pa, pb = P @ ua, P @ ub
+    # V4.10.1: keep only what sticks out of the ellipse through the half sizes by more than one cell (a raster
+    # circle bulges ~2-3 mm at its diagonals; the corners of a rectangle stick out by tens of mm): in metres,
+    # radius = max(ellipse radius in that direction, measured radius - one cell)
+    r = np.hypot(pa, pb)
+    cs, sn = pa / np.maximum(r, 1e-9), pb / np.maximum(r, 1e-9)
+    r_e = 1.0 / np.sqrt((cs / max(ext_a, 1e-6)) ** 2 + (sn / max(ext_b, 1e-6)) ** 2)
+    r2 = np.maximum(r_e, r - res)
+    out = np.column_stack([r2 * cs / max(ext_a, 1e-6), r2 * sn / max(ext_b, 1e-6)])
+    if len(out) > max_pts:
+        out = out[np.linspace(0, len(out) - 1, max_pts).astype(int)]
+    return np.round(out, 3).tolist()
+
+
+def superellipse_n(fill: float) -> float:
+    """V4.10.1: exponent n of the superellipse whose area / rectangle area = fill (2 for fill <= pi/4, up to 12)"""
+    def area(n):
+        return math.gamma(1.0 + 1.0 / n) ** 2 / math.gamma(1.0 + 2.0 / n)
+    if fill <= area(2.0):
+        return 2.0
+    if fill >= area(12.0):
+        return 12.0
+    lo, hi = 2.0, 12.0
+    for _ in range(40):
+        mid = (lo + hi) / 2.0
+        lo, hi = (mid, hi) if area(mid) < fill else (lo, mid)
+    return (lo + hi) / 2.0
+
+
 def held_cloud_from_desc(desc: Dict[str, Any], step_m: float = 0.004) -> np.ndarray:
     """surface points of an object (world frame, at its perceived pose) from its descriptor: rings at the side
     profile heights (ellipse through the 4 measured outer half widths) + the bottom disc; without a side profile:
@@ -686,31 +742,52 @@ def held_cloud_from_desc(desc: Dict[str, Any], step_m: float = 0.004) -> np.ndar
             vals = {k: (v if v is not None else max(seen)) for k, v in vals.items()}
         levels.append((float(r["z_m"]), vals))
     boxy = not levels
+    # V4.10.1 OUTLINE FROM THE FOOTPRINT FILL: superellipse |x/a|^n + |y/b|^n = 1 whose area fills the rectangle as
+    # much as the measured footprint does (n = 2: ellipse, ~0.785; n -> inf: rectangle).  The plain ellipse cut the
+    # corners of a 175 x 48 mm remote (turned 41 deg it was 120 mm wide instead of 151 mm and "fitted" a 126 mm box)
+    nexp = superellipse_n(float(desc.get("_footprint_fill") or 0.0))
+    outline = [] if boxy else list(desc.get("_outline_ab") or [])
+    rect = boxy
     if boxy:
         for z in np.linspace(bot, top, 6):
             levels.append((float(z), {"+a": sa, "-a": sa, "+b": sb, "-b": sb}))
     for z, v in levels:
         ra = [v.get("+a") or sa, v.get("-a") or sa]
         rb = [v.get("+b") or sb, v.get("-b") or sb]
-        n = 24
+        if outline:                                # V4.10.1: the measured outline, scaled to this level's widths
+            for u_, w_ in outline:
+                vec = (u_ * (ra[0] if u_ >= 0 else ra[1])) * ua + (w_ * (rb[0] if w_ >= 0 else rb[1])) * ub
+                pts.append(np.array([c[0], c[1], z]) + vec)
+            continue
+        # V4.10.1: one point every <= 3 mm of the outline (24 fixed points left ~18 mm gaps on a 175 mm remote,
+        # through which a 4 mm wall slipped; the height map has 3 mm cells)
+        perim = 2.0 * (max(ra) + max(rb)) * (4.0 if rect else math.pi / 2.0 * 1.3)
+        n = max(24, int(math.ceil(perim / min(step_m, 0.003))))
         for i in range(n):
             t = 2 * math.pi * i / n
             ca_, sb_ = math.cos(t), math.sin(t)
             rr_a = ra[0] if ca_ >= 0 else ra[1]
             rr_b = rb[0] if sb_ >= 0 else rb[1]
-            if boxy:
+            if rect:
                 s = max(abs(ca_) / max(rr_a, 1e-4), abs(sb_) / max(rr_b, 1e-4))
                 vec = (ca_ / s) * ua + (sb_ / s) * ub
             else:
-                vec = (rr_a * ca_) * ua + (rr_b * sb_) * ub
+                e = 2.0 / nexp
+                vec = (rr_a * math.copysign(abs(ca_) ** e, ca_)) * ua + (rr_b * math.copysign(abs(sb_) ** e, sb_)) * ub
             pts.append(np.array([c[0], c[1], z]) + vec)
     # bottom disc: the lowest measured level's half widths (the footprint seen from above can be wider)
     z_low, v_low = min(levels, key=lambda lv: lv[0])
     ba = max(v_low.get("+a") or sa, v_low.get("-a") or sa)
     bb = max(v_low.get("+b") or sb, v_low.get("-b") or sb)
+    if outline:                                    # V4.10.1: the measured outline, shrunk in three rings
+        for f in (1.0, 0.66, 0.33):
+            for u_, w_ in outline:
+                pts.append(np.array([c[0], c[1], bot]) + (f * u_ * ba) * ua + (f * w_ * bb) * ub)
+        pts.append(np.array([c[0], c[1], bot]))
+        return np.array(pts, float)
     for x in np.arange(-ba, ba + 1e-9, step_m * 2):
         for y in np.arange(-bb, bb + 1e-9, step_m * 2):
-            if boxy or (x / max(ba, 1e-4)) ** 2 + (y / max(bb, 1e-4)) ** 2 <= 1.0:
+            if rect or abs(x / max(ba, 1e-4)) ** nexp + abs(y / max(bb, 1e-4)) ** nexp <= 1.0:
                 pts.append(np.array([c[0], c[1], bot]) + x * ua + y * ub)
     return np.array(pts, float)
 

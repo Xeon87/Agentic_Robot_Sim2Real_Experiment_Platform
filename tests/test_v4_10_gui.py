@@ -135,5 +135,20 @@ ch._step()
 with open(os.path.join(td, "outbox", "a1.json")) as f:
     assert json.load(f)["status"] == "complete"
 print("[OK] bridge: SimAgent widgets found by structure, console settings applied + locked, task file -> RUN TASK -> outbox")
+# V4.10.1: the real entry point (attach_from_notebook -> find -> apply) on a fresh panel
+mv.set("gpt-5.6-luna")
+ev.set("low")
+for c in cfg.winfo_children():
+    try:
+        c.configure(state="normal")
+    except Exception:
+        pass
+B.attach_from_notebook(nb, print)
+t_end = time.time() + 4.0
+while time.time() < t_end and mv.get() != "deepseek-v4-pro":
+    root.update()
+    time.sleep(0.05)
+assert (mv.get(), ev.get()) == ("deepseek-v4-pro", "max"), (mv.get(), ev.get())
+print("[OK] attach_from_notebook: settings applied through the real entry point")
 root.destroy()
 print("ALL V4.10 GUI TESTS PASSED")

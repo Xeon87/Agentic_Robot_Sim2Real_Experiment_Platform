@@ -182,7 +182,7 @@ class V493(unittest.TestCase):
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
         self.assertEqual((v, RR.VERSION, GP.VERSION), (C.VERSION, C.VERSION, C.VERSION))
-        self.assertIn(v, ("V4.9.3", "V4.10"))
+        self.assertIn(v, ("V4.9.3", "V4.10", "V4.10.1"))
         self.assertEqual(GP.MARKER_V493, "V4.9.3 TASK-START RECOVERY + SAFETY STOP + SINGULARITY + EGG ROLL")
 
 

@@ -259,7 +259,7 @@ def attach_from_notebook(notebook, log):
             log(f"[WARN] [V4.10 SIM BRIDGE] SimAgent widgets not found: {missing}; console settings / task channel off")
             return
         attach_gui(root, getters_from_widgets(root, W), log, delay_ms=0)
-    root.after(int(delay_ms), later)
+    root.after(1500, later)
 
 
 def attach_gui(root, g, log, delay_ms=1500):

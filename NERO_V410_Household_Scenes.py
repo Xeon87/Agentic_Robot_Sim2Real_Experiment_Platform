@@ -560,7 +560,9 @@ def goal_status(m, d, scene: HScene, held=()) -> List[dict]:
 
 
 # ------------------------------------------------------------------------------------------------ twin + probe
-def make_twin(scene: HScene, log=None, noise=None):
+def make_twin(scene: HScene, log=None, noise=None, rigid_hold=True):
+    """the MuJoCo twin of a household scene; V4.10.1: rigid hold (weld) by default, so a held object turns with the
+    gripper as on the real robot (the GUI simulation keeps the backend's ball-joint hold)"""
     import NERO_V489_General_Pick_Place as GP
     if noise is True:
         noise = dict(GP.REAL_LIKE_NOISE, seed=int(scene.seed or 0))
@@ -573,7 +575,7 @@ def make_twin(scene: HScene, log=None, noise=None):
     CK.twin_xml = _twin_xml
     try:
         return GP.TwinGeneralIO(log=log, world_xml=scene.world_xml(visual=False), hold_names=scene.hold_names(),
-                                assets=extra, slots=None, noise=noise)
+                                assets=extra, slots=None, noise=noise, rigid_hold=rigid_hold)
     finally:
         CK.twin_xml = orig
 

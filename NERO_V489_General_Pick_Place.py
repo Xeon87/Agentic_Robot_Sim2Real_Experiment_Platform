@@ -30,8 +30,9 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-VERSION = "V4.10"
+VERSION = "V4.10.1"
 MARKER_V493 = "V4.9.3 TASK-START RECOVERY + SAFETY STOP + SINGULARITY + EGG ROLL"
+MARKER_V4101 = "V4.10.1 PITCH CHANGE + RIGID TWIN HOLD + BRIDGE FIX"
 MARKER_V491 = "V4.9.1 DENSE LINES + REACHABILITY"
 MARKER_V492 = "V4.9.2 REAL-LIKE PERCEPTION + LLM EVAL + COMPACT OUTPUTS"
 MARKER = "V4.8.9 GENERAL PICK&PLACE CHUNK LLM"
@@ -428,6 +429,7 @@ class GeneralPickPlaceSkills:
         spec = self._fingers().llm_spec()
         spec["min_fingertip_above_table_mm"] = round(self._tip_clear_m() * 1000.0, 1)
         spec["collision_margin_mm"] = round(self._meas_margin_m() * 1000.0, 1)
+        spec["held_object_turns_with_gripper"] = self._held_turns()      # V4.10.1
         extra = {"objects": seen, "other_objects": other, "relations": rel}
         # V4.9.2 COMPACT OUTPUTS: the gripper geometry and the field legend once per task, then a pointer
         if not getattr(self, "_spec_sent", False):
@@ -866,6 +868,11 @@ class GeneralPickPlaceSkills:
         self._held_desc = d
         self._held_bottom_G = float(self._held_cloud_G[:, 2].max())      # z_G points down: the lowest point
 
+    def _held_turns(self) -> bool:
+        """V4.10.1: does a held object turn with the gripper?  real robot / rigid-hold twin: yes; the backend
+        simulation (CONNECT = ball joint at the object origin): no"""
+        return getattr(self.io, "hold_kind", "rigid") != "ball"
+
     def _gripper_points_G(self, open_mm):
         out = []
         for name, lo, hi in self._fingers().boxes(open_mm):
@@ -874,11 +881,11 @@ class GeneralPickPlaceSkills:
 
     def plan_place_chunk(self, target_id_or_xyz="obj_2", xy_offset_mm=None, held_bottom_above_target_top_mm=None,
                          yaw_change_deg=0.0, approach_height_mm=60.0, release_open_mm=None,
-                         carry_lift_mm=0.0, release_above_target_mm=None, **_):
+                         carry_lift_mm=0.0, release_above_target_mm=None, pitch_change_deg=0.0, **_):
         args = dict(target_id_or_xyz=target_id_or_xyz, xy_offset_mm=xy_offset_mm,
                     held_bottom_above_target_top_mm=held_bottom_above_target_top_mm, yaw_change_deg=yaw_change_deg,
                     approach_height_mm=approach_height_mm, release_open_mm=release_open_mm, carry_lift_mm=carry_lift_mm,
-                    release_above_target_mm=release_above_target_mm)
+                    release_above_target_mm=release_above_target_mm, pitch_change_deg=pitch_change_deg)
         r = self._plan_place_core(**args)
         if not r.get("ok") and r.get("reason") in ("PLACE_PLAN_FAILED", "CARRY_COLLISION", "PLACE_COLLISION"):
             try:
@@ -909,6 +916,10 @@ class GeneralPickPlaceSkills:
                                      for d in range(0, 360, 30)}
             out["carry_lift_mm"] = {f"{cl:.0f}": status(dict(args, carry_lift_mm=cl))
                                     for cl in (0.0, 20.0, 40.0, 60.0, 80.0, 100.0)}
+            p0 = float(args.get("pitch_change_deg") or 0.0)
+            if abs(p0) > 0.5:                           # V4.10.1: the pitch change itself, when one was asked
+                out["pitch_change_deg"] = {f"{pc:+.0f}": status(dict(args, pitch_change_deg=pc))
+                                           for pc in sorted({0.0, p0, -p0, p0 / 2.0, -p0 / 2.0})}
             h0 = args.get("held_bottom_above_target_top_mm")
             h0 = float(h0 if h0 is not None else (args.get("release_above_target_mm") or 20.0))
             out["held_bottom_above_target_top_mm"] = {f"{h:+.0f}": status(dict(args, held_bottom_above_target_top_mm=h))
@@ -920,7 +931,7 @@ class GeneralPickPlaceSkills:
 
     def _plan_place_core(self, target_id_or_xyz="obj_2", xy_offset_mm=None, held_bottom_above_target_top_mm=None,
                          yaw_change_deg=0.0, approach_height_mm=60.0, release_open_mm=None,
-                         carry_lift_mm=0.0, release_above_target_mm=None, **_):
+                         carry_lift_mm=0.0, release_above_target_mm=None, pitch_change_deg=0.0, **_):
         if not self.last_obs:
             return self._res("plan_place_chunk", False, reason="OBSERVE_FIRST", nxt=["perceive_objects"])
         virtual = False
@@ -957,6 +968,16 @@ class GeneralPickPlaceSkills:
         a = math.radians(float(yaw_change_deg or 0.0))
         Rz = np.array([[math.cos(a), -math.sin(a), 0.0], [math.sin(a), math.cos(a), 0.0], [0.0, 0.0, 1.0]])
         R_rel = Rz @ Tg0[:3, :3]
+        pc = float(pitch_change_deg or 0.0)
+        if abs(pc) > 0.05:                              # V4.10.1 PITCH CHANGE: turn about the pad-to-pad axis (y_G)
+            if not self._held_turns():
+                return self._res("plan_place_chunk", False, {
+                    "pitch_change_deg": pc, "problems": [
+                        "this simulator holds the object with a ball joint at its origin: turning the gripper does "
+                        "not turn the held object (held_object_turns_with_gripper = false)"]},
+                    reason="PLACE_PLAN_FAILED", nxt=["plan_place_chunk"])
+            b = math.radians(pc)
+            R_rel = R_rel @ np.array([[math.cos(b), 0.0, math.sin(b)], [0.0, 1.0, 0.0], [-math.sin(b), 0.0, math.cos(b)]])
         Cw0 = (R_rel @ C.T).T                         # held cloud relative to the grasp point, release orientation
         cxy = Cw0[:, :2].mean(axis=0) if len(Cw0) > 1 else np.zeros(2)
         bottom_rel = float(Cw0[:, 2].min()) if len(Cw0) > 1 else -self._tip_drop_m()
@@ -977,6 +998,7 @@ class GeneralPickPlaceSkills:
         facts = {
             "target": str(target_id_or_xyz),
             "held_object": held_id,
+            "pitch_change_deg": pc,
             "held_object_bottom_z_m": round(z_bottom, 4),
             "held_object_bottom_above_target_top_mm": float(held_bottom_above_target_top_mm),
             "grasp_point_at_release_xyz_m": [round(float(v), 4) for v in p_rel_g],
@@ -1305,9 +1327,12 @@ GENERAL_TOOLS = [
         "release_open_mm) above every other object, the carry path clearance, and problems.",
         {"target_id_or_xyz": {"type": "string"}, "xy_offset_mm": _XY, "held_bottom_above_target_top_mm": _NUM,
          "yaw_change_deg": _NUM, "approach_height_mm": _NUM, "release_open_mm": _NUM,
-         "carry_lift_mm": {"type": "number", "description": "extra straight-up lift before the carry (mm, 0 = none)"}},
+         "carry_lift_mm": {"type": "number", "description": "extra straight-up lift before the carry (mm, 0 = none)"},
+         "pitch_change_deg": {"type": "number", "description": "turn of the gripper about its pad-to-pad axis between "
+                              "the lift and the release (deg, 0 = none); the held object turns with it when the "
+                              "gripper facts say held_object_turns_with_gripper"}},
         ["target_id_or_xyz", "xy_offset_mm", "held_bottom_above_target_top_mm", "yaw_change_deg",
-         "approach_height_mm", "release_open_mm", "carry_lift_mm"]),
+         "approach_height_mm", "release_open_mm", "carry_lift_mm", "pitch_change_deg"]),
     _fn("execute_place_chunk",
         "Move: carry over the target, lower vertically, open the fingers, retreat up. Reports how the object moved "
         "after release.",
@@ -1734,6 +1759,7 @@ def _make_sim_io_class():
     class SimGeneralIO(CK.BackendIO):
         """V4.8.10: BackendIO adapter for GeneralPickPlaceSkills in MuJoCo simulation."""
         name = "sim_general"
+        hold_kind = "ball"                 # V4.10.1: the backend's CONNECT hold (frozen backend)
         is_sim = True
         is_agx = True
         tip_drop_m = 0.030
@@ -1907,16 +1933,23 @@ def _make_twin_io_class():
         tip_drop_m = 0.030
 
         def __init__(self, log=None, start_tcp=None, motion_allowed=True, world_xml=None, hold_names=None,
-                     assets=None, slots="default", noise=None):
+                     assets=None, slots="default", noise=None, rigid_hold=False):
             wx = world_xml if world_xml is not None else SC.general_world_xml(bare=True)
-            super().__init__(
-                log=log,
-                start_tcp=start_tcp,
-                pose_mode="truth",
-                gripper="official",
-                world_xml=wx,
-                hold_names=list(hold_names) if hold_names is not None else SC.GENERAL_OBJECT_NAMES,
-            )
+            self.hold_kind = "rigid" if rigid_hold else "ball"
+            orig = CK.twin_xml
+            if rigid_hold:                 # V4.10.1 RIGID HOLD: weld instead of the CONNECT ball joint (twin only)
+                CK.twin_xml = lambda *a, **k: orig(*a, **k).replace('<connect name="hold_', '<weld name="hold_')
+            try:
+                super().__init__(
+                    log=log,
+                    start_tcp=start_tcp,
+                    pose_mode="truth",
+                    gripper="official",
+                    world_xml=wx,
+                    hold_names=list(hold_names) if hold_names is not None else SC.GENERAL_OBJECT_NAMES,
+                )
+            finally:
+                CK.twin_xml = orig
             self.CK = CK
             self.fast = self.arm
             self.cfg = {}
@@ -1928,6 +1961,28 @@ def _make_twin_io_class():
             self._vision = ProbeVision(wx, (assets if assets is not None else SC.CUP_ASSETS), self._pose_wxyz, slots=sl,
                                        noise=noise)
             self.perception_noise = self._vision.noise
+
+        def _activate_hold(self, bid):
+            """V4.10.1: rigid hold = weld at the pose the object has in the gripper now (relpose of body2 in link7)"""
+            if self.hold_kind != "rigid":
+                return super()._activate_hold(bid)
+            mj = self.mj
+            name = mj.mj_id2name(self.m, mj.mjtObj.mjOBJ_BODY, bid)
+            try:
+                eq = self.m.equality("hold_" + name).id
+            except Exception:
+                return
+            R1 = self.d.xmat[self.l7].reshape(3, 3)
+            q1, q2 = np.array(self.d.xquat[self.l7], float), np.array(self.d.xquat[bid], float)
+            q1c = q1 * np.array([1.0, -1.0, -1.0, -1.0])
+            rq = np.zeros(4)
+            mj.mju_mulQuat(rq, q1c, q2)
+            self.m.eq_data[eq, 0:3] = 0.0
+            self.m.eq_data[eq, 3:6] = R1.T @ (self.d.xpos[bid] - self.d.xpos[self.l7])
+            self.m.eq_data[eq, 6:10] = rq
+            self.m.eq_data[eq, 10] = 1.0
+            self.d.eq_active[eq] = 1
+            self.hold = name
 
         def _pose_wxyz(self, body_name):
             try:
@@ -2048,6 +2103,15 @@ def recover_for_task(io, probe=True) -> Tuple[bool, str]:
     return False, why
 
 
+def _scene_name():
+    """V4.10.1: the scene as chosen in the console (general_pick_place / household_pick_place)"""
+    try:
+        import NERO_V343_Scenes as SC
+        return SC.selected_variant()
+    except Exception:
+        return "general_pick_place"
+
+
 def gui_run_sim_task(ctx):
     """V4.8.10: called from NERO_V2_7_1_Unified_Backend.llm_run_task_cmd (# V3.43 A2) when NERO_SCENE=general_pick_place."""
     log = ctx["log"]
@@ -2064,7 +2128,7 @@ def gui_run_sim_task(ctx):
     dry_run = bool(cfg.get("dry_run", False))
     io = SimGeneralIO(ctx, motion_allowed=not dry_run)
     mode = "plan" if dry_run else "execute"
-    log(f"[V4.8.10 GENERAL SIM TASK] scene=general_pick_place | mode={mode} | model={cfg['model']} | task={cfg['task']!r}")
+    log(f"[V4.8.10 GENERAL SIM TASK] scene={_scene_name()} | mode={mode} | model={cfg['model']} | task={cfg['task']!r}")
 
     def _run():
         if not dry_run:
