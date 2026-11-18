@@ -38,8 +38,10 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-VERSION = "V4.11"
+VERSION = "V4.11.1"
+EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")      # same list as the console / SimAgent panels
 MARKER = "V4.11 SIM DOE"
+MARKER_V4111 = "V4.11.1 DOE MODEL PICKER + FONT-SIZED ROWS"
 BLOWUP_TRIPS = 5                        # same threshold as the harness's V4.10.3 auto reset
 
 STATUS_COLOR = {"pending": "#9e9e9e", "running": "#2e7d32", "success": "#2e7d32", "partial": "#f2c037",
@@ -590,6 +592,12 @@ class DOETab:
         self.runner: Optional[DOERunner] = None
         self.blink = False
         self.lamp_items = {}
+        # V4.11.1: row height and column widths from the real font size (large fonts / HiDPI screens)
+        try:
+            self.line_px = int(root.tk.call("font", "metrics", "TkDefaultFont", "-linespace"))
+        except Exception:
+            self.line_px = 16
+        ttk.Style(root).configure("DOE.Treeview", rowheight=max(20, int(self.line_px * 1.4)))
         f = self.frame = ttk.Frame(parent, padding=10)
         ttk.Label(f, text="仿真 DOE：任务 × LLM 设置 × 重复次数，逐次在仿真里跑，成功与否按仿真真值判定（家居场景）",
                   font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
@@ -598,11 +606,18 @@ class DOETab:
         # ---- task rows
         lt = ttk.LabelFrame(top, text="1. 任务（场景 + 任务句 + 结构化目标）", padding=6)
         lt.pack(side="left", fill="both", expand=True)
-        self.tv_rows = ttk.Treeview(lt, columns=("n", "scene", "task", "goals"), show="headings", height=7)
-        for c, w, t in (("n", 36, "#"), ("scene", 80, "场景"), ("task", 330, "任务句"), ("goals", 240, "目标")):
+        rw = ttk.Frame(lt)
+        rw.pack(fill="both", expand=True)
+        self.tv_rows = ttk.Treeview(rw, columns=("n", "scene", "task", "goals"), show="headings", height=7,
+                                    style="DOE.Treeview")
+        for c, t, sample in (("n", "#", "T10"), ("scene", "场景", "seed:12345"), ("task", "任务句", "x" * 40),
+                             ("goals", "目标", "x" * 30)):
             self.tv_rows.heading(c, text=t)
-            self.tv_rows.column(c, width=w, stretch=(c in ("task", "goals")))
-        self.tv_rows.pack(fill="both", expand=True)
+            self.tv_rows.column(c, width=self.px(sample), minwidth=self.px(t), stretch=(c in ("task", "goals")))
+        ysb = ttk.Scrollbar(rw, orient="vertical", command=self.tv_rows.yview)
+        self.tv_rows.configure(yscrollcommand=ysb.set)
+        self.tv_rows.pack(side="left", fill="both", expand=True)
+        ysb.pack(side="left", fill="y")
         self.tv_rows.bind("<Double-1>", lambda _e: self.edit_row())
         b = ttk.Frame(lt)
         b.pack(fill="x", pady=(4, 0))
@@ -619,17 +634,37 @@ class DOETab:
         # ---- models + design
         rt = ttk.Frame(top)
         rt.pack(side="left", fill="y", padx=(10, 0))
-        lm = ttk.LabelFrame(rt, text="2. LLM 设置（提供方:模型@思考档位）", padding=6)
+        lm = ttk.LabelFrame(rt, text="2. 要比较的 LLM（每行一组；每组都会跑全部任务）", padding=6)
         lm.pack(fill="x")
         self.lb_models = tk.Listbox(lm, height=4, width=40, exportselection=False)
         self.lb_models.pack(fill="x")
+        # V4.11.1 MODEL PICKER: provider / model / effort chosen from lists (model also typed), then 「加入」
+        pk = ttk.Frame(lm)
+        pk.pack(fill="x", pady=(6, 0))
+        self.prov_info = self._providers()
+        self.v_pprov = tk.StringVar(value=self.prov_info.get("openai", {}).get("label", "OpenAI"))
+        self.v_pmodel = tk.StringVar(value="")
+        self.v_peff = tk.StringVar(value="high")
+        ttk.Label(pk, text="提供方").grid(row=0, column=0, sticky="w")
+        self.c_pprov = ttk.Combobox(pk, textvariable=self.v_pprov, state="readonly", width=14,
+                                    values=[v["label"] for v in self.prov_info.values()])
+        self.c_pprov.grid(row=0, column=1, sticky="w", padx=(4, 10))
+        self.c_pprov.bind("<<ComboboxSelected>>", lambda _e: self._on_pick_provider())
+        ttk.Label(pk, text="思考档位").grid(row=0, column=2, sticky="w")
+        ttk.Combobox(pk, textvariable=self.v_peff, state="readonly", width=8, values=list(EFFORTS)).grid(
+            row=0, column=3, sticky="w", padx=4)
+        ttk.Label(pk, text="模型").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.c_pmodel = ttk.Combobox(pk, textvariable=self.v_pmodel, width=30)
+        self.c_pmodel.grid(row=1, column=1, columnspan=3, sticky="we", padx=(4, 0), pady=(4, 0))
         mb = ttk.Frame(lm)
-        mb.pack(fill="x", pady=(4, 0))
-        self.v_model = tk.StringVar(value="")
-        ttk.Entry(mb, textvariable=self.v_model, width=26).pack(side="left")
-        ttk.Button(mb, text="加入", command=self.add_model).pack(side="left", padx=2)
-        ttk.Button(mb, text="用仿真页当前设置", command=self.add_current_model).pack(side="left")
-        ttk.Button(mb, text="删除", command=self.del_model).pack(side="left", padx=2)
+        mb.pack(fill="x", pady=(6, 0))
+        ttk.Button(mb, text="加入", command=self.add_picked).pack(side="left")
+        ttk.Button(mb, text="用仿真页当前设置", command=self.add_current_model).pack(side="left", padx=4)
+        ttk.Button(mb, text="删除选中", command=self.del_model).pack(side="left")
+        self.v_keys = tk.StringVar(value="")
+        ttk.Label(lm, textvariable=self.v_keys, foreground="#555555", wraplength=self.px("x" * 52),
+                  justify="left").pack(anchor="w", pady=(4, 0))
+        self._on_pick_provider()
         ld = ttk.LabelFrame(rt, text="3. 设计", padding=6)
         ld.pack(fill="x", pady=(6, 0))
         self.v_rep, self.v_steps, self.v_tmo = tk.StringVar(value="3"), tk.StringVar(value="60"), tk.StringVar(value="20")
@@ -678,11 +713,15 @@ class DOETab:
         bot = ttk.Panedwindow(f, orient="horizontal")
         bot.pack(fill="both", expand=True, pady=(6, 0))
         sf = ttk.LabelFrame(bot, text="实时统计（成功率只算可判定的运行）", padding=4)
-        self.tv_sum = ttk.Treeview(sf, columns=("g", "n", "s", "p", "f", "i", "r", "ci"), show="headings", height=8)
-        for c, w, t in (("g", 230, "LLM 设置 / 任务"), ("n", 50, "可判定"), ("s", 46, "成功"), ("p", 46, "部分"),
-                        ("f", 46, "失败"), ("i", 64, "无法判定"), ("r", 60, "成功率"), ("ci", 90, "95% 区间")):
+        self.tv_sum = ttk.Treeview(sf, columns=("g", "n", "s", "p", "f", "i", "r", "ci"), show="headings", height=8,
+                                   style="DOE.Treeview")
+        for c, t, sample in (("g", "LLM 设置 / 任务", "openai:gpt-6.1-sol@high"), ("n", "可判定", "999"),
+                             ("s", "成功", "999"), ("p", "部分", "999"), ("f", "失败", "999"), ("i", "无法判定", "999"),
+                             ("r", "成功率", "100%"), ("ci", "95% 区间", "100%-100%")):
             self.tv_sum.heading(c, text=t)
-            self.tv_sum.column(c, width=w, stretch=(c == "g"))
+            w = max(self.px(t), self.px(sample))
+            self.tv_sum.column(c, width=w, minwidth=w if c != "g" else self.px(t), stretch=(c == "g"),
+                               anchor="w" if c == "g" else "center")
         self.tv_sum.pack(fill="both", expand=True)
         bot.add(sf, weight=1)
         lgf = ttk.LabelFrame(bot, text="DOE 日志", padding=4)
@@ -706,6 +745,10 @@ class DOETab:
         for m in self.models:
             self.lb_models.insert("end", model_label(m))
         self.update_summary()
+        try:
+            self._update_keys()
+        except Exception:
+            pass
 
     def add_fixed(self):
         self.rows += default_rows()
@@ -801,6 +844,68 @@ class DOETab:
         if m["model"] and model_label(m) not in [model_label(x) for x in self.models]:
             self.models.append(m)
         self._refresh_models()
+
+    def px(self, text):
+        """V4.11.1: width of a text in the default font (+ padding), for column widths on any screen"""
+        try:
+            return int(self.root.tk.call("font", "measure", "TkDefaultFont", text)) + 20
+        except Exception:
+            return 8 * len(text) + 20
+
+    def _providers(self):
+        try:
+            return dict(self.api["providers"]())
+        except Exception:
+            try:
+                import NERO_V2_7_1_Agent as A
+                return {k: {"label": v.get("label", k), "models": list(v.get("models") or [])}
+                        for k, v in A.LLM_PROVIDERS.items()}
+            except Exception:
+                return {"openai": {"label": "OpenAI", "models": []}}
+
+    def _pick_prov(self):
+        lab = self.v_pprov.get()
+        return next((k for k, v in self.prov_info.items() if v["label"] == lab), "openai")
+
+    def _on_pick_provider(self):
+        self.prov_info = self._providers()                 # the 仿真 page may have refreshed its model list
+        ms = list(self.prov_info.get(self._pick_prov(), {}).get("models") or [])
+        self.c_pmodel.configure(values=ms)
+        if self.v_pmodel.get() not in ms:
+            self.v_pmodel.set(ms[0] if ms else "")
+
+    def add_picked(self):
+        m = self.v_pmodel.get().strip()
+        if m:
+            self.add_model(f"{self._pick_prov()}:{m}@{self.v_peff.get() or 'high'}")
+
+    def key_problems(self, models=None) -> List[str]:
+        """providers of the plan without an API key (none typed / in the keyring / in the environment)"""
+        provs = sorted({m["provider"] for m in (self.models if models is None else models)})
+        try:
+            have = self.api["key_env"](provs)
+        except Exception:
+            have = {}
+        out = []
+        for p in provs:
+            try:
+                import NERO_V2_7_1_Agent as A
+                names = A.LLM_PROVIDERS.get(p, {}).get("key_env") or ()
+            except Exception:
+                names = ()
+            if not any(n in have or os.environ.get(n) for n in names):
+                out.append(p)
+        return out
+
+    def _update_keys(self):
+        provs = sorted({m["provider"] for m in self.models})
+        if not provs:
+            self.v_keys.set("API key：用的是「仿真 (MuJoCo)」页存的 key（每个提供方各一个）")
+            return
+        miss = self.key_problems()
+        self.v_keys.set("API key：" + "，".join(f"{self.prov_info.get(p, {}).get('label', p)} "
+                                                + ("没有 key（到「仿真 (MuJoCo)」页选这个提供方，填写并保存）" if p in miss else "有")
+                                                for p in provs))
 
     def add_current_model(self):
         try:
@@ -904,6 +1009,8 @@ class DOETab:
         busy = self.api["busy"]()
         if busy:
             probs.append(busy)
+        for p_ in self.key_problems(p["models"]):
+            probs.append(f"提供方 {p_} 没有 API key：到「仿真 (MuJoCo)」页选这个提供方，填写 key 并保存（钥匙串）")
         if probs:
             if self.mb:
                 self.mb.showerror("DOE 不能开始", "\n".join(probs[:12]))

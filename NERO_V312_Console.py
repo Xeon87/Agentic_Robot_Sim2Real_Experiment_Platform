@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.11"
+VERSION = "V4.11.1"
 # V3.12 baseline: VERSION = "V3.12"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
@@ -1585,7 +1585,9 @@ def run_console(initial_tab="sim"):
             "ready": lambda: sim_status.get().startswith("SYSTEM READY"),      # launcher printed SYSTEM READY
             "llm_default": lambda: {"provider": llm410.prov, "model": llm410.v_model.get().strip(),
                                     "effort": llm410.v_effort.get()},
-            "key_env": llm410.keys_env}, messagebox=messagebox, filedialog=_fd411)
+            "key_env": llm410.keys_env,
+            "providers": lambda: {k_: {"label": llm410.labels[k_], "models": list(llm410.models.get(k_) or [])}
+                                  for k_ in llm410.labels}}, messagebox=messagebox, filedialog=_fd411)
         nb.insert(nb.index(sim_tab) + 1, doe_tab.frame, text="仿真 DOE")
         doe_tab.add_current_model()
     except Exception as exc:

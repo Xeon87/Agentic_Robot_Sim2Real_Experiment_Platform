@@ -23,6 +23,9 @@ import NERO_V411_Sim_DOE as D            # noqa: E402
 
 root = tk.Tk()
 root.geometry("1400x900")
+if os.environ.get("NERO_TEST_TK_SCALING"):        # e.g. 2.0: large fonts as on a HiDPI screen
+    root.tk.call("tk", "scaling", float(os.environ["NERO_TEST_TK_SCALING"]))
+    root.geometry("2000x1150")
 nb = ttk.Notebook(root)
 nb.pack(fill="both", expand=True)
 panel = CS.LLMSettingsPanel(tk, ttk, root, root, log=print)
@@ -58,13 +61,24 @@ tab.v_s1.set("4")
 tab.add_seeds()
 assert [r["scene"] for r in tab.rows][-2:] == ["seed:3", "seed:4"]
 tab.add_current_model()
-tab.add_model("deepseek:deepseek-v4-pro@max")
-tab.add_model("deepseek:deepseek-v4-pro@max")                   # no duplicate
+tab.v_pprov.set(tab.prov_info["deepseek"]["label"])            # V4.11.1 picker: provider -> its model list
+tab._on_pick_provider()
+assert tab.v_pmodel.get() in tab.prov_info["deepseek"]["models"] and tab.c_pmodel.cget("values")
+tab.v_pmodel.set("deepseek-v4-pro")
+tab.v_peff.set("max")
+tab.add_picked()
+tab.add_picked()                                                # no duplicate
+assert "DeepSeek 没有 key" in tab.v_keys.get() and "OpenAI 有" in tab.v_keys.get(), tab.v_keys.get()
+assert any("deepseek" in x and "API key" in x for x in [f"提供方 {p} 没有 API key" for p in tab.key_problems()])
 assert [D.model_label(m) for m in tab.models] == ["openai:gpt-6.1-sol@high", "deepseek:deepseek-v4-pro@max"]
 tab.v_rep.set("2")
 tab.update_summary()
 assert "7 个任务 × 2 组 LLM × 2 次 = 28 次运行" in tab.v_sum.get(), tab.v_sum.get()
-print("[OK] DOE tab: H1-H5 + random seeds as task rows, LLM list without duplicates, plan summary")
+lsp = int(root.tk.call("font", "metrics", "TkDefaultFont", "-linespace"))
+assert int(ttk.Style(root).lookup("DOE.Treeview", "rowheight")) >= lsp, "rows must be at least one text line high"
+assert tab.tv_sum.column("ci", "width") >= tab.px("95% 区间") - 1
+print("[OK] DOE tab: H1-H5 + random seeds as task rows, model picker (provider -> models, effort), key status, "
+      "LLM list without duplicates, plan summary, row height from the font")
 
 
 def find(w, cls, text=None):
@@ -95,6 +109,11 @@ txt.insert("1.0", "Put the apple in the bowl.")
 find(dlg, ttk.Button, "确定")[0].invoke()
 root.update()
 assert tab.rows[0] == {"scene": "fixed:H1", "task": "Put the apple in the bowl.", "goals": "apple_1 into bowl_1"}
+if os.environ.get("NERO_V411_SHOT"):
+    nb.select(tab.frame)
+    root.update()
+    import subprocess
+    subprocess.run(["import", "-window", "root", os.environ["NERO_V411_SHOT"]], check=False)
 print("[OK] edit dialog: a goal naming an object that is not in the scene is refused, an edited row is kept")
 
 # a short DOE on a fake simulation: 2 rows (H1, H2) x 1 model x 2 replicates
