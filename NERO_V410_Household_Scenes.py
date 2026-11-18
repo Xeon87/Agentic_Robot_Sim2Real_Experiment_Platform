@@ -720,10 +720,41 @@ def eval_hook(model, data):
     goals = req.get("goals")
     out = evaluate(model, data, scene_from_env(), goals=[tuple(g) for g in goals] if goals else None)
     out.update(t=time.time(), id=req.get("id"))
+    out.update(snapshot_state(model, data))                       # V4.11.2: for the DOE's final-state pictures
     with open(f + ".done", "w") as fh:
         json.dump(out, fh)
     print(f"[V4.11 EVAL] {req.get('id')}: {out['status']} ({out['n_ok']}/{out['n_goals']})", flush=True)
     return out
+
+
+_SNAP_MODEL = {"path": None, "why": None}
+
+
+def snapshot_model_path(model) -> Optional[str]:
+    """V4.11.2: the physics process's own model saved once as MJCF next to the generated scene file (so the
+    relative mesh / texture paths stay valid); a separate process renders the final state from it + qpos.  None when
+    it cannot be saved (the reason is kept in _SNAP_MODEL['why'])."""
+    if _SNAP_MODEL["path"] or _SNAP_MODEL["why"]:
+        return _SNAP_MODEL["path"]
+    try:
+        import mujoco
+        import NERO_V343_Scenes as SC
+        base = SC.LAST_SCENE_XML.get("path")
+        if not base:
+            raise RuntimeError("the scene file of this process is unknown")
+        p = os.path.join(os.path.dirname(base), "_nero_v411_snapshot_model.xml")
+        mujoco.mj_saveLastXML(p, model)
+        _SNAP_MODEL["path"] = p
+    except Exception as exc:
+        _SNAP_MODEL["why"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+        print(f"[V4.11.2 SNAPSHOT] model not saved: {_SNAP_MODEL['why']}", flush=True)
+    return _SNAP_MODEL["path"]
+
+
+def snapshot_state(model, data) -> dict:
+    """V4.11.2: what a renderer needs to show this moment: model file, qpos, simulation time"""
+    return {"model_xml": snapshot_model_path(model), "model_why": _SNAP_MODEL["why"], "nq": int(model.nq),
+            "qpos": [float(v) for v in data.qpos], "sim_time": float(data.time)}
 
 
 def request_eval(goals=None, rid=None) -> str:

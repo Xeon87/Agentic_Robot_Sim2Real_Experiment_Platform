@@ -38,10 +38,11 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-VERSION = "V4.11.1"
+VERSION = "V4.11.2"
 EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")      # same list as the console / SimAgent panels
 MARKER = "V4.11 SIM DOE"
 MARKER_V4111 = "V4.11.1 DOE MODEL PICKER + FONT-SIZED ROWS"
+MARKER_V4112 = "V4.11.2 DOE FINAL-STATE SNAPSHOTS + RUN TRACE"
 BLOWUP_TRIPS = 5                        # same threshold as the harness's V4.10.3 auto reset
 
 STATUS_COLOR = {"pending": "#9e9e9e", "running": "#2e7d32", "success": "#2e7d32", "partial": "#f2c037",
@@ -279,15 +280,85 @@ def report_md(plan, runs) -> str:
     if reasons:
         body.append("\n### 未成功运行里最后一个失败的工具调用\n\n| 工具: 原因 | 次数 |\n|---|---|\n" + "".join(
             f"| {k} | {len(v)} |\n" for k, v in sorted(reasons.items(), key=lambda x: -len(x[1]))))
-    body.append("\n### 每次运行\n\n| id | 任务 | LLM | 次 | 结果 | 分类 | 目标 | 调用 | 安全停止 | 用时 s |\n"
-                "|---|---|---|---|---|---|---|---|---|---|\n" + "".join(
+    body.append("\n### 每次运行（截图、工具调用、LLM 文字见 runs.html）\n\n"
+                "| id | 任务 | LLM | 次 | 结果 | 分类 | 目标 | 调用 | 安全停止 | 用时 s | 截图 |\n"
+                "|---|---|---|---|---|---|---|---|---|---|---|\n" + "".join(
                     f"| {r['id']} | T{r['row'] + 1} {r['scene']} | {model_label(r['llm'])} | {r['rep']} | "
                     f"{STATUS_TEXT.get(r.get('status'), r.get('status'))} | {r.get('klass') or '-'} | "
                     f"{(r.get('eval') or {}).get('n_ok', '-')}/{(r.get('eval') or {}).get('n_goals', '-')} | "
                     f"{len((r.get('stats') or {}).get('tools') or [])} | "
-                    f"{(r.get('stats') or {}).get('safety_stops', '-')} | {r.get('seconds') or '-'} |\n"
+                    f"{(r.get('stats') or {}).get('safety_stops', '-')} | {r.get('seconds') or '-'} | "
+                    f"{' '.join(f'[{os.path.basename(x).split(chr(95))[-1][:-4]}]({x})' for x in r.get('snapshots') or []) or '-'} |\n"
                     for r in runs))
     return "\n".join(head) + "\n".join(body)
+
+
+def _esc(x):
+    import html
+    return html.escape(str(x if x is not None else ""))
+
+
+def report_html(plan, runs) -> str:
+    """V4.11.2 RUN TRACE: one page with every run - result, goal check (simulator truth), final-state pictures,
+    every tool call (arguments, ok / reason, result excerpt), the LLM's text and its final answer"""
+    css = ("body{font-family:sans-serif;margin:16px;color:#222}h2{margin:28px 0 6px}"
+           ".run{border:1px solid #ccc;border-radius:6px;padding:10px 12px;margin:14px 0}"
+           ".tag{display:inline-block;padding:1px 8px;border-radius:10px;color:#fff;font-size:13px}"
+           "img{width:32%;min-width:260px;margin:4px 4px 0 0;border:1px solid #ddd}"
+           "table{border-collapse:collapse;font-size:12px;margin-top:6px}td,th{border:1px solid #ddd;padding:2px 6px;"
+           "vertical-align:top;text-align:left}code{font-size:12px;white-space:pre-wrap;word-break:break-all}"
+           ".bad{color:#c62828}.muted{color:#777}summary{cursor:pointer;margin-top:6px}")
+    out = [f"<!doctype html><html><head><meta charset='utf-8'><title>NERO Sim DOE {_esc(plan.get('name'))}</title>"
+           f"<style>{css}</style></head><body><h1>NERO Sim DOE 运行记录</h1>",
+           f"<p class='muted'>版本 {VERSION}；开始 {_esc(plan.get('started'))}；结束 {_esc(plan.get('ended'))}；"
+           f"{len(runs)} 次运行。图片是任务结束、做真值检查那一刻的仿真状态（物理进程的模型 + 关节 / 物体位置，"
+           f"在单独的进程里渲染）。统计见 report.md。</p>"]
+    for r in runs:
+        st = r.get("stats") or {}
+        ev = r.get("eval") or {}
+        col = STATUS_COLOR.get(r.get("status"), "#999")
+        out.append(f"<div class='run' id='{_esc(r['id'])}'><b>{_esc(r['id'])}</b> "
+                   f"<span class='tag' style='background:{col}'>{_esc(STATUS_TEXT.get(r.get('status'), r.get('status')))}"
+                   f"</span> {_esc(CLASS_TEXT.get(r.get('klass'), r.get('klass') or ''))} &nbsp; "
+                   f"T{r['row'] + 1} {_esc(r['scene'])} · {_esc(model_label(r['llm']))} · 第 {r['rep']} 次 · "
+                   f"{_esc(r.get('seconds') or '-')} s")
+        out.append(f"<div>任务句：{_esc(r['task'])}</div><div class='muted'>目标：{_esc(r['goals'])}</div>")
+        if ev.get("goals"):
+            out.append("<table><tr><th>目标</th><th>达成</th><th>真值</th></tr>" + "".join(
+                f"<tr><td>{_esc(g.get('goal'))}</td><td>{'是' if g.get('ok') else '<span class=bad>否</span>'}</td>"
+                f"<td>{_esc(g.get('detail'))}</td></tr>" for g in ev["goals"]) + "</table>")
+            if ev.get("held"):
+                out.append(f"<div class='bad'>结束时仍在夹爪里：{_esc(', '.join(ev['held']))}</div>")
+            offs = [k for k, o in (ev.get("objects") or {}).items() if o.get("off_table")]
+            if offs:
+                out.append(f"<div class='bad'>掉下桌：{_esc(', '.join(offs))}</div>")
+        if r.get("snapshots"):
+            out.append("<div>" + "".join(f"<a href='{_esc(x)}'><img src='{_esc(x)}' alt='{_esc(x)}'></a>"
+                                         for x in r["snapshots"]) + "</div>")
+        elif r.get("snapshot_why"):
+            out.append(f"<div class='muted'>没有截图：{_esc(r['snapshot_why'])}</div>")
+        if st.get("error"):
+            out.append(f"<div class='bad'>错误：{_esc(st['error'])}</div>")
+        tools = st.get("tools") or []
+        if tools:
+            out.append(f"<details><summary>{len(tools)} 次工具调用（安全停止 {st.get('safety_stops', 0)}）</summary>"
+                       "<table><tr><th>#</th><th>工具</th><th>结果</th><th>参数</th><th>结果摘录</th></tr>" + "".join(
+                           f"<tr><td>{t.get('step')}</td><td>{_esc(t.get('tool'))}</td><td>"
+                           + ("ok" if t.get("ok") else f"<span class=bad>{_esc(t.get('reason'))}</span>")
+                           + (f" / 安全停止 {t['safety_stops']}" if t.get("safety_stops") else "")
+                           + f"</td><td><code>{_esc(json.dumps(t.get('args') or {}, ensure_ascii=False))}</code></td>"
+                           f"<td><code>{_esc(t.get('result') or '')}</code></td></tr>" for t in tools)
+                       + "</table></details>")
+        texts = st.get("texts") or []
+        if texts:
+            out.append("<details><summary>LLM 的文字</summary>" + "".join(
+                f"<div><span class='muted'>#{x.get('round')}</span> {_esc(x.get('text'))}</div>" for x in texts)
+                + "</details>")
+        if st.get("final"):
+            out.append(f"<div>LLM 最后的回答：{_esc(st['final'])}</div>")
+        out.append("</div>")
+    out.append("</body></html>")
+    return "\n".join(out)
 
 
 CSV_COLS = ("id", "scene", "row", "task", "goals", "provider", "model", "effort", "rep", "status", "klass", "n_ok",
@@ -383,6 +454,8 @@ class DOERunner:
             f.write(runs_csv(self.runs))
         with open(os.path.join(self.out, "report.md"), "w", encoding="utf-8") as f:
             f.write(report_md(self.plan, self.runs))
+        with open(os.path.join(self.out, "runs.html"), "w", encoding="utf-8") as f:     # V4.11.2 run trace
+            f.write(report_html(self.plan, self.runs))
 
     # -- control
     def start(self):
@@ -520,6 +593,8 @@ class DOERunner:
                 self.log(f"[FAIL] [V4.11 DOE] {r['id']}: no answer after STOP -> restart the simulation")
                 return self._end(r, None, None, timed_out=True, restart=True)
             return
+        if s == "snap":
+            return self._snap_tick()
         if s == "eval":
             f = self.eval_file + ".done"
             if os.path.exists(f):
@@ -559,6 +634,67 @@ class DOERunner:
             self.scene_up = None                          # next run of this scene starts a fresh simulation
             if r["klass"] == "blowup":
                 self.log("[V4.11 DOE] blow-up -> the next run starts a fresh simulation")
+        if self._start_snapshot(r, ev):                   # V4.11.2: pictures of the final state first
+            self._set("snap")
+        else:
+            self._set("next")
+
+    # ---- V4.11.2 final-state snapshots
+    def _start_snapshot(self, r, ev) -> bool:
+        """render the final state in a separate process (model saved by the physics process + qpos of the truth
+        check); the runner waits for it (it reads the scene file, which the next simulation start replaces)"""
+        r["snapshots"] = []
+        if not self.plan.get("snapshots", True):
+            return False
+        if not ev or not ev.get("qpos"):
+            r["snapshot_why"] = "no final state (no truth check answer)"
+            return False
+        if not ev.get("model_xml"):
+            r["snapshot_why"] = f"the simulation did not save its model ({ev.get('model_why') or 'unknown'})"
+            return False
+        import subprocess
+        d = os.path.join(self.out, "snapshots")
+        os.makedirs(d, exist_ok=True)
+        prefix = os.path.join(d, f"{r['id']}_{r['status']}")
+        st = prefix + "_state.json"
+        with open(st, "w") as f:
+            json.dump({"qpos": ev["qpos"], "sim_time": ev.get("sim_time"), "model_xml": ev["model_xml"]}, f)
+        log = open(prefix + "_render.json", "w")
+        try:
+            p = subprocess.Popen([sys.executable, os.path.join(HERE, "NERO_V411_Snapshot.py"), "--xml",
+                                  ev["model_xml"], "--state", st, "--out", prefix], stdout=log,
+                                 stderr=subprocess.DEVNULL, cwd=HERE)
+        except Exception as exc:
+            log.close()
+            r["snapshot_why"] = f"renderer not started: {exc}"
+            return False
+        self._snap = {"r": r, "proc": p, "log": log, "path": prefix + "_render.json", "t0": self.now()}
+        return True
+
+    def _snap_tick(self):
+        sn = self._snap
+        p, r = sn["proc"], sn["r"]
+        if p.poll() is None and self.now() - sn["t0"] < self.T.get("snap_s", 120.0):
+            return
+        if p.poll() is None:
+            p.kill()
+        sn["log"].close()
+        res = {}
+        try:
+            with open(sn["path"]) as f:
+                lines = [x for x in f.read().splitlines() if x.startswith("{")]
+            res = json.loads(lines[-1]) if lines else {}
+        except Exception:
+            pass
+        if res.get("ok"):
+            r["snapshots"] = [os.path.relpath(x, self.out) for x in res.get("files") or []]
+            self.log(f"[V4.11.2 DOE] {r['id']}: {len(r['snapshots'])} picture(s) of the final state")
+        else:
+            r["snapshot_why"] = res.get("why") or "the renderer gave no answer"
+            self.log(f"[WARN] [V4.11.2 DOE] {r['id']}: no pictures ({r['snapshot_why'][:200]})")
+        self.on_change(r)
+        self.save()
+        self._snap = None
         self._set("next")
 
 
@@ -695,11 +831,12 @@ class DOETab:
         self.v_sum = tk.StringVar(value="")
         ttk.Label(cb, textvariable=self.v_sum, foreground="#333333").pack(side="left", padx=12)
         # ---- lamps + legend
-        lf = ttk.LabelFrame(f, text="运行（每个点一次运行；鼠标停在点上看详情）", padding=6)
+        lf = ttk.LabelFrame(f, text="运行（每个点一次运行；鼠标停在点上看概要，点一下看截图和过程）", padding=6)
         lf.pack(fill="x")
         self.cv = tk.Canvas(lf, height=64, background="white", highlightthickness=0)
         self.cv.pack(fill="x")
         self.cv.bind("<Motion>", self._hover)
+        self.cv.bind("<Button-1>", self._click)                     # V4.11.2: open the run (pictures + trace)
         leg = ttk.Frame(lf)
         leg.pack(fill="x")
         for k in ("pending", "running", "success", "partial", "fail", "invalid"):
@@ -984,11 +1121,14 @@ class DOETab:
             return
         try:
             plan, runs = load_runs(d)
+            self.view_dir = d
         except Exception as exc:
             self.log(f"[FAIL] [V4.11 DOE] {d}: {exc}")
             return
         with open(os.path.join(d, "report.md"), "w", encoding="utf-8") as f:
             f.write(report_md(plan, runs))
+        with open(os.path.join(d, "runs.html"), "w", encoding="utf-8") as f:
+            f.write(report_html(plan, runs))
         self.show_runs(runs)
         self.show_text("DOE 报告", report_md(plan, runs))
 
@@ -1121,6 +1261,75 @@ class DOETab:
                                  + (f"  目标 {ev.get('n_ok')}/{ev.get('n_goals')}" if ev else "")
                                  + (f"  最后失败：{r['last_fail']}" if r.get("last_fail") else ""))
                 return
+
+    def _run_at(self, e):
+        runs = self._runs()
+        for oid in self.cv.find_overlapping(e.x - 1, e.y - 1, e.x + 1, e.y + 1):
+            k = self.lamp_items.get(oid)
+            if k is not None and k < len(runs):
+                return runs[k]
+        return None
+
+    def _click(self, e):
+        r = self._run_at(e)
+        if r is not None:
+            self.show_run(r)
+
+    def show_run(self, r):
+        """V4.11.2: one run - final-state pictures, goal check, tool calls, LLM text"""
+        tk, ttk = self.tk, self.ttk
+        base = self.runner.out if self.runner else getattr(self, "view_dir", "")
+        w = tk.Toplevel(self.root)
+        w.title(f"DOE {r['id']} - {STATUS_TEXT.get(r['status'], r['status'])}")
+        top = ttk.Frame(w, padding=6)
+        top.pack(fill="x")
+        w._imgs = []
+        for rel in r.get("snapshots") or []:
+            try:
+                img = tk.PhotoImage(file=os.path.join(base, rel))
+                k = max(1, int(round(img.width() / 460.0)))
+                img = img.subsample(k, k) if k > 1 else img
+                w._imgs.append(img)
+                cell = ttk.Frame(top)
+                cell.pack(side="left", padx=4)
+                ttk.Label(cell, image=img).pack()
+                ttk.Label(cell, text=os.path.basename(rel)).pack()
+            except Exception as exc:
+                ttk.Label(top, text=f"{rel}: {exc}").pack(side="left")
+        if not r.get("snapshots"):
+            ttk.Label(top, text="没有截图：" + str(r.get("snapshot_why") or "这次运行还没结束")).pack(anchor="w")
+        st, ev = r.get("stats") or {}, r.get("eval") or {}
+        lines = [f"{r['id']}  T{r['row'] + 1} {r['scene']}  {model_label(r['llm'])}  第 {r['rep']} 次  "
+                 f"{STATUS_TEXT.get(r['status'], r['status'])}  {CLASS_TEXT.get(r.get('klass'), r.get('klass') or '')}",
+                 f"任务句：{r['task']}", f"目标：{r['goals']}", ""]
+        for g in ev.get("goals") or []:
+            lines.append(f"  [{'达成' if g.get('ok') else '未达成'}] {g.get('goal')}: {g.get('detail')}")
+        if ev.get("held"):
+            lines.append(f"  结束时仍在夹爪里：{', '.join(ev['held'])}")
+        if st.get("error"):
+            lines.append(f"错误：{st['error']}")
+        lines.append("")
+        lines.append(f"工具调用 {len(st.get('tools') or [])} 次，安全停止 {st.get('safety_stops', 0)} 次：")
+        for t in st.get("tools") or []:
+            lines.append(f"  #{t.get('step')} {t.get('tool')} -> {'ok' if t.get('ok') else t.get('reason')}"
+                         + (f" (安全停止 {t['safety_stops']})" if t.get("safety_stops") else "")
+                         + f"  {json.dumps(t.get('args') or {}, ensure_ascii=False)}")
+        if st.get("texts"):
+            lines.append("")
+            lines.append("LLM 的文字：")
+            lines += [f"  #{x.get('round')} {x.get('text')}" for x in st["texts"]]
+        if st.get("final"):
+            lines += ["", f"LLM 最后的回答：{st['final']}"]
+        bot = ttk.Frame(w, padding=6)
+        bot.pack(fill="both", expand=True)
+        t = tk.Text(bot, width=140, height=22, wrap="word", font=("TkFixedFont", 9))
+        sy = ttk.Scrollbar(bot, orient="vertical", command=t.yview)
+        t.configure(yscrollcommand=sy.set)
+        t.insert("1.0", "\n".join(lines))
+        t.configure(state="disabled")
+        t.pack(side="left", fill="both", expand=True)
+        sy.pack(side="left", fill="y")
+        return w
 
     def show_text(self, title, text):
         tk, ttk = self.tk, self.ttk

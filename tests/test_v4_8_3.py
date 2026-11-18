@@ -442,7 +442,7 @@ class TestV483(unittest.TestCase):
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
         self.assertEqual((v, RR.VERSION), (C.VERSION, C.VERSION))
-        self.assertIn(v, ("V4.8.3", "V4.8.4", "V4.8.5", "V4.8.6", "V4.8.7", "V4.8.8", "V4.8.9", "V4.8.9", "V4.8.10", "V4.8.11", "V4.9", "V4.9.1", "V4.9.2", "V4.9.3", "V4.10", "V4.10.1", "V4.10.2", "V4.10.3", "V4.11", "V4.11.1"))
+        self.assertIn(v, ("V4.8.3", "V4.8.4", "V4.8.5", "V4.8.6", "V4.8.7", "V4.8.8", "V4.8.9", "V4.8.9", "V4.8.10", "V4.8.11", "V4.9", "V4.9.1", "V4.9.2", "V4.9.3", "V4.10", "V4.10.1", "V4.10.2", "V4.10.3", "V4.11", "V4.11.1", "V4.11.2"))
         self.assertEqual(TD.MARKER, "V4.8.3 TIDY DESK INTENT LAYER")
 
 

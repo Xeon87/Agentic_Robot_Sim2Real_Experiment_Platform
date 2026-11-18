@@ -30,12 +30,13 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-VERSION = "V4.11.1"
+VERSION = "V4.11.2"
 MARKER_V493 = "V4.9.3 TASK-START RECOVERY + SAFETY STOP + SINGULARITY + EGG ROLL"
 MARKER_V4101 = "V4.10.1 PITCH CHANGE + RIGID TWIN HOLD + BRIDGE FIX"
 MARKER_V4102 = "V4.10.2 RIGID WELD HOLD IN THE GUI SIMULATION"
 MARKER_V4103 = "V4.10.3 SOFT WELD + SHORT BOX WALLS + AUTO RESET AFTER A BLOW-UP"
 MARKER_V411 = "V4.11 FACTS ONLY + SIM DOE TASK STATS"
+MARKER_V4112 = "V4.11.2 DOE FINAL-STATE SNAPSHOTS + RUN TRACE"
 MARKER_V491 = "V4.9.1 DENSE LINES + REACHABILITY"
 MARKER_V492 = "V4.9.2 REAL-LIKE PERCEPTION + LLM EVAL + COMPACT OUTPUTS"
 MARKER = "V4.8.9 GENERAL PICK&PLACE CHUNK LLM"
@@ -1392,7 +1393,7 @@ def run_general_pick_place(io, task, mode="execute", agent=None, llm_cfg=None, r
     u0 = dict(getattr(agent, "_usage_totals", {}) or {})
     TASK_STATS.clear()                       # V4.11 DOE: what happened in this task (read by the sim bridge)
     TASK_STATS.update(task=str(task), model=model, effort=effort, mode=mode, t_start=time.time(), rounds=0, steps=0,
-                      tools=[], safety_stops=0, error=None, final="", ok=None, stage=None)
+                      tools=[], texts=[], safety_stops=0, error=None, final="", ok=None, stage=None)
     try:
         ok, key_status = agent.api_key_status(api_key, model)
         if not ok:
@@ -1426,6 +1427,7 @@ def run_general_pick_place(io, task, mode="execute", agent=None, llm_cfg=None, r
             emit(f"[V4.8.9 LLM #{rounds}] elapsed={time.perf_counter() - t_req:.2f}s | calls={len(calls)}")
             if text:
                 emit(f"[LLM TEXT] {text}")
+                TASK_STATS.setdefault("texts", []).append({"round": rounds, "text": str(text)[:2000]})   # V4.11.2
             if not calls:
                 final = text
                 break
@@ -1446,7 +1448,7 @@ def run_general_pick_place(io, task, mode="execute", agent=None, llm_cfg=None, r
                     res = {"ok": True, "dry_run": True, "tool": name, "note": f"skipped physical execution in mode={mode}"}
                 else:
                     res = sk.run_tool(name, args)
-                _stat_tool(name, res, steps, rounds)
+                _stat_tool(name, res, steps, rounds, args)
                 outs.append({
                     "type": "function_call_output",
                     "call_id": str(call.get("call_id", "")),
@@ -1494,13 +1496,19 @@ def run_general_pick_place(io, task, mode="execute", agent=None, llm_cfg=None, r
 TASK_STATS: Dict[str, Any] = {}             # V4.11 DOE: the last general pick & place task of this process
 
 
-def _stat_tool(name, res, step, rnd):
-    """V4.11 DOE: one tool call -> TASK_STATS (name, ok, reason, safety stops)"""
+def _stat_tool(name, res, step, rnd, args=None):
+    """V4.11 DOE: one tool call -> TASK_STATS (name, ok, reason, safety stops); V4.11.2: + the arguments and the
+    first 600 characters of the result (for tracing a run afterwards)"""
     r = res if isinstance(res, dict) else {}
     pv = r.get("physical_verification") or {}
     n_s = int((pv.get("safety_events") or {}).get("count") or 0)
+    try:
+        excerpt = json.dumps(pv, ensure_ascii=False, default=str)[:600]
+    except Exception:
+        excerpt = str(pv)[:600]
     TASK_STATS.setdefault("tools", []).append({"step": step, "round": rnd, "tool": name, "ok": bool(r.get("ok")),
-                                               "reason": r.get("reason"), "safety_stops": n_s})
+                                               "reason": r.get("reason"), "safety_stops": n_s,
+                                               "args": dict(args or {}), "result": excerpt})
     TASK_STATS["safety_stops"] = int(TASK_STATS.get("safety_stops", 0)) + n_s
 
 

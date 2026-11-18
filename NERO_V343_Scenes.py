@@ -1259,4 +1259,8 @@ def make_general_pick_place_xml(original_xml_path, visual_quality=None, househol
     out = src.with_name("_nero_motor_v343_household_pick_place_tmp.xml" if household
                         else "_nero_motor_v343_general_pick_place_tmp.xml")
     out.write_text(xml, encoding="utf-8")
+    LAST_SCENE_XML["path"] = str(out)       # V4.11.2: the DOE snapshot saves the loaded model next to this file
     return str(out)
+
+
+LAST_SCENE_XML = {"path": None}             # V4.11.2: set in the process that built the general / household scene

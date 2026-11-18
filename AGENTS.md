@@ -1,7 +1,7 @@
-# NERO 项目开发与交接文档（V4.11.1 · 交接版）
+# NERO 项目开发与交接文档（V4.11.2 · 交接版）
 
 > 本文件放在仓库根目录，名为 `AGENTS.md`（Codex 和其他开发 Agent 会自动读取）。
-> 更新时间：2026-11-18。当前交付版本：**V4.11.1**（通用 pick & place 只给 LLM 测量事实，见 H8）。V4.8.6–V4.8.11 是用户在别的开发会话里做的，本文件按它们的 CHANGELOG 补录（第二部分第 0 节）。仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`，开发分支 `claude/charming-euler-eoqyme`。
+> 更新时间：2026-11-18。当前交付版本：**V4.11.2**（通用 pick & place 只给 LLM 测量事实，见 H8）。V4.8.6–V4.8.11 是用户在别的开发会话里做的，本文件按它们的 CHANGELOG 补录（第二部分第 0 节）。仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`，开发分支 `claude/charming-euler-eoqyme`。
 > “用户”指项目所有者 Jimmy。文件分两部分：
 > - **第一部分**：交接速览，给接手工程师先读，约 15 分钟。
 > - **第二部分**：详细规则、不变量和逐版本记录。原文档持续追加，第 1、2、4 节仍然有效。
@@ -126,6 +126,7 @@ V3.60 之前的模块见第二部分第 5 节。文件名里的版本号是该�
 | `NERO_V49_Random_Scenes.py` | V4.9 随机场景 + 任务 + 真值判成功（孪生用） |
 | `NERO_V410_Household_Scenes.py` | V4.10 家居场景（固定 H1–H5 / 随机种子）、孪生、复位钩子；V4.11 真值检查 `evaluate` / `eval_hook` / `request_eval`、`parse_goals` |
 | `NERO_V410_Console_Sim.py` / `NERO_V410_Sim_Bridge.py` | 控制台 LLM 设置 + 场景对话框；仿真窗口一侧的桥接（填 SimAgent 面板、任务文件通道、V4.11 每任务 LLM / stop / ready / stats） |
+| `NERO_V411_Snapshot.py` | V4.11.2 DOE 结束时刻的截图：物理进程存的模型 + qpos，在单独进程里离屏渲染（egl / osmesa / glfw 依次试），PNG 用 zlib 写 |
 | `NERO_V411_Sim_DOE.py` | V4.11 仿真 DOE：计划展开、判定分类、Wilson 区间、报告；`DOERunner`（状态机，tick 驱动，可用假仿真测试）；`DOETab`（控制台页） |
 | `tests/v49_reasoner.py`、`tests/v49_random_eval.py` | 测试替身推理（只用工具返回值，不是 LLM、不进产品）+ 批量评测 |
 | `NERO_V325_Camera.py` | Camera调试页。**冻结**，测试会校验 sha256 |
@@ -389,6 +390,7 @@ NERO 7 自由度机械臂（AgileX）+ MuJoCo 仿真 + GPT Agent 做“鸡蛋放
 
 - **V4.10.1（2026-11-17）**：用户 GUI 实测 V4.10：苹果进马克杯、遥控器放杯上成功；「遥控器插进马克杯」LLM 判断做不到（工具不能转被夹物体，仿真球铰也转不动）。用户：「改这两个点」。放置工具加 `pitch_change_deg`（夹爪绕两指连线转，物体跟着转；夹爪说明加 `held_object_turns_with_gripper`；球铰时如实拒绝）；孪生刚性夹持（weld）；孪生实测遥控器竖插马克杯成功，验证识别为 inside（杯口被挡时改用轮廓判断）。顺带发现并修了被夹物体椭圆模型漏掉长方形角的问题（改为椭圆 + 测到的轮廓）；修了 V4.10 桥接 `delay_ms` bug（日志 `not attached`）。
 
+- **V4.11.2（2026-11-18）**：用户：「每个任务有最终判定失败或者成功时刻的截图吗？我需要后面追溯。」真值检查时物理进程额外写出 qpos，并存一次自己的模型（`HS.snapshot_state`，`mj_saveLastXML` 存在场景文件旁边）；控制台在单独进程里渲染斜视、俯视（和 D435i）三张图（`NERO_V411_Snapshot.py`）；`runs.html` 逐次运行的追溯页（截图、目标真值、工具调用参数 / 原因 / 结果摘录、LLM 文字）；DOE 页点运行灯打开这次运行。原则：**不在物理进程里渲染**（时间空档会让仿真失控，见 V4.10.3）。
 - **V4.11.1（2026-11-18）**：用户截图：DOE 任务表的行重叠（大字体屏幕），不知道怎么选模型。表格的行高 / 列宽改为按字体算（`ttk.Style` "DOE.Treeview"，用 `font metrics` / `font measure`，不建 Font 对象）；模型从下拉列表选（提供方 → 模型 → 档位 → 加入，列表来自控制台 LLM 面板）；显示每个提供方的 key 状态，缺 key 时不能开始。教训：Tk 控件里的像素尺寸要按字体算，用户的屏幕字体比容器里大一倍多。
 - **V4.11（2026-11-18）**：用户：「做 Sim DOE 页」+「清掉残留的建议性文字」。删掉 `recommended_next_actions` 和所有建议性句子（掉落 / 安全停止的 note、系统提示两句）；新 `NERO_V411_Sim_DOE.py`（控制台「仿真 DOE」页，按场景启动仿真、每次运行先复位、物理进程真值检查、Wilson 区间报告）；家居场景模块加真值检查；harness 记录 `TASK_STATS`；桥接支持每任务 LLM / stop / ready / stats。后端未改。真实 GUI 未实测（用真实控制台窗口 + 假启动脚本测过整条流程）。
 - **V4.10.3（2026-11-17）**：用户：「先做前三项（不动后端）」。weld 时间常数 0.008 → 0.012 s（孪生里指关节冲击约 −10%，效果有限）；家居收纳盒 / 托盘墙段 ≤ 80 mm（V2-44 R2 篮沿规则不再削它们）；一次工具调用安全停止超过 5 次 → 下个任务开始自动复位物品（`_auto_reset_objects`，`SimGeneralIO.reset_objects`）。时间空档引起的失控（选项 E，要改 B 段）未做。

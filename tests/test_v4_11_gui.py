@@ -180,6 +180,14 @@ reports = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel) and w.
 assert reports
 out = tab.runner.out
 assert os.path.exists(os.path.join(out, "report.md")) and os.path.exists(os.path.join(out, "runs.csv"))
+assert os.path.exists(os.path.join(out, "runs.html"))
+win = tab.show_run(tab.runner.runs[0])                          # V4.11.2: a click on a lamp opens the run
+root.update()
+labels = " ".join(str(w.cget("text")) for w in find(win, ttk.Label))
+assert "没有截图" in labels, labels
+txt_ = find(win, tk.Text)[0].get("1.0", "end")
+assert "perceive_objects" in txt_ and "fixed:H1" in txt_, txt_[:300]
+win.destroy()
 print(f"[OK] DOE on a fake simulation: 4 runs, one start per scene, lamps / statistics / report ({out})")
 root.update()
 root.destroy()
