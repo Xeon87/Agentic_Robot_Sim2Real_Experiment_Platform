@@ -24,7 +24,7 @@ import json
 import os
 import time
 
-VERSION = "V4.11"
+VERSION = "V4.11.3"
 MARKER = "V4.10 SIM BRIDGE"
 HERE = os.path.dirname(os.path.realpath(__file__))
 
@@ -143,7 +143,7 @@ class TaskChannel:
                     json.dump(out, f)
                 self.log(f"[V4.10 TASK CHANNEL] task {self.cur['id']} ended: {out['status']}")
                 self.cur = None
-            elif time.time() - self.cur["t_start"] > 15 and not started:
+            elif time.time() - self.cur["t_start"] > NOT_STARTED_S and not started:     # V4.11.3: 15 -> 45 s
                 out = {"id": self.cur["id"], "status": "not_started", "status_text": txt,
                        "t_start": self.cur["t_start"], "t_end": time.time()}
                 out.update(_extras(self.cur))
@@ -179,6 +179,11 @@ class TaskChannel:
                 self.log(f"[WARN] [V4.11 TASK CHANNEL] object reset not requested: {exc}")
         self.g["vars"]()["task"].set(task)
         self.cur = {"id": tid, "t_start": time.time(), "seen_busy": False, "llm": used}
+        try:                                            # V4.11.3: safety-stop records carry the run id
+            import NERO_V489_General_Pick_Place as GP
+            GP.CURRENT_RUN["id"] = tid if msg.get("llm") is not None or msg.get("reset_objects") else None
+        except Exception:
+            pass
         self.log(f"[V4.10 TASK CHANNEL] task {tid}: {task!r} -> RUN TASK")
         self.g["run"]()()
 
@@ -235,6 +240,8 @@ def write_ready(extra=None):
         json.dump(msg, f)
     os.replace(tmp, os.path.join(d, "ready.json"))
 
+
+NOT_STARTED_S = 45.0          # V4.11.3: a task that is not running after this long is reported as not started
 
 CFG_TITLE = "NERO V2-7 LLM planner / reasoning / API"
 TASK_TITLE = "Natural-language task"

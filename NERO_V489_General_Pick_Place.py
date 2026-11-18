@@ -30,13 +30,14 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-VERSION = "V4.11.2"
+VERSION = "V4.11.3"
 MARKER_V493 = "V4.9.3 TASK-START RECOVERY + SAFETY STOP + SINGULARITY + EGG ROLL"
 MARKER_V4101 = "V4.10.1 PITCH CHANGE + RIGID TWIN HOLD + BRIDGE FIX"
 MARKER_V4102 = "V4.10.2 RIGID WELD HOLD IN THE GUI SIMULATION"
 MARKER_V4103 = "V4.10.3 SOFT WELD + SHORT BOX WALLS + AUTO RESET AFTER A BLOW-UP"
 MARKER_V411 = "V4.11 FACTS ONLY + SIM DOE TASK STATS"
 MARKER_V4112 = "V4.11.2 DOE FINAL-STATE SNAPSHOTS + RUN TRACE"
+MARKER_V4113 = "V4.11.3 SAFETY-STOP RECORD + SIM PYTHON FOR PICTURES + RETRY + END-TO-END RATE"
 MARKER_V491 = "V4.9.1 DENSE LINES + REACHABILITY"
 MARKER_V492 = "V4.9.2 REAL-LIKE PERCEPTION + LLM EVAL + COMPACT OUTPUTS"
 MARKER = "V4.8.9 GENERAL PICK&PLACE CHUNK LLM"
@@ -737,6 +738,7 @@ class GeneralPickPlaceSkills:
                          "tool runs STOP+RECOVER before it moves")                                  # V4.11 facts only
         self.sim_suspect = True
         self.io.emit(f"[WARN] [V4.9.3 GENERAL] {tool}: safety stop at {step} -> stopped (no fallback motion)")
+        _record_safety_moment(self.io, tool, step, self.held)             # V4.11.3 DOE: what was touching what
         return self._res(tool, False, facts, reason="SAFETY_STOP", nxt=["perceive_objects", "verify_and_park_chunk"])
 
     def execute_grasp_chunk(self, clamp_force_n=8.0, open_mm=None, **_):
@@ -1269,6 +1271,7 @@ class GeneralPickPlaceSkills:
                 n0 = int(self.io.safety_trips())
             except Exception:
                 n0 = None
+        _SAFETY_REC["this_tool"] = 0
         res = fn(**(args or {}))
         if n0 is not None:
             try:
@@ -1280,6 +1283,8 @@ class GeneralPickPlaceSkills:
                 pv["safety_events"] = {"count": n1 - n0, "note": "the safety guard stopped the arm during this tool "
                                        "(runaway joint speed / unstable contact in the simulator)"}
                 self.io.emit(f"[WARN] [V4.9 GENERAL] {name}: {n1 - n0} safety stop(s) during this tool")
+            if n1 > n0 and not _SAFETY_REC["this_tool"]:   # V4.11.3: a stop without the _safety_stop path
+                _record_safety_moment(self.io, name, "during the tool", getattr(self, "held", None))
             if n1 - n0 > BLOWUP_TRIPS:               # V4.10.3 AUTO RESET: the simulation blew up during this tool
                 _V4103_BLOWUP["pending"] = True
                 _V4103_BLOWUP["why"] = f"{name}: {n1 - n0} safety stops in one tool call"
@@ -1494,6 +1499,35 @@ def run_general_pick_place(io, task, mode="execute", agent=None, llm_cfg=None, r
 
 
 TASK_STATS: Dict[str, Any] = {}             # V4.11 DOE: the last general pick & place task of this process
+CURRENT_RUN = {"id": None}                  # V4.11.3 DOE: the run id of the task now running (set by the sim bridge)
+_SAFETY_REC = {"this_tool": 0, "n": 0, "run": None}
+SAFETY_RECORDS_PER_RUN = 3
+
+
+def _record_safety_moment(io, tool, step, held):
+    """V4.11.3 DOE: at a safety stop ask the physics process to record the moment (contacts of the objects, held
+    object, qpos + model for a picture); answered within ~2 s by NERO_V410_Household_Scenes.reset_hook.  Only in a
+    DOE run of the GUI simulation, at most SAFETY_RECORDS_PER_RUN per run; never blocks the tool."""
+    rid = CURRENT_RUN.get("id")
+    _SAFETY_REC["this_tool"] += 1
+    if not rid or not hasattr(io, "reset_objects"):
+        return None
+    if _SAFETY_REC["run"] != rid:
+        _SAFETY_REC.update(run=rid, n=0)
+    if _SAFETY_REC["n"] >= SAFETY_RECORDS_PER_RUN:
+        return None
+    _SAFETY_REC["n"] += 1
+    try:
+        import NERO_V410_Household_Scenes as HS
+        k = _SAFETY_REC["n"]
+        HS.request_safety_record(f"{rid}_stop{k}", {"tool": tool, "step": str(step), "held": held,
+                                                     "tool_call": len(TASK_STATS.get("tools") or []) + 1})
+        TASK_STATS.setdefault("safety_records", []).append({"id": f"{rid}_stop{k}", "tool": tool, "step": str(step),
+                                                            "held": held, "t": time.time()})
+        return k
+    except Exception as exc:
+        io.emit(f"[WARN] [V4.11.3 DOE] safety moment not recorded: {str(exc)[:160]}")
+        return None
 
 
 def _stat_tool(name, res, step, rnd, args=None):

@@ -620,6 +620,10 @@ def reset_hook(model, data, settle_s=3.0) -> Optional[str]:
         eval_hook(model, data)
     except Exception as exc:
         print(f"[V4.11 EVAL] failed: {exc}", flush=True)
+    try:                                                          # V4.11.3 DOE: safety-stop moments
+        safety_hook(model, data)
+    except Exception as exc:
+        print(f"[V4.11.3 SAFETY RECORD] failed: {exc}", flush=True)
     f = reset_file()
     if not os.path.exists(f):
         return None
@@ -754,7 +758,84 @@ def snapshot_model_path(model) -> Optional[str]:
 def snapshot_state(model, data) -> dict:
     """V4.11.2: what a renderer needs to show this moment: model file, qpos, simulation time"""
     return {"model_xml": snapshot_model_path(model), "model_why": _SNAP_MODEL["why"], "nq": int(model.nq),
-            "qpos": [float(v) for v in data.qpos], "sim_time": float(data.time)}
+            "qpos": [float(v) for v in data.qpos], "sim_time": float(data.time), **python_env()}
+
+
+def python_env() -> dict:
+    """V4.11.3: the interpreter + package paths of THIS (simulation) process, so the console can render with an
+    environment that has mujoco (the console's own Python may not)"""
+    paths = []
+    for mod in ("mujoco", "numpy"):
+        try:
+            m = __import__(mod)
+            d = os.path.dirname(os.path.dirname(os.path.realpath(m.__file__)))
+            if d not in paths:
+                paths.append(d)
+        except Exception:
+            pass
+    return {"python": sys.executable, "python_paths": paths}
+
+
+# ------------------------------------------------------------------------------------------------ V4.11.3 safety moment
+def _safety_base() -> str:
+    f = reset_file()
+    return f[:-5] if f.endswith(".json") else f
+
+
+def safety_log_file() -> str:
+    return _safety_base() + "_safety_log.jsonl"
+
+
+def request_safety_record(rid, info=None) -> str:
+    """GUI side (harness, at a safety stop): ask the physics process to record this moment"""
+    p = f"{_safety_base()}_safety_{rid}.json"
+    os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+    with open(p + ".tmp", "w") as f:
+        json.dump({"id": rid, "t": time.time(), "info": info or {}}, f)
+    os.replace(p + ".tmp", p)
+    return p
+
+
+def contacts_of_objects(model, data, limit=25) -> List[dict]:
+    """contacts that involve a table object right now: the two geoms / bodies, penetration (mm; negative =
+    overlap) and the normal force (N), strongest first"""
+    import mujoco
+    out = []
+    f6 = np.zeros(6)
+    for i in range(int(data.ncon)):
+        c = data.contact[i]
+        g1, g2 = int(c.geom1), int(c.geom2)
+        b1 = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, int(model.geom_bodyid[g1])) or ""
+        b2 = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, int(model.geom_bodyid[g2])) or ""
+        if not (b1.startswith("obj_") or b2.startswith("obj_")):
+            continue
+        mujoco.mj_contactForce(model, data, i, f6)
+        out.append({"body1": b1, "geom1": mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, g1) or str(g1),
+                    "body2": b2, "geom2": mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, g2) or str(g2),
+                    "dist_mm": round(1000.0 * float(c.dist), 2), "normal_force_n": round(float(f6[0]), 2)})
+    out.sort(key=lambda x: -abs(x["normal_force_n"]))
+    return out[:limit]
+
+
+def safety_hook(model, data):
+    """physics side: answer every pending safety-moment request (appended to the safety log)"""
+    import glob as _glob
+    reqs = sorted(p for p in _glob.glob(f"{_safety_base()}_safety_*.json") if not p.endswith("_log.jsonl"))
+    for p in reqs:
+        try:
+            with open(p) as f:
+                req = json.load(f)
+            os.remove(p)
+        except Exception:
+            continue
+        held = held_bodies(model, data)
+        rec = {"id": req.get("id"), "info": req.get("info"), "t_request": req.get("t"), "t": time.time(),
+               "held": held, "contacts": contacts_of_objects(model, data),
+               "max_abs_qvel": round(float(np.max(np.abs(data.qvel))) if model.nv else 0.0, 3)}
+        rec.update(snapshot_state(model, data))
+        with open(safety_log_file(), "a") as f:
+            f.write(json.dumps(rec) + "\n")
+        print(f"[V4.11.3 SAFETY RECORD] {rec['id']}: held={held} contacts={len(rec['contacts'])}", flush=True)
 
 
 def request_eval(goals=None, rid=None) -> str:

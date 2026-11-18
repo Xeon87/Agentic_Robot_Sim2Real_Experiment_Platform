@@ -38,11 +38,12 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-VERSION = "V4.11.2"
+VERSION = "V4.11.3"
 EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")      # same list as the console / SimAgent panels
 MARKER = "V4.11 SIM DOE"
 MARKER_V4111 = "V4.11.1 DOE MODEL PICKER + FONT-SIZED ROWS"
 MARKER_V4112 = "V4.11.2 DOE FINAL-STATE SNAPSHOTS + RUN TRACE"
+MARKER_V4113 = "V4.11.3 SAFETY-STOP RECORD + SIM PYTHON FOR PICTURES + RETRY + END-TO-END RATE"
 BLOWUP_TRIPS = 5                        # same threshold as the harness's V4.10.3 auto reset
 
 STATUS_COLOR = {"pending": "#9e9e9e", "running": "#2e7d32", "success": "#2e7d32", "partial": "#f2c037",
@@ -153,7 +154,7 @@ def expand(plan) -> List[dict]:
     return out
 
 
-def estimate_s(plan, per_run_s=240.0, per_start_s=90.0) -> float:
+def estimate_s(plan, per_run_s=330.0, per_start_s=60.0) -> float:          # V4.11.3: measured 11-17 (323 s / run)
     runs = expand(plan)
     return len(runs) * per_run_s + len({r["scene"] for r in runs}) * per_start_s
 
@@ -234,10 +235,15 @@ def summary_rows(runs, key) -> List[dict]:
         trips = sum(int((r.get("stats") or {}).get("safety_stops") or 0) for r in rs)
         toks = sum(int(((r.get("stats") or {}).get("usage") or {}).get("input_tokens") or 0)
                    + int(((r.get("stats") or {}).get("usage") or {}).get("output_tokens") or 0) for r in rs)
+        n_all = n + n_i                                   # V4.11.3 end-to-end: "could not be judged" = not done
+        lo2, hi2 = wilson(n_s, n_all)
         res.append({"group": k, "runs": len(rs), "judged": n, "success": n_s, "partial": n_p, "fail": n_f,
                     "invalid": n_i, "rate": (n_s / n) if n else None, "ci95": (lo, hi) if n else None,
+                    "e2e_rate": (n_s / n_all) if n_all else None, "e2e_ci95": (lo2, hi2) if n_all else None,
                     "mean_tool_calls": (sum(calls) / len(calls)) if calls else None,
-                    "mean_s": (sum(secs) / len(secs)) if secs else None, "safety_stops": trips, "tokens": toks})
+                    "mean_s": (sum(secs) / len(secs)) if secs else None, "safety_stops": trips, "tokens": toks,
+                    "tokens_per_run": (toks / len(rs)) if rs else None,
+                    "tokens_per_success": (toks / n_s) if n_s else None})
     return sorted(res, key=lambda x: str(x["group"]))
 
 
@@ -246,15 +252,19 @@ def _pct(x):
 
 
 def _md_table(rows, title):
-    lines = [f"### {title}", "", "| 组 | 运行 | 可判定 | 成功 | 部分 | 失败 | 无法判定 | 成功率 | 95% 区间 | 平均调用 | 平均用时 s "
-             "| 安全停止 | tokens |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    lines = [f"### {title}", "", "| 组 | 运行 | 可判定 | 成功 | 部分 | 失败 | 无法判定 | 成功率（可判定） | 95% 区间 "
+             "| 端到端成功率 | 95% 区间 | 平均调用 | 平均用时 s | 安全停止 | tokens/次 | tokens/成功 |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         ci = "-" if r["ci95"] is None else f"{_pct(r['ci95'][0])}–{_pct(r['ci95'][1])}"
+        ci2 = "-" if r.get("e2e_ci95") is None else f"{_pct(r['e2e_ci95'][0])}–{_pct(r['e2e_ci95'][1])}"
         calls = "-" if r["mean_tool_calls"] is None else f"{r['mean_tool_calls']:.1f}"
         secs = "-" if r["mean_s"] is None else f"{r['mean_s']:.0f}"
+        tpr = "-" if r.get("tokens_per_run") is None else f"{r['tokens_per_run'] / 1000:.0f}k"
+        tps = "-" if r.get("tokens_per_success") is None else f"{r['tokens_per_success'] / 1000:.0f}k"
         lines.append(f"| {r['group']} | {r['runs']} | {r['judged']} | {r['success']} | {r['partial']} | {r['fail']} | "
-                     f"{r['invalid']} | {_pct(r['rate'])} | {ci} | {calls} | {secs} | {r['safety_stops']} | "
-                     f"{r['tokens']} |")
+                     f"{r['invalid']} | {_pct(r['rate'])} | {ci} | {_pct(r.get('e2e_rate'))} | {ci2} | {calls} | "
+                     f"{secs} | {r['safety_stops']} | {tpr} | {tps} |")
     return "\n".join(lines) + "\n"
 
 
@@ -268,6 +278,8 @@ def report_md(plan, runs) -> str:
             f"已完成 {len(done)}",
             "- 成功 = 仿真真值检查全部目标达成（不看 LLM 自己的说法）；成功率只算可判定的运行（成功 / 部分 / 失败），"
             "「无法判定」= 仿真或 API 的问题（崩溃、超时、发散、API 出错），单列。",
+            "- 端到端成功率（V4.11.3）= 成功 / 全部完成的运行（无法判定也算没做成）：发散等也可能和 LLM 的做法有关，"
+            "两个成功率都要看。tokens = 输入 + 输出（含缓存命中的输入）。",
             "- 95% 区间为 Wilson 区间；次数少时区间很宽，结论要看区间。", ""]
     body = [_md_table(summary_rows(runs, lambda r: "全部"), "总体"),
             _md_table(summary_rows(runs, lambda r: model_label(r["llm"])), "按 LLM 设置"),
@@ -339,6 +351,25 @@ def report_html(plan, runs) -> str:
             out.append(f"<div class='muted'>没有截图：{_esc(r['snapshot_why'])}</div>")
         if st.get("error"):
             out.append(f"<div class='bad'>错误：{_esc(st['error'])}</div>")
+        for sr in r.get("safety_records") or []:             # V4.11.3 safety-stop moments
+            inf = sr.get("info") or {}
+            out.append(f"<div class='bad' style='margin-top:6px'>安全停止 #{_esc(sr.get('k'))}：{_esc(inf.get('tool'))} "
+                       f"（{_esc(inf.get('step'))}，第 {_esc(inf.get('tool_call'))} 次工具调用）；夹着："
+                       f"{_esc(', '.join(sr.get('held') or []) or '无')}；最大关节 / 物体速度 "
+                       f"{_esc(sr.get('max_abs_qvel'))}；请求后 {_esc(sr.get('delay_s'))} s 记录</div>")
+            pics = (r.get("stop_snapshots") or {}).get("stop" + str(sr.get("k")))
+            if isinstance(pics, list) and pics:
+                out.append("<div>" + "".join(f"<a href='{_esc(x)}'><img src='{_esc(x)}' alt='{_esc(x)}'></a>"
+                                             for x in pics) + "</div>")
+            elif isinstance(pics, dict):
+                out.append(f"<div class='muted'>没有截图：{_esc(pics.get('why'))}</div>")
+            cs = sr.get("contacts") or []
+            if cs:
+                out.append("<table><tr><th>物体</th><th>几何体</th><th>碰到</th><th>几何体</th><th>间距 mm（负 = 穿透）</th>"
+                           "<th>法向力 N</th></tr>" + "".join(
+                               f"<tr><td>{_esc(c.get('body1'))}</td><td>{_esc(c.get('geom1'))}</td><td>"
+                               f"{_esc(c.get('body2'))}</td><td>{_esc(c.get('geom2'))}</td><td>{_esc(c.get('dist_mm'))}"
+                               f"</td><td>{_esc(c.get('normal_force_n'))}</td></tr>" for c in cs) + "</table>")
         tools = st.get("tools") or []
         if tools:
             out.append(f"<details><summary>{len(tools)} 次工具调用（安全停止 {st.get('safety_stops', 0)}）</summary>"
@@ -392,7 +423,7 @@ class DOERunner:
         self.on_change = on_change or (lambda r: None)
         self.now = now
         t = {"ready_s": 420.0, "settle_s": 8.0, "run_s": 60.0 * float(plan.get("run_timeout_min") or 20),
-             "stop_grace_s": 90.0, "eval_s": 20.0, "sim_stop_s": 120.0, "after_stop_s": 5.0}
+             "stop_grace_s": 90.0, "eval_s": 20.0, "sim_stop_s": 120.0, "after_stop_s": 5.0, "retry_s": 15.0}
         t.update(timeouts or {})
         self.T = t
         self.runs = expand(plan)
@@ -595,6 +626,10 @@ class DOERunner:
             return
         if s == "snap":
             return self._snap_tick()
+        if s == "retry":                                  # V4.11.3: send the same run again
+            if self._age() >= self.T["retry_s"]:
+                self._set("next")
+            return
         if s == "eval":
             f = self.eval_file + ".done"
             if os.path.exists(f):
@@ -620,13 +655,29 @@ class DOERunner:
         self._set("running")
 
     def _end(self, r, out, ev, timed_out=False, crashed=False, restart=False):
+        st_, kl_ = classify(out, ev, timed_out=timed_out, crashed=crashed)
+        if kl_ == "not_started" and int(r.get("retries") or 0) < 1:      # V4.11.3: one retry
+            r["retries"] = int(r.get("retries") or 0) + 1
+            r["first_attempt"] = {"status_text": (out or {}).get("status_text"), "t": self.now()}
+            self.log(f"[WARN] [V4.11.3 DOE] {r['id']}: the task did not start "
+                     f"({str((out or {}).get('status_text') or '')[:160]}) -> one retry in {self.T['retry_s']:.0f} s")
+            try:
+                os.remove(os.path.join(self.tdir, "outbox", f"{self.fid(r)}.json"))
+            except OSError:
+                pass
+            r["status"] = "pending"
+            self.on_change(r)
+            self._set("retry")
+            return
         r["eval"] = ev
-        r["status"], r["klass"] = classify(out, ev, timed_out=timed_out, crashed=crashed)
+        r["status"], r["klass"] = st_, kl_
         r["seconds"] = round(self.now() - r.get("t0", self.now()), 1)
         r["last_fail"] = last_fail_reason(r.get("stats")) if r["status"] != "success" else None
+        r["safety_records"] = self._safety_records(r)
         self.log(f"[V4.11 DOE] {r['id']}: {STATUS_TEXT[r['status']]} ({r['klass']}) "
                  f"goals {(ev or {}).get('n_ok', '-')}/{(ev or {}).get('n_goals', '-')} | "
-                 f"{len((r.get('stats') or {}).get('tools') or [])} tool calls | {r['seconds']:.0f} s")
+                 f"{len((r.get('stats') or {}).get('tools') or [])} tool calls | {r['seconds']:.0f} s"
+                 + (f" | {len(r['safety_records'])} safety-stop record(s)" if r["safety_records"] else ""))
         self.on_change(r)
         self.i += 1
         self.save()
@@ -634,65 +685,123 @@ class DOERunner:
             self.scene_up = None                          # next run of this scene starts a fresh simulation
             if r["klass"] == "blowup":
                 self.log("[V4.11 DOE] blow-up -> the next run starts a fresh simulation")
-        if self._start_snapshot(r, ev):                   # V4.11.2: pictures of the final state first
+        if self._start_snapshots(r, ev):                  # V4.11.2 / V4.11.3: pictures first
             self._set("snap")
         else:
             self._set("next")
 
-    # ---- V4.11.2 final-state snapshots
-    def _start_snapshot(self, r, ev) -> bool:
-        """render the final state in a separate process (model saved by the physics process + qpos of the truth
-        check); the runner waits for it (it reads the scene file, which the next simulation start replaces)"""
-        r["snapshots"] = []
+    # ---- V4.11.3 safety-stop records
+    def _safety_records(self, r) -> List[dict]:
+        """the physics process's records of this run's safety stops (contacts, held object; the state for a
+        picture is kept in self._safety_states, not in runs.jsonl)"""
+        import NERO_V410_Household_Scenes as HS
+        out, self._safety_states = [], {}
+        try:
+            with open(HS.safety_log_file()) as f:
+                lines = f.read().splitlines()
+        except OSError:
+            return []
+        pre = self.fid(r) + "_stop"
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if not str(rec.get("id") or "").startswith(pre):
+                continue
+            k = str(rec["id"])[len(pre):]
+            self._safety_states[k] = {x: rec.get(x) for x in ("qpos", "model_xml", "model_why", "python",
+                                                               "python_paths", "sim_time")}
+            out.append({"k": k, "info": rec.get("info"), "held": rec.get("held"), "contacts": rec.get("contacts"),
+                        "max_abs_qvel": rec.get("max_abs_qvel"), "delay_s": round(float(rec.get("t") or 0)
+                                                                                - float(rec.get("t_request") or 0), 2),
+                        "sim_time": rec.get("sim_time")})
+        return out
+
+    # ---- V4.11.2 snapshots (V4.11.3: a queue - final state + safety-stop moments; the simulation's Python)
+    def _start_snapshots(self, r, ev) -> bool:
+        r["snapshots"], r["stop_snapshots"] = [], {}
         if not self.plan.get("snapshots", True):
             return False
+        jobs = []
         if not ev or not ev.get("qpos"):
             r["snapshot_why"] = "no final state (no truth check answer)"
-            return False
-        if not ev.get("model_xml"):
+        elif not ev.get("model_xml"):
             r["snapshot_why"] = f"the simulation did not save its model ({ev.get('model_why') or 'unknown'})"
+        else:
+            jobs.append(("final", f"{r['id']}_{r['status']}", ev))
+        for k, stt in sorted((getattr(self, "_safety_states", None) or {}).items()):
+            if stt.get("qpos") and stt.get("model_xml"):
+                jobs.append((f"stop{k}", f"{r['id']}_stop{k}", stt))
+        if not jobs:
             return False
+        self._snap = {"r": r, "jobs": jobs, "cur": None}
+        return self._next_job()
+
+    def _next_job(self) -> bool:
         import subprocess
-        d = os.path.join(self.out, "snapshots")
-        os.makedirs(d, exist_ok=True)
-        prefix = os.path.join(d, f"{r['id']}_{r['status']}")
-        st = prefix + "_state.json"
-        with open(st, "w") as f:
-            json.dump({"qpos": ev["qpos"], "sim_time": ev.get("sim_time"), "model_xml": ev["model_xml"]}, f)
-        log = open(prefix + "_render.json", "w")
-        try:
-            p = subprocess.Popen([sys.executable, os.path.join(HERE, "NERO_V411_Snapshot.py"), "--xml",
-                                  ev["model_xml"], "--state", st, "--out", prefix], stdout=log,
-                                 stderr=subprocess.DEVNULL, cwd=HERE)
-        except Exception as exc:
-            log.close()
-            r["snapshot_why"] = f"renderer not started: {exc}"
-            return False
-        self._snap = {"r": r, "proc": p, "log": log, "path": prefix + "_render.json", "t0": self.now()}
-        return True
+        sn = self._snap
+        while sn["jobs"]:
+            kind, name, st = sn["jobs"].pop(0)
+            d = os.path.join(self.out, "snapshots")
+            os.makedirs(d, exist_ok=True)
+            prefix = os.path.join(d, name)
+            with open(prefix + "_state.json", "w") as f:
+                json.dump({"qpos": st["qpos"], "sim_time": st.get("sim_time"), "model_xml": st["model_xml"]}, f)
+            py = st.get("python") if st.get("python") and os.path.exists(str(st.get("python"))) else sys.executable
+            env = dict(os.environ)
+            extra = [x for x in (st.get("python_paths") or []) if x]
+            if extra:
+                env["PYTHONPATH"] = os.pathsep.join(extra + [x for x in [env.get("PYTHONPATH")] if x])
+            log = open(prefix + "_render.json", "w")
+            try:
+                p = subprocess.Popen([py, os.path.join(HERE, "NERO_V411_Snapshot.py"), "--xml", st["model_xml"],
+                                      "--state", prefix + "_state.json", "--out", prefix], stdout=log,
+                                     stderr=subprocess.DEVNULL, cwd=HERE, env=env)
+            except Exception as exc:
+                log.close()
+                self._job_done(kind, {"ok": False, "why": f"renderer not started with {py}: {exc}"})
+                continue
+            sn["cur"] = {"kind": kind, "proc": p, "log": log, "path": prefix + "_render.json", "t0": self.now(),
+                         "python": py}
+            return True
+        return False
+
+    def _job_done(self, kind, res):
+        r = self._snap["r"]
+        files = [os.path.relpath(x, self.out) for x in res.get("files") or []] if res.get("ok") else []
+        if kind == "final":
+            if files:
+                r["snapshots"] = files
+                self.log(f"[V4.11.2 DOE] {r['id']}: {len(files)} picture(s) of the final state")
+            else:
+                r["snapshot_why"] = res.get("why") or "the renderer gave no answer"
+                self.log(f"[WARN] [V4.11.2 DOE] {r['id']}: no pictures ({r['snapshot_why'][:200]})")
+        else:
+            r.setdefault("stop_snapshots", {})[kind] = files or {"why": res.get("why") or "no answer"}
 
     def _snap_tick(self):
         sn = self._snap
-        p, r = sn["proc"], sn["r"]
-        if p.poll() is None and self.now() - sn["t0"] < self.T.get("snap_s", 120.0):
+        cur = sn["cur"]
+        p = cur["proc"]
+        if p.poll() is None and self.now() - cur["t0"] < self.T.get("snap_s", 120.0):
             return
         if p.poll() is None:
             p.kill()
-        sn["log"].close()
+        cur["log"].close()
         res = {}
         try:
-            with open(sn["path"]) as f:
+            with open(cur["path"]) as f:
                 lines = [x for x in f.read().splitlines() if x.startswith("{")]
             res = json.loads(lines[-1]) if lines else {}
         except Exception:
             pass
-        if res.get("ok"):
-            r["snapshots"] = [os.path.relpath(x, self.out) for x in res.get("files") or []]
-            self.log(f"[V4.11.2 DOE] {r['id']}: {len(r['snapshots'])} picture(s) of the final state")
-        else:
-            r["snapshot_why"] = res.get("why") or "the renderer gave no answer"
-            self.log(f"[WARN] [V4.11.2 DOE] {r['id']}: no pictures ({r['snapshot_why'][:200]})")
-        self.on_change(r)
+        if not res and p.returncode not in (0, None):
+            res = {"ok": False, "why": f"renderer exited with code {p.returncode} ({cur['python']})"}
+        self._job_done(cur["kind"], res)
+        if self._next_job():
+            return
+        self.on_change(sn["r"])
         self.save()
         self._snap = None
         self._set("next")
@@ -849,12 +958,12 @@ class DOETab:
         # ---- live summary + log
         bot = ttk.Panedwindow(f, orient="horizontal")
         bot.pack(fill="both", expand=True, pady=(6, 0))
-        sf = ttk.LabelFrame(bot, text="实时统计（成功率只算可判定的运行）", padding=4)
-        self.tv_sum = ttk.Treeview(sf, columns=("g", "n", "s", "p", "f", "i", "r", "ci"), show="headings", height=8,
-                                   style="DOE.Treeview")
+        sf = ttk.LabelFrame(bot, text="实时统计（成功率只算可判定的运行；端到端 = 无法判定也算没做成）", padding=4)
+        self.tv_sum = ttk.Treeview(sf, columns=("g", "n", "s", "p", "f", "i", "r", "ci", "e"), show="headings",
+                                   height=8, style="DOE.Treeview")
         for c, t, sample in (("g", "LLM 设置 / 任务", "openai:gpt-6.1-sol@high"), ("n", "可判定", "999"),
                              ("s", "成功", "999"), ("p", "部分", "999"), ("f", "失败", "999"), ("i", "无法判定", "999"),
-                             ("r", "成功率", "100%"), ("ci", "95% 区间", "100%-100%")):
+                             ("r", "成功率", "100%"), ("ci", "95% 区间", "100%-100%"), ("e", "端到端", "100%")):
             self.tv_sum.heading(c, text=t)
             w = max(self.px(t), self.px(sample))
             self.tv_sum.column(c, width=w, minwidth=w if c != "g" else self.px(t), stretch=(c == "g"),
@@ -1089,7 +1198,7 @@ class DOETab:
             n_sc = len({r["scene"] for r in p["rows"]})
             h = estimate_s(p) / 3600.0
             self.v_sum.set(f"{len(p['rows'])} 个任务 × {len(p['models'])} 组 LLM × {p['replicates']} 次 = {n} 次运行，"
-                           f"启动仿真 {n_sc} 次，粗估 {h:.1f} 小时（按每次 4 分钟）")
+                           f"启动仿真 {n_sc} 次，粗估 {h:.1f} 小时（按每次 5.5 分钟，11-17 实测）")
         except Exception:
             self.v_sum.set("")
 
@@ -1246,7 +1355,7 @@ class DOETab:
         for g in groups:
             ci = "-" if g["ci95"] is None else f"{_pct(g['ci95'][0])}–{_pct(g['ci95'][1])}"
             self.tv_sum.insert("", "end", values=(g["group"], g["judged"], g["success"], g["partial"], g["fail"],
-                                                  g["invalid"], _pct(g["rate"]), ci))
+                                                  g["invalid"], _pct(g["rate"]), ci, _pct(g.get("e2e_rate"))))
 
     def _hover(self, e):
         runs = self._runs()
@@ -1284,7 +1393,11 @@ class DOETab:
         top = ttk.Frame(w, padding=6)
         top.pack(fill="x")
         w._imgs = []
-        for rel in r.get("snapshots") or []:
+        rels = list(r.get("snapshots") or [])
+        for v in (r.get("stop_snapshots") or {}).values():      # V4.11.3: safety-stop moments too
+            if isinstance(v, list):
+                rels += v[:1]                                     # one view per stop (overview) to fit the window
+        for rel in rels:
             try:
                 img = tk.PhotoImage(file=os.path.join(base, rel))
                 k = max(1, int(round(img.width() / 460.0)))
@@ -1306,6 +1419,13 @@ class DOETab:
             lines.append(f"  [{'达成' if g.get('ok') else '未达成'}] {g.get('goal')}: {g.get('detail')}")
         if ev.get("held"):
             lines.append(f"  结束时仍在夹爪里：{', '.join(ev['held'])}")
+        for sr in r.get("safety_records") or []:                  # V4.11.3
+            inf = sr.get("info") or {}
+            lines.append(f"安全停止 #{sr.get('k')}: {inf.get('tool')} ({inf.get('step')}), 夹着 "
+                         f"{', '.join(sr.get('held') or []) or '无'}, 请求后 {sr.get('delay_s')} s 记录；接触（最强的 6 个）：")
+            for c in (sr.get("contacts") or [])[:6]:
+                lines.append(f"    {c.get('body1')}/{c.get('geom1')} - {c.get('body2')}/{c.get('geom2')}: "
+                             f"间距 {c.get('dist_mm')} mm, 法向力 {c.get('normal_force_n')} N")
         if st.get("error"):
             lines.append(f"错误：{st['error']}")
         lines.append("")

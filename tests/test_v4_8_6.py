@@ -263,7 +263,7 @@ class TestV486(unittest.TestCase):
     def test_u5_versions_and_frozen_hashes(self):
         with open(os.path.join(HERE, "VERSION"), encoding="utf-8") as f:
             v = f.read().strip()
-        self.assertIn(v, ("V4.8.6", "V4.8.7", "V4.8.8", "V4.8.9", "V4.8.8", "V4.8.9", "V4.8.9", "V4.8.10", "V4.8.11", "V4.9", "V4.9.1", "V4.9.2", "V4.9.3", "V4.10", "V4.10.1", "V4.10.2", "V4.10.3", "V4.11", "V4.11.1", "V4.11.2"))
+        self.assertIn(v, ("V4.8.6", "V4.8.7", "V4.8.8", "V4.8.9", "V4.8.8", "V4.8.9", "V4.8.9", "V4.8.10", "V4.8.11", "V4.9", "V4.9.1", "V4.9.2", "V4.9.3", "V4.10", "V4.10.1", "V4.10.2", "V4.10.3", "V4.11", "V4.11.1", "V4.11.2", "V4.11.3"))
         self.assertEqual((v, C.VERSION, RR.VERSION), (v, v, v))
         self.assertEqual(C.MARKER_V486, "V4.8.6 STARTUP GRIPPER + CAMERAS + YMODEL + XFT CRASH FIX")
         self.assertEqual(WC.MARKER_V486, "V4.8.6 CAMERA YMODEL MENU + STARTUP DEFAULTS")
