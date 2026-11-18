@@ -162,7 +162,7 @@ class TestV487(unittest.TestCase):
     def test_v5_versions_and_frozen_hashes(self):
         with open(os.path.join(HERE, "VERSION"), encoding="utf-8") as f:
             v = f.read().strip()
-        self.assertIn(v, ("V4.8.7", "V4.8.8", "V4.8.9", "V4.8.9", "V4.8.10", "V4.8.11", "V4.9", "V4.9.1", "V4.9.2", "V4.9.3", "V4.10", "V4.10.1", "V4.10.2", "V4.10.3")); self.assertEqual((v, C.VERSION, RR.VERSION), (v, v, v))
+        self.assertIn(v, ("V4.8.7", "V4.8.8", "V4.8.9", "V4.8.9", "V4.8.10", "V4.8.11", "V4.9", "V4.9.1", "V4.9.2", "V4.9.3", "V4.10", "V4.10.1", "V4.10.2", "V4.10.3", "V4.11")); self.assertEqual((v, C.VERSION, RR.VERSION), (v, v, v))
         self.assertEqual(C.MARKER_V487, "V4.8.7 CUROBO REAL IK + SMOLVLA VRAM RELEASE")
         self.assertEqual(C487.MARKER, "V4.8.7 CUROBO REAL IK + SMOLVLA VRAM RELEASE")
 

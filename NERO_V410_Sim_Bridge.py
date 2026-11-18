@@ -12,6 +12,11 @@ variables / buttons, exactly as a person would.
    typed into the task field and RUN TASK is pressed; when the run ends
    <task dir>/outbox/<id>.json = {"id", "status": "complete" | "failed" | "not_started", "status_text", "t_start",
    "t_end"}.  task dir = NERO_V410_TASK_DIR or <release>/logs/sim_tasks.  One task at a time, in file-name order.
+3. V4.11 SIM DOE: an inbox message may also carry "llm": {"provider", "model", "effort", "steps"} (set in the panel
+   before RUN TASK; the key stays the provider's environment variable), "reset_objects": true (the objects go back to
+   their start poses at the task start, arm at home first) and inbox/stop_<id>.json (STOP AGENT + ARM RECOVER, also while a task runs).  The outbox
+   adds "llm" (what was used) and "stats" (NERO_V489_General_Pick_Place.TASK_STATS: tool calls, reasons, safety
+   stops, tokens, error).  <task dir>/ready.json is written once the channel watches (the DOE waits for it).
 """
 from __future__ import annotations
 
@@ -19,7 +24,7 @@ import json
 import os
 import time
 
-VERSION = "V4.10"
+VERSION = "V4.11"
 MARKER = "V4.10 SIM BRIDGE"
 HERE = os.path.dirname(os.path.realpath(__file__))
 
@@ -107,15 +112,33 @@ class TaskChannel:
             self.log(f"[WARN] [V4.10 TASK CHANNEL] {exc}")
         self.root.after(self.period, self._tick)
 
+    def _stop_cmds(self):
+        """V4.11 DOE: stop_<id>.json is handled even while a task runs"""
+        inbox = os.path.join(self.dir, "inbox")
+        for n in sorted(os.listdir(inbox)):
+            if not (n.startswith("stop_") and n.endswith(".json")):
+                continue
+            os.replace(os.path.join(inbox, n), os.path.join(self.dir, "done", n))
+            self.log(f"[V4.11 TASK CHANNEL] {n[:-5]}: stop requested -> STOP AGENT + ARM RECOVER")
+            try:
+                self.g["stop"]()()
+            except Exception as exc:
+                self.log(f"[WARN] [V4.11 TASK CHANNEL] stop failed: {exc}")
+
     def _step(self):
+        self._stop_cmds()
         st = self.g["status"]()
         if self.cur is not None:
             txt = str(st.get("text", ""))
             started = self.cur.get("seen_busy") or self._busy()
             self.cur["seen_busy"] = started
-            if started and not self._busy() and ("complete" in txt or "FAILED" in txt):
-                out = {"id": self.cur["id"], "status": "failed" if "FAILED" in txt else "complete",
+            if started and not self._busy() and not self.cur.get("t_idle"):
+                self.cur["t_idle"] = time.time()
+            ended_quiet = bool(self.cur.get("t_idle")) and time.time() - self.cur["t_idle"] > 20.0   # V4.11
+            if started and not self._busy() and ("complete" in txt or "FAILED" in txt or ended_quiet):
+                out = {"id": self.cur["id"], "status": "failed" if ("FAILED" in txt or "complete" not in txt) else "complete",
                        "status_text": txt, "t_start": self.cur["t_start"], "t_end": time.time()}
+                out.update(_extras(self.cur))
                 with open(os.path.join(self.dir, "outbox", f"{self.cur['id']}.json"), "w") as f:
                     json.dump(out, f)
                 self.log(f"[V4.10 TASK CHANNEL] task {self.cur['id']} ended: {out['status']}")
@@ -123,6 +146,7 @@ class TaskChannel:
             elif time.time() - self.cur["t_start"] > 15 and not started:
                 out = {"id": self.cur["id"], "status": "not_started", "status_text": txt,
                        "t_start": self.cur["t_start"], "t_end": time.time()}
+                out.update(_extras(self.cur))
                 with open(os.path.join(self.dir, "outbox", f"{self.cur['id']}.json"), "w") as f:
                     json.dump(out, f)
                 self.log(f"[WARN] [V4.10 TASK CHANNEL] task {self.cur['id']} did not start: {txt}")
@@ -146,10 +170,70 @@ class TaskChannel:
         if not task:
             self.log(f"[WARN] [V4.10 TASK CHANNEL] {tid}: empty task ignored")
             return
+        used = apply_llm(self.g, msg.get("llm") or {}, self.log)        # V4.11 DOE
+        if msg.get("reset_objects"):
+            try:
+                import NERO_V489_General_Pick_Place as GP
+                GP.request_object_reset(f"DOE run {tid}")
+            except Exception as exc:
+                self.log(f"[WARN] [V4.11 TASK CHANNEL] object reset not requested: {exc}")
         self.g["vars"]()["task"].set(task)
-        self.cur = {"id": tid, "t_start": time.time(), "seen_busy": False}
+        self.cur = {"id": tid, "t_start": time.time(), "seen_busy": False, "llm": used}
         self.log(f"[V4.10 TASK CHANNEL] task {tid}: {task!r} -> RUN TASK")
         self.g["run"]()()
+
+
+def _extras(cur):
+    """V4.11 DOE: the outbox additions (llm used + the harness's task stats)"""
+    out = {"llm": cur.get("llm") or {}}
+    try:
+        import NERO_V489_General_Pick_Place as GP
+        st = dict(GP.TASK_STATS)
+        if st.get("t_start") and st["t_start"] >= cur["t_start"] - 1.0:      # this task's stats, not an older one
+            out["stats"] = json.loads(json.dumps(st, default=str))
+    except Exception:
+        pass
+    return out
+
+
+def apply_llm(g, llm, log):
+    """V4.11 DOE: set provider / model / effort / steps in the (read-only) SimAgent panel before RUN TASK; returns
+    the settings now in the panel"""
+    if not llm:                                         # an ordinary task message: the panel stays as it is
+        return {}
+    v = g["vars"]()
+    labels = g["labels"]() if "labels" in g else {}
+    if llm.get("provider"):
+        lab = labels.get(llm["provider"])
+        if lab and v["provider"].get() != lab:
+            v["provider"].set(lab)
+            try:
+                g["on_provider"]()()
+            except Exception:
+                pass
+    for k in ("model", "effort", "steps"):
+        if llm.get(k):
+            v[k].set(str(int(llm[k])) if k == "steps" else str(llm[k]))
+    if "dry_run" in llm:                                # the DOE always executes (the console's dry run is ignored)
+        v["dry"].set(bool(llm["dry_run"]))
+    back = {b: a for a, b in labels.items()}
+    used = {"provider": back.get(v["provider"].get(), v["provider"].get()), "model": v["model"].get(),
+            "effort": v["effort"].get(), "steps": v["steps"].get(), "dry_run": bool(v["dry"].get())}
+    log(f"[V4.11 TASK CHANNEL] LLM for this task: {used}")
+    return used
+
+
+def write_ready(extra=None):
+    """V4.11 DOE: <task dir>/ready.json once the channel watches"""
+    d = task_dir()
+    os.makedirs(d, exist_ok=True)
+    msg = {"t": time.time(), "pid": os.getpid(), "scene": os.environ.get("NERO_SCENE"),
+           "household": os.environ.get("NERO_V410_HOUSEHOLD")}
+    msg.update(extra or {})
+    tmp = os.path.join(d, "ready.json.tmp")
+    with open(tmp, "w") as f:
+        json.dump(msg, f)
+    os.replace(tmp, os.path.join(d, "ready.json"))
 
 
 CFG_TITLE = "NERO V2-7 LLM planner / reasoning / API"
@@ -202,6 +286,8 @@ def find_widgets(root) -> dict:
                     found.setdefault("task", c)
         elif cls == "TButton" and _text(w) == "RUN TASK":
             found["run"] = w
+        elif cls == "TButton" and _text(w) == "STOP AGENT + ARM RECOVER":
+            found["stop"] = w
         elif cls == "TLabel":
             try:
                 tv = str(w.cget("textvariable"))
@@ -240,6 +326,7 @@ def getters_from_widgets(root, W) -> dict:
             "labels": lambda: labels,
             "on_provider": lambda: (lambda: W["provider"].event_generate("<<ComboboxSelected>>")),
             "cfg_frame": lambda: W["cfg_frame"], "run": lambda: W["run"].invoke,
+            "stop": lambda: (W["stop"].invoke if "stop" in W else (lambda: None)),
             "status": lambda: {"text": status_text()}, "agent": lambda: _Agent()}
 
 
@@ -272,6 +359,7 @@ def attach_gui(root, g, log, delay_ms=1500):
         try:
             TaskChannel(root, g, log).start()
             log(f"[V4.10 TASK CHANNEL] watching {os.path.join(task_dir(), 'inbox')}")
+            write_ready()                                   # V4.11 DOE: the console's DOE waits for this file
         except Exception as exc:
             log(f"[WARN] [V4.10 TASK CHANNEL] not started: {exc}")
     root.after(int(delay_ms), later)

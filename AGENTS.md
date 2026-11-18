@@ -1,7 +1,7 @@
-# NERO 项目开发与交接文档（V4.10.3 · 交接版）
+# NERO 项目开发与交接文档（V4.11 · 交接版）
 
 > 本文件放在仓库根目录，名为 `AGENTS.md`（Codex 和其他开发 Agent 会自动读取）。
-> 更新时间：2026-11-17。当前交付版本：**V4.10.3**（通用 pick & place 只给 LLM 测量事实，见 H8）。V4.8.6–V4.8.11 是用户在别的开发会话里做的，本文件按它们的 CHANGELOG 补录（第二部分第 0 节）。仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`，开发分支 `claude/charming-euler-eoqyme`。
+> 更新时间：2026-11-18。当前交付版本：**V4.11**（通用 pick & place 只给 LLM 测量事实，见 H8）。V4.8.6–V4.8.11 是用户在别的开发会话里做的，本文件按它们的 CHANGELOG 补录（第二部分第 0 节）。仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`，开发分支 `claude/charming-euler-eoqyme`。
 > “用户”指项目所有者 Jimmy。文件分两部分：
 > - **第一部分**：交接速览，给接手工程师先读，约 15 分钟。
 > - **第二部分**：详细规则、不变量和逐版本记录。原文档持续追加，第 1、2、4 节仍然有效。
@@ -124,6 +124,9 @@ V3.60 之前的模块见第二部分第 5 节。文件名里的版本号是该�
 | `NERO_V489_General_Pick_Place.py` | 通用 pick & place：`GeneralPickPlaceSkills`（7 个工具）、`GENERAL_TOOLS` / `GENERAL_SYSTEM_INSTRUCTIONS`、`run_general_pick_place`（LLM 循环）、`SimGeneralIO`（后端）/ `TwinGeneralIO`（孪生，任意场景）、`ProbeVision` |
 | `NERO_V49_Geometry.py` | V4.9 测量几何：`FingerModel`、`HeightMap`、`MjProbe`、`describe`、`preview_grasp`、`cloud_clearance`、`relations`。**不认识任何物体类别** |
 | `NERO_V49_Random_Scenes.py` | V4.9 随机场景 + 任务 + 真值判成功（孪生用） |
+| `NERO_V410_Household_Scenes.py` | V4.10 家居场景（固定 H1–H5 / 随机种子）、孪生、复位钩子；V4.11 真值检查 `evaluate` / `eval_hook` / `request_eval`、`parse_goals` |
+| `NERO_V410_Console_Sim.py` / `NERO_V410_Sim_Bridge.py` | 控制台 LLM 设置 + 场景对话框；仿真窗口一侧的桥接（填 SimAgent 面板、任务文件通道、V4.11 每任务 LLM / stop / ready / stats） |
+| `NERO_V411_Sim_DOE.py` | V4.11 仿真 DOE：计划展开、判定分类、Wilson 区间、报告；`DOERunner`（状态机，tick 驱动，可用假仿真测试）；`DOETab`（控制台页） |
 | `tests/v49_reasoner.py`、`tests/v49_random_eval.py` | 测试替身推理（只用工具返回值，不是 LLM、不进产品）+ 批量评测 |
 | `NERO_V325_Camera.py` | Camera调试页。**冻结**，测试会校验 sha256 |
 
@@ -219,7 +222,7 @@ V3.60 之前的模块见第二部分第 5 节。文件名里的版本号是该�
 
 19. **后端时间空档重同步（选项 E，等用户同意，要改后端）**：V4.9.2 GUI 运行里 J5 失控前，diag CSV 的仿真时间线有 2.3 s 空档（151.911 → 154.209 s），随后多行相同、力矩跳变、J5 力矩饱和并加速；之前已有 J5 抖振（qacc_act ±177 对命令 ±3），全程 hold = 1。空档原因未查明。V4.9.3 的奇异检查防不住这次事故。
 
-20. **Sim DOE 页（V4.11，用户已确认方案）**：控制台新 tab「Sim DOE」，在「仿真 (MuJoCo)」右边。因子设计 → 批量生成 prompt（可增删改，含判定目标）→ 逐条运行（任务文件通道 `logs/sim_tasks`，复位物品代替重启）→ 状态灯（灰 / 绿闪 / 绿 / 红 / 黄 / 蓝 = 未判定）→ DOE 日志（设计参数、模型信息）+ 总结报告（`logs/doe/<时间>/`）。V4.10 已准备好：任务通道、复位、场景库、控制台 LLM 设置。
+20. **Sim DOE 页已交付（V4.11）**：`NERO_V411_Sim_DOE.py`，用法见 README 顶部。**还没在真实 GUI 里跑过**（容器起不了后端）。第一次跑建议先做 1 个任务 × 1 个模型 × 2 次，确认 ready / 任务通道 / 真值检查都正常（DOE 日志里每次运行都有「goals n/m」）。之后待做：①真实运行后看报告格式是否够用；②发散自动重启的阈值（现在 > 5 次安全停止）要看数据再定；③原通用场景 G0（鸡蛋 / 纸杯）还不支持 DOE（没有结构化目标）。
 21. **夹持**：V4.10.2 起 GUI 仿真的 general / household 场景是 weld 刚性夹持（`SC.rigid_hold()` / `SC.wrap_activate_hold`），其他场景仍是球铰。孪生默认球铰，家居场景孪生默认刚性。工具用 `hold_kind` / `held_object_turns_with_gripper` 如实告诉 LLM。V4.10.3：weld 参数集中在 `SC.weld_params()`（solref 0.012 1、torquescale 1；环境变量 `NERO_V4103_WELD_SOLREF` / `NERO_V4103_WELD_TORQUESCALE` 可改）。0.02 / 0.3 会让一端夹住的遥控器下垂、插不进马克杯，不要用。
 22. **桥接在真实后端界面上未实测**：找控件的测试用的是按后端布局搭的面板；用户启动后看日志 `[V4.10 LLM] settings from the console` / `[V4.10 TASK CHANNEL] watching`。
 
@@ -262,6 +265,8 @@ V3.60 之前的模块见第二部分第 5 节。文件名里的版本号是该�
 - **家居场景**（V4.10）：`NERO_V410_Household_Scenes.py` + `assets/household/`（GSO / YCB 扫描，来源和许可在 meta.json）。原装夹爪行程 **70 mm**（两指之间最多约 62 mm）。扫描只作显示，碰撞体不透明、放在 group 3（mj_ray 跳过 alpha 0 的几何体）。场景有固定 H1–H5 和随机种子，带结构化目标（仿真真值判定）。复位物品挂在 `SC.planning_rotated_boxes`（后端物理循环每 2 秒调用一次）。
 - **后端整个文件被哈希钉死**（17 个测试 + test_v3_61/62/63/72 的去钩子哈希；V4.10.2 经用户同意改过一次并更新了这些哈希），没有用户同意不要改。要在仿真界面里加东西，从后端已经调用的外部模块挂（V4.10：`NERO_V359_Strategy.add_sim_strategy_tab` → `NERO_V410_Sim_Bridge`，按控件树找 SimAgent 控件）。
 - **被夹物体的形状**（V4.10.1）：放置碰撞用的点云 = 侧面轮廓各高度的椭圆 + 感知占地轮廓里超出椭圆一个格子以上的部分（`_outline_ab`，内部字段，不发给 LLM）。不要退回固定 24 点椭圆：长方形物体的角会漏掉（遥控器宽度少算约 30 mm）。
+- **只给事实**（V4.11）：工具结果里不再有 `recommended_next_actions`，也没有「先 perceive」「先看一眼」这类建议；note 只写测到了什么、怎么测的、哪些还没测。以后加字段也照此办：不写「应该 / 建议 / 先做」。
+- **评测只认仿真真值**（V4.11 DOE）：成功 = 结构化目标在物理进程里检查全部达成。LLM 说完成、harness 到 VERIFIED 但真值不对，记为 `claimed_but_not_done`。仿真 / API 的问题记为「无法判定」，不算进成功率。
 - **测试替身**：`tests/v49_reasoner.py` 是一段几何推理，只读工具返回值，用来离线验证「工具给的信息够不够」。它的规则不能搬进产品代码或提示词。
 - **真实 LLM 评测**（V4.9.2）：`tests/v49_llm_eval.py`，用法见 README 顶部；替身评测加 `--noise` 模拟真机感知。
 - **怎么跑评测**（需要 mujoco；容器里是 `scratchpad/mj` venv）：
@@ -384,6 +389,7 @@ NERO 7 自由度机械臂（AgileX）+ MuJoCo 仿真 + GPT Agent 做“鸡蛋放
 
 - **V4.10.1（2026-11-17）**：用户 GUI 实测 V4.10：苹果进马克杯、遥控器放杯上成功；「遥控器插进马克杯」LLM 判断做不到（工具不能转被夹物体，仿真球铰也转不动）。用户：「改这两个点」。放置工具加 `pitch_change_deg`（夹爪绕两指连线转，物体跟着转；夹爪说明加 `held_object_turns_with_gripper`；球铰时如实拒绝）；孪生刚性夹持（weld）；孪生实测遥控器竖插马克杯成功，验证识别为 inside（杯口被挡时改用轮廓判断）。顺带发现并修了被夹物体椭圆模型漏掉长方形角的问题（改为椭圆 + 测到的轮廓）；修了 V4.10 桥接 `delay_ms` bug（日志 `not attached`）。
 
+- **V4.11（2026-11-18）**：用户：「做 Sim DOE 页」+「清掉残留的建议性文字」。删掉 `recommended_next_actions` 和所有建议性句子（掉落 / 安全停止的 note、系统提示两句）；新 `NERO_V411_Sim_DOE.py`（控制台「仿真 DOE」页，按场景启动仿真、每次运行先复位、物理进程真值检查、Wilson 区间报告）；家居场景模块加真值检查；harness 记录 `TASK_STATS`；桥接支持每任务 LLM / stop / ready / stats。后端未改。真实 GUI 未实测（用真实控制台窗口 + 假启动脚本测过整条流程）。
 - **V4.10.3（2026-11-17）**：用户：「先做前三项（不动后端）」。weld 时间常数 0.008 → 0.012 s（孪生里指关节冲击约 −10%，效果有限）；家居收纳盒 / 托盘墙段 ≤ 80 mm（V2-44 R2 篮沿规则不再削它们）；一次工具调用安全停止超过 5 次 → 下个任务开始自动复位物品（`_auto_reset_objects`，`SimGeneralIO.reset_objects`）。时间空档引起的失控（选项 E，要改 B 段）未做。
 - **V4.10.2（2026-11-17）**：用户：「球铰改成刚性，你改啊」。general / household 场景的夹持约束改成 weld；后端加第 12 个 A2 块（`activate_connect_hold` 之后，换成 `SC.wrap_activate_hold`），B 段不动；按用户同意更新测试里钉死的后端哈希和 A2 块数。MuJoCo 实测：link7 转 90°，物体跟着转，位置误差 < 0.5 mm。真实 GUI 未实测。
 

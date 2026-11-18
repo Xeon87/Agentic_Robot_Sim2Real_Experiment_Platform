@@ -284,6 +284,20 @@ class LLMSettingsPanel:
         return llm_env(self.prov, self.v_model.get().strip(), self.v_effort.get(), steps, bool(self.v_dry.get()),
                        self.v_key.get().strip())
 
+    def keys_env(self, provs) -> dict:
+        """V4.11 SIM DOE: the API key of each provider (typed in this console run, else from the keyring) in its own
+        environment variable; providers without a key are left out (their environment variable may still be set)"""
+        self.keys[self.prov] = self.v_key.get().strip()
+        env = {}
+        for p in provs:
+            k = self.keys.get(p)
+            if not k:
+                k = self.store.get(p)
+            names = providers().get(p, {}).get("key_env") or ()
+            if k and names:
+                env[names[0]] = k
+        return env
+
     def summary(self) -> str:
         e = self.env()
         return (f"提供方 {self.labels[self.prov]} | 模型 {e['NERO_LLM_MODEL']} | 思考档位 {e['NERO_V410_LLM_EFFORT']} | "

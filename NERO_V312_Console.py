@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "V4.10.3"
+VERSION = "V4.11"
 # V3.12 baseline: VERSION = "V3.12"
 # V3.59 SKILL STRATEGY KNOBS TAB + SKILL CARD + MULTI-POINT HOVER DRY-RUN
 # V3.60 SIM ENV INJECTION OF THE APPLIED SKILL + SKILL TAB SYNC BETWEEN CONSOLE AND SIM GUI
@@ -828,6 +828,7 @@ def run_console(initial_tab="sim"):
     llm410 = CS410.LLMSettingsPanel(tk, ttk, sim_tab, root, log=lambda m: log_append(sim_log, m), messagebox=messagebox)
     llm410.frame.pack(fill="x", pady=(6, 4))
     scene410 = {"scene": None, "spec": None}
+    doe411 = {"auto": False}                         # V4.11 SIM DOE: True while the DOE starts the simulation
     sim_log = make_log(sim_tab)
     btn_sim_copy.configure(command=lambda: copy_text(sim_log))
     btn_sim_reset.configure(command=lambda: CS410.request_reset(lambda m: log_append(sim_log, m), root))
@@ -1445,15 +1446,20 @@ def run_console(initial_tab="sim"):
         else:
             mode_var.set("当前模式: 空闲")
 
-    def on_sim_start():
+    def on_sim_start(auto_spec=None, extra_env=None):
+        """V4.11: auto_spec = household layout from the Sim DOE (no dialogs; extra_env = the DOE's API keys);
+        returns True when the launcher started"""
         if runner.running():
-            return
+            return False
         if pipe.active():
             log_append(sim_log, "[FAIL] 实机进程正在运行：仿真被互斥锁定（两者都会发布 /feedback/joint_states）")
-            return
+            return False
         scene = sim_scene_by_label.get(sim_scene_var.get(), DEFAULT_SIM_SCENE)
         spec410 = None
-        if scene in CS410.GENERAL_SCENES:           # V4.10 SCENE DIALOG: original / fixed household / random seed
+        doe411["auto"] = auto_spec is not None
+        if auto_spec is not None:                   # V4.11 SIM DOE: the DOE picks the household layout
+            scene, spec410 = "household_pick_place", str(auto_spec)
+        elif scene in CS410.GENERAL_SCENES:         # V4.10 SCENE DIALOG: original / fixed household / random seed
             pick = CS410.ask_scene(tk, ttk, root, current=scene410.get("spec"))
             if pick is None:
                 log_append(sim_log, "[INFO] [V4.10 SCENE] 已取消：没有启动仿真")
@@ -1486,6 +1492,7 @@ def run_console(initial_tab="sim"):
             import NERO_V410_Household_Scenes as HS410
             env410 = dict(CS410.scene_extra_env(scene, spec410, HS410.reset_file()))
             env410.update(llm410.env())            # never logged (holds the API key)
+            env410.update(extra_env or {})         # V4.11 SIM DOE: keys of every provider of the DOE (never logged)
             runner.v410_env = env410               # V4.10: merged by SimRunner.start after scene_env
             scene410.update(scene=scene, spec=spec410 or scene410.get("spec"))
             pid = runner.start(extra_env=scene_env(scene))
@@ -1499,6 +1506,7 @@ def run_console(initial_tab="sim"):
         btn_sim_start.configure(state="disabled")
         btn_sim_stop.configure(state="normal")
         update_mode()
+        return True
 
     def v377_clear_stale():
         """V3.77 STALE PROCESS CHECK: leftovers of an earlier run (ROS / MoveIt / RViz / real driver / NERO scripts of
@@ -1518,11 +1526,13 @@ def run_console(initial_tab="sim"):
         if not hits:
             log_append(sim_log, "[OK] [V3.77 STALE] 启动前检查：没有残余的 ROS / MoveIt / RViz / NERO 进程")
             return True
+        if doe411.get("auto"):                      # V4.11 SIM DOE: unattended -> the leftovers are stopped (logged)
+            log_append(sim_log, f"[WARN] [V4.11 DOE] {len(hits)} leftover process(es) before the start -> stopping them")
         lines = "\n".join(f"  {pid}  {kind}" for pid, kind, _cmd in hits[:15]) + (
             f"\n  …共 {len(hits)} 个" if len(hits) > 15 else "")
         for pid, kind, cmd in hits:
             log_append(sim_log, f"[WARN] [V3.77 STALE] 残余进程 {pid}: {cmd}")
-        if not messagebox.askyesno("启动前检查（V3.77）", f"发现上次运行留下的进程：\n{lines}\n\n关闭它们后再启动仿真？"
+        if not doe411.get("auto") and not messagebox.askyesno("启动前检查（V3.77）", f"发现上次运行留下的进程：\n{lines}\n\n关闭它们后再启动仿真？"
                                    "\n（选“否”= 不启动；它们会和新仿真争用 ROS 话题）"):
             log_append(sim_log, "[INFO] [V3.77 STALE] 没有关闭残余进程，仿真未启动")
             return False
@@ -1541,10 +1551,10 @@ def run_console(initial_tab="sim"):
             return False
         return True
 
-    def on_sim_stop():
+    def on_sim_stop(ask=True):
         if not runner.running():
             return
-        if not messagebox.askyesno("停止仿真", "停止仿真？MoveIt、RViz、MuJoCo 和仿真 GUI 都会关闭。"):
+        if ask and not messagebox.askyesno("停止仿真", "停止仿真？MoveIt、RViz、MuJoCo 和仿真 GUI 都会关闭。"):
             return
         log_append(sim_log, "[V3.12 CONSOLE] stop requested -> SIGINT to launcher (cleanup + restore kinematics.yaml)")
         sim_status.set("正在停止…")
@@ -1554,6 +1564,32 @@ def run_console(initial_tab="sim"):
 
     btn_sim_start.configure(command=on_sim_start)
     btn_sim_stop.configure(command=on_sim_stop)
+
+    # ------------------------------------------------------------- 仿真 DOE tab (V4.11 SIM DOE)
+    def _doe_start(spec, env):
+        ok_ = bool(on_sim_start(auto_spec=spec, extra_env=env))
+        return ok_, ("launcher started" if ok_ else "not started (see the 仿真 (MuJoCo) log)")
+
+    def _doe_busy():
+        if pipe.active():
+            return "实机进程在运行：DOE 需要仿真"
+        if runner.running():
+            return "仿真正在运行：请先在「仿真 (MuJoCo)」页停止它（DOE 会按场景自己启动 / 停止仿真）"
+        return None
+
+    try:
+        import NERO_V411_Sim_DOE as DOE411
+        from tkinter import filedialog as _fd411
+        doe_tab = DOE411.DOETab(tk, ttk, nb, root, {
+            "start": _doe_start, "stop": lambda: on_sim_stop(ask=False), "running": runner.running, "busy": _doe_busy,
+            "ready": lambda: sim_status.get().startswith("SYSTEM READY"),      # launcher printed SYSTEM READY
+            "llm_default": lambda: {"provider": llm410.prov, "model": llm410.v_model.get().strip(),
+                                    "effort": llm410.v_effort.get()},
+            "key_env": llm410.keys_env}, messagebox=messagebox, filedialog=_fd411)
+        nb.insert(nb.index(sim_tab) + 1, doe_tab.frame, text="仿真 DOE")
+        doe_tab.add_current_model()
+    except Exception as exc:
+        log_append(sim_log, f"[FAIL] [V4.11 DOE] Sim DOE tab not available: {exc}")
     stop_t0 = [None]
 
     def stop_countdown():

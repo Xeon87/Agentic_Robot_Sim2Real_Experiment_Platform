@@ -616,6 +616,10 @@ def reset_hook(model, data, settle_s=3.0) -> Optional[str]:
                     home[nm] = (qa, va, data.qpos[qa:qa + 7].copy())
         st["home"] = home
         return None
+    try:                                                          # V4.11 DOE: truth check of goals on request
+        eval_hook(model, data)
+    except Exception as exc:
+        print(f"[V4.11 EVAL] failed: {exc}", flush=True)
     f = reset_file()
     if not os.path.exists(f):
         return None
@@ -640,6 +644,101 @@ def reset_hook(model, data, settle_s=3.0) -> Optional[str]:
     print(msg, flush=True)
     st["done"] = time.time()
     return msg
+
+
+# ------------------------------------------------------------------------------------------------ V4.11 DOE truth check
+def eval_file() -> str:
+    """V4.11 DOE: the goal check request next to the reset request (same directory, same process pair)"""
+    f = reset_file()
+    return (f[:-5] if f.endswith(".json") else f) + "_eval.json"
+
+
+def parse_goals(text) -> List[Tuple[str, str, str]]:
+    """'apple_1 into bowl_1; remote_1 onto tray_1' (also ',' / newline separated) -> [(src, rel, dst)];
+    a bad item raises ValueError with the item"""
+    out = []
+    for part in [p.strip() for p in str(text or "").replace("\n", ";").replace("，", ";").replace("；", ";")
+                 .replace(",", ";").split(";") if p.strip()]:
+        w = part.split()
+        if len(w) != 3 or w[1] not in ("into", "onto"):
+            raise ValueError(f"goal {part!r}: expected '<object> into|onto <target>'")
+        out.append((w[0], w[1], w[2]))
+    return out
+
+
+def goals_text(goals) -> str:
+    return "; ".join(f"{a} {r} {b}" for a, r, b in goals)
+
+
+def held_bodies(model, data) -> List[str]:
+    """bodies held by an active hold_<body> equality right now"""
+    import mujoco
+    out = []
+    for i in range(model.neq):
+        nm = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_EQUALITY, i) or ""
+        if nm.startswith("hold_") and int(data.eq_active[i]):
+            out.append(nm[5:])
+    return out
+
+
+def evaluate(model, data, scene: HScene, goals=None) -> dict:
+    """V4.11 DOE: simulator truth after a task: per goal ok + detail, objects held / off the table / tilted"""
+    sc = scene if goals is None else HScene(scene.sid, scene.label, scene.items, list(goals), scene.task, scene.seed)
+    held = held_bodies(model, data)
+    known = {it.oid for it in sc.items}
+    bad = [g for g in sc.goals if g[0] not in known or g[2] not in known]
+    res = goal_status(model, data, HScene(sc.sid, sc.label, sc.items, [g for g in sc.goals if g not in bad], sc.task,
+                                          sc.seed), held=held)
+    res += [{"goal": f"{a} {r} {b}", "ok": False, "detail": "object id not in this scene"} for a, r, b in bad]
+    objs = {}
+    for it in sc.items:
+        b = f"obj_{it.oid}"
+        try:
+            p = np.asarray(data.body(b).xpos, float)
+            R = np.asarray(data.body(b).xmat, float).reshape(3, 3)
+        except Exception:
+            continue
+        objs[it.oid] = {"xyz_m": [round(float(v), 4) for v in p], "z_axis_tilt_deg": round(float(np.degrees(
+            np.arccos(np.clip(R[2, 2], -1.0, 1.0)))), 1), "off_table": bool(p[2] < -0.03)}
+    n_ok = sum(1 for g in res if g["ok"])
+    status = "success" if res and n_ok == len(res) else ("partial" if n_ok else "fail")
+    return {"status": status, "goals": res, "n_ok": n_ok, "n_goals": len(res), "held": held, "objects": objs,
+            "scene": sc.sid}
+
+
+def eval_hook(model, data):
+    """physics side: answer an eval request file (<eval file>.done = evaluate(...)); scene from the environment"""
+    f = eval_file()
+    if not os.path.exists(f):
+        return None
+    try:
+        with open(f) as fh:
+            req = json.load(fh)
+        os.remove(f)
+    except Exception:
+        return None
+    goals = req.get("goals")
+    out = evaluate(model, data, scene_from_env(), goals=[tuple(g) for g in goals] if goals else None)
+    out.update(t=time.time(), id=req.get("id"))
+    with open(f + ".done", "w") as fh:
+        json.dump(out, fh)
+    print(f"[V4.11 EVAL] {req.get('id')}: {out['status']} ({out['n_ok']}/{out['n_goals']})", flush=True)
+    return out
+
+
+def request_eval(goals=None, rid=None) -> str:
+    """console side: ask the running simulation for the truth check (answer: <eval file>.done)"""
+    f = eval_file()
+    os.makedirs(os.path.dirname(f), exist_ok=True)
+    try:
+        os.remove(f + ".done")
+    except OSError:
+        pass
+    tmp = f + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump({"t": time.time(), "id": rid, "goals": [list(g) for g in goals] if goals else None}, fh)
+    os.replace(tmp, f)
+    return f
 
 
 def request_reset() -> str:

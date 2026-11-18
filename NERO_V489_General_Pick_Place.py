@@ -30,11 +30,12 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-VERSION = "V4.10.3"
+VERSION = "V4.11"
 MARKER_V493 = "V4.9.3 TASK-START RECOVERY + SAFETY STOP + SINGULARITY + EGG ROLL"
 MARKER_V4101 = "V4.10.1 PITCH CHANGE + RIGID TWIN HOLD + BRIDGE FIX"
 MARKER_V4102 = "V4.10.2 RIGID WELD HOLD IN THE GUI SIMULATION"
 MARKER_V4103 = "V4.10.3 SOFT WELD + SHORT BOX WALLS + AUTO RESET AFTER A BLOW-UP"
+MARKER_V411 = "V4.11 FACTS ONLY + SIM DOE TASK STATS"
 MARKER_V491 = "V4.9.1 DENSE LINES + REACHABILITY"
 MARKER_V492 = "V4.9.2 REAL-LIKE PERCEPTION + LLM EVAL + COMPACT OUTPUTS"
 MARKER = "V4.8.9 GENERAL PICK&PLACE CHUNK LLM"
@@ -321,12 +322,14 @@ class GeneralPickPlaceSkills:
         info = {
             "dropped_object": dropped_id,
             "gripper_state": st,
-            "note": f"{dropped_id} is no longer held by the gripper (dropped during safety stop or contact). Call perceive_objects to inspect current object positions and uprightness.",
+            "note": f"{dropped_id} is no longer held: the gripper hold flag read just now is off (released by a safety "
+                    "stop or lost contact); its pose after the drop has not been measured",       # V4.11 facts only
         }
         self.io.emit(f"[WARN] [V4.8.10 GENERAL] {dropped_id} is no longer in the gripper (hold_active=False) -> state synced")
         return info
 
     def _res(self, tool, ok, ver=None, reason=None, nxt=None, **extra):
+        """V4.11 FACTS ONLY: nxt (the old recommended_next_actions list) is no longer sent to the LLM"""
         v = dict(ver or {})
         if reason:
             v["reason"] = reason
@@ -335,7 +338,6 @@ class GeneralPickPlaceSkills:
             "tool": tool,
             "state_after": {"stage": self.stage, "held_object": self.held},
             "physical_verification": v,
-            "recommended_next_actions": list(nxt or []),
         }
         if reason:
             out["reason"] = reason
@@ -726,12 +728,12 @@ class GeneralPickPlaceSkills:
         if self.held or tool == "execute_place_chunk":
             facts["object_still_held"] = held
             if held is False:
-                facts["note_hold"] = ("the object is no longer held (the safety recovery released it); "
-                                      "look before doing anything else")
+                facts["note_hold"] = ("the object is no longer held (the safety recovery released it); its pose "
+                                      "after the release has not been measured")              # V4.11 facts only
                 self.held = None
                 self.stage = "OBSERVED"
-        facts["note"] = ("the safety guard stopped the arm; no further motion was attempted by this tool. The "
-                         "simulator may need STOP+RECOVER (the next tool does it) or a restart if motions keep failing")
+        facts["note"] = ("the safety guard stopped the arm; this tool attempted no further motion; the next motion "
+                         "tool runs STOP+RECOVER before it moves")                                  # V4.11 facts only
         self.sim_suspect = True
         self.io.emit(f"[WARN] [V4.9.3 GENERAL] {tool}: safety stop at {step} -> stopped (no fallback motion)")
         return self._res(tool, False, facts, reason="SAFETY_STOP", nxt=["perceive_objects", "verify_and_park_chunk"])
@@ -1355,8 +1357,8 @@ GENERAL_TOOLS = [
 GENERAL_SYSTEM_INSTRUCTIONS = """You are the planner of a 7-DOF NERO arm with a parallel two-finger gripper doing pick-and-place tasks given in natural language.
 There are no object-specific skills or rules: every grasp and place parameter is your decision, made from the measured facts the tools return.
 - perceive_objects gives measured geometry (center, top, bottom, footprint axes, cross sections, side profile, open cavity, relations) and the gripper's geometry. Labels come from the detector and may be wrong; the geometry is measured.
-- preview_grasp, plan_grasp_chunk and plan_place_chunk never move the arm. Use them to check parameters before moving: they report collisions, where each pad would touch, how far an object would be pushed, clearances and rejections.
-- execute_grasp_chunk and execute_place_chunk move the arm and report what was measured. If a result differs from what you expected, use the measurements to decide the next step.
+- preview_grasp, plan_grasp_chunk and plan_place_chunk never move the arm; they report collisions, where each pad would touch, how far an object would be pushed, clearances and rejections.
+- execute_grasp_chunk and execute_place_chunk move the arm and report what was measured.
 - If a required object is not detected, do not invent coordinates; report what is missing.
 - Finish with verify_and_park_chunk and report the outcome from its relations; do not claim more than it measured."""
 
@@ -1387,6 +1389,10 @@ def run_general_pick_place(io, task, mode="execute", agent=None, llm_cfg=None, r
     agent._last_response_id = None
     emit = io.emit
     rounds, steps, final = 0, 0, ""
+    u0 = dict(getattr(agent, "_usage_totals", {}) or {})
+    TASK_STATS.clear()                       # V4.11 DOE: what happened in this task (read by the sim bridge)
+    TASK_STATS.update(task=str(task), model=model, effort=effort, mode=mode, t_start=time.time(), rounds=0, steps=0,
+                      tools=[], safety_stops=0, error=None, final="", ok=None, stage=None)
     try:
         ok, key_status = agent.api_key_status(api_key, model)
         if not ok:
@@ -1440,6 +1446,7 @@ def run_general_pick_place(io, task, mode="execute", agent=None, llm_cfg=None, r
                     res = {"ok": True, "dry_run": True, "tool": name, "note": f"skipped physical execution in mode={mode}"}
                 else:
                     res = sk.run_tool(name, args)
+                _stat_tool(name, res, steps, rounds)
                 outs.append({
                     "type": "function_call_output",
                     "call_id": str(call.get("call_id", "")),
@@ -1469,10 +1476,32 @@ def run_general_pick_place(io, task, mode="execute", agent=None, llm_cfg=None, r
                 io.go_home("V4.8.9 hover back")
 
         ok_final = (sk.stage == "VERIFIED") if mode == "execute" else bool(sk.grasp_plan or sk.cam)
+        TASK_STATS.update(ok=bool(ok_final), final=str(final or "")[:2000])
         return {"ok": ok_final, "final": final, "skills": sk}
+    except BaseException as exc:
+        TASK_STATS["error"] = f"{type(exc).__name__}: {str(exc)[:400]}"
+        raise
     finally:
         with agent._lock:
             agent._running = False
+        u1 = dict(getattr(agent, "_usage_totals", {}) or {})
+        TASK_STATS.update(t_end=time.time(), rounds=rounds, steps=steps, stage=getattr(sk, "stage", None),
+                          held=getattr(sk, "held", None),
+                          usage={k: (u1.get(k, 0) or 0) - (u0.get(k, 0) or 0) for k in
+                                 ("requests", "input_tokens", "output_tokens", "cached_input_tokens", "estimated_usd")})
+
+
+TASK_STATS: Dict[str, Any] = {}             # V4.11 DOE: the last general pick & place task of this process
+
+
+def _stat_tool(name, res, step, rnd):
+    """V4.11 DOE: one tool call -> TASK_STATS (name, ok, reason, safety stops)"""
+    r = res if isinstance(res, dict) else {}
+    pv = r.get("physical_verification") or {}
+    n_s = int((pv.get("safety_events") or {}).get("count") or 0)
+    TASK_STATS.setdefault("tools", []).append({"step": step, "round": rnd, "tool": name, "ok": bool(r.get("ok")),
+                                               "reason": r.get("reason"), "safety_stops": n_s})
+    TASK_STATS["safety_stops"] = int(TASK_STATS.get("safety_stops", 0)) + n_s
 
 
 # ================================================================================================ Sim IO & Entry (V4.8.10)
@@ -2076,6 +2105,12 @@ BLOWUP_TRIPS = 5                     # V4.10.3 AUTO RESET: more safety stops tha
 _V4103_BLOWUP = {"pending": False, "why": ""}
 
 
+def request_object_reset(why):
+    """V4.11 DOE: put the table objects back at the next task start (arm at home first), like the V4.10.3 auto reset"""
+    _V4103_BLOWUP["pending"] = True
+    _V4103_BLOWUP["why"] = str(why)
+
+
 def _auto_reset_objects(io):
     """V4.10.3 AUTO RESET: after a blow-up (objects flung, left lying next to the arm) put the table objects back to
     their start poses at the next task start, with the arm at home; the same request as the console's reset button"""
@@ -2090,7 +2125,7 @@ def _auto_reset_objects(io):
         ok, msg = io.reset_objects()
     except Exception as exc:
         ok, msg = False, str(exc)[:160]
-    io.emit(f"[{'INFO' if ok else 'WARN'}] [V4.10.3 AUTO RESET] after the blow-up ({why}): {msg}")
+    io.emit(f"[{'INFO' if ok else 'WARN'}] [V4.10.3 AUTO RESET] ({why}): {msg}")
     return bool(ok)
 
 

@@ -1,3 +1,29 @@
+## V4.11 (2026-11-18) — 仿真 DOE 页；工具结果只剩事实
+
+用户：「按你的建议做吧：1. 做 Sim DOE 页……2. 清掉残留的建议性文字」。后端没改（整文件哈希与 V4.10.2 相同）。
+
+- **只给事实**（`NERO_V489_General_Pick_Place.py`）：
+  - 所有工具结果去掉 `recommended_next_actions`（原来每个结果都附一串「下一步建议调用的工具」）。
+  - 物体掉落时的 note 不再说「Call perceive_objects to inspect…」，改为写明是怎么测到的（夹持标志刚读到为 off），以及掉落后的位置还没有测量。
+  - 安全停止的 note 去掉「look before doing anything else」和「可能需要重启仿真」，改为写明事实：这个工具没有再动，下一个运动工具会先做 STOP+RECOVER。
+  - 系统提示去掉「Use them to check parameters before moving」和「If a result differs…use the measurements to decide the next step」，只保留工具做什么，以及「不编造坐标」「不声称超出测量的结论」两条诚实规则。
+  - plan / hover 模式的模式说明保留（它们是模式约束，不是策略）。
+- **仿真 DOE 页**（新 `NERO_V411_Sim_DOE.py`，在控制台「仿真 (MuJoCo)」右边，用法见 README 顶部）：
+  - 因子：任务行（场景 + 任务句 + 结构化目标）× LLM 设置（提供方 / 模型 / 思考档位）× 重复次数；可选场景内随机顺序（固定种子，可复现）。
+  - 一个场景启动一次仿真，走控制台自己的启动流程（DOE 指定家居布局，不弹对话框）。要等到桥接的 ready 文件和启动脚本的 SYSTEM READY 都出现才开始。
+  - 每次运行：经任务文件通道发任务（带本次的 LLM 设置、`reset_objects`）→ 等 outbox → 物理进程做真值检查 → 记录。
+  - 判定只看仿真真值（目标全部达成 = 成功），不看 LLM 自己的说法。分类：success / partial / ended_not_done / claimed_but_not_done / step_budget / safety_stops；无法判定的单列（blowup / timeout / sim_crash / not_started / llm_error / stopped / no_eval），不算进成功率。
+  - 报告：成功率 + Wilson 95% 区间（总体 / 按 LLM / 按任务 / 任务 × LLM）、分类计数、未成功运行里最后一个失败的工具调用、每次运行一行；另有 csv / jsonl / plan / 日志。
+  - 超时先发 STOP AGENT，90 s 内没有回应就重启仿真；崩溃或发散后，下一次运行用新启动的仿真。可以暂停（本次跑完后）和停止。
+- **仿真侧配套**：
+  - `NERO_V410_Household_Scenes`：`parse_goals` / `evaluate` / `eval_hook` / `request_eval`，真值检查挂在物体复位的同一个钩子上（物理进程）。结果包括每个目标、被夹的物体、每个物体的位置 / 倾角 / 是否掉下桌。
+  - `NERO_V489`：`TASK_STATS`，记录每个任务的工具调用、失败原因、安全停止、轮数、tokens 和异常；`request_object_reset()`。
+  - `NERO_V410_Sim_Bridge`：任务消息可以带 `llm`（运行前写进只读的 SimAgent 面板；DOE 一律执行，不用 dry run）和 `reset_objects`；`stop_<id>.json` 在任务运行中也会处理；outbox 增加 `llm` 和 `stats`；`ready.json`。
+  - `NERO_V410_Console_Sim.LLMSettingsPanel.keys_env`：给出 DOE 用到的每个提供方的 key（本次输入的或钥匙串里的），每个只放进它自己的环境变量。
+- **控制台**：`on_sim_start(auto_spec, extra_env)` / `on_sim_stop(ask)` 供 DOE 调用；DOE 启动时如果有残余进程，自动关掉并写进日志，不弹对话框。手动启动的流程不变。
+- **没在真实 GUI 里跑过**：容器里起不了后端（ROS / MoveIt）。测试是用假仿真走完整个控制台流程：真实控制台窗口 + 假启动脚本，模拟 ready、任务通道和真值检查。
+- 测试：新 `tests/test_v4_11.py`（D1–D7）、`tests/test_v4_11_gui.py`、`tests/test_v4_11_console_gui.py`。
+
 ## V4.10.3 (2026-11-17) — weld 稍软；收纳盒 / 托盘墙段变短；仿真发散后自动复位
 
 用户：「先做前三项（不动后端），发一个 V4.10.3 让我再测。」后端没改（整文件哈希与 V4.10.2 相同，test_v4_10_3 S4 检查）。

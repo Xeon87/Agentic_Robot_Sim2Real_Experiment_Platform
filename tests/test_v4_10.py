@@ -297,7 +297,7 @@ class V410(unittest.TestCase):
         with open(os.path.join(HERE, "VERSION")) as f:
             v = f.read().strip()
         self.assertEqual((v, RR.VERSION, GP.VERSION), (C.VERSION, C.VERSION, C.VERSION))
-        self.assertIn(v, ("V4.10", "V4.10.1", "V4.10.2", "V4.10.3"))
+        self.assertIn(v, ("V4.10", "V4.10.1", "V4.10.2", "V4.10.3", "V4.11"))
         self.assertEqual((HS.MARKER, CS.MARKER, B.MARKER), ("V4.10 HOUSEHOLD SCENES",
                                                             "V4.10 CONSOLE LLM SETTINGS + SCENE DIALOG", "V4.10 SIM BRIDGE"))
 
