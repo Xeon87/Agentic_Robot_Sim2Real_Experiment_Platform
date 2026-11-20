@@ -120,6 +120,7 @@ grep -qF 'V4.11 FACTS ONLY + SIM DOE TASK STATS' NERO_V489_General_Pick_Place.py
 grep -qF 'V4.11.1 DOE MODEL PICKER + FONT-SIZED ROWS' NERO_V411_Sim_DOE.py && grep -qF 'def add_picked' NERO_V411_Sim_DOE.py || { echo "[FAIL] V4.11.1 markers missing"; exit 1; }
 grep -qF 'V4.11.2 DOE FINAL-STATE SNAPSHOTS + RUN TRACE' NERO_V411_Sim_DOE.py && grep -qF 'def snapshot_state' NERO_V410_Household_Scenes.py && grep -qF 'V4.11.2 DOE SNAPSHOT' NERO_V411_Snapshot.py || { echo "[FAIL] V4.11.2 markers missing"; exit 1; }
 grep -qF 'V4.11.3 SAFETY-STOP RECORD + SIM PYTHON FOR PICTURES + RETRY + END-TO-END RATE' NERO_V411_Sim_DOE.py && grep -qF 'def safety_hook' NERO_V410_Household_Scenes.py && grep -qF 'def _record_safety_moment' NERO_V489_General_Pick_Place.py || { echo "[FAIL] V4.11.3 markers missing"; exit 1; }
+grep -qF 'H1 V2 MOTION CHUNKS + ANY APPROACH DIRECTION + STABILITY + LIFT PROBE' NERO_V489_General_Pick_Place.py && grep -qF 'def plan_motion_chunk' NERO_V489_General_Pick_Place.py && grep -qF 'def sweep_collisions' NERO_V49_Geometry.py && grep -qF '"upright_on"' NERO_V410_Household_Scenes.py || { echo "[FAIL] V4.12 markers missing"; exit 1; }
 grep -qF 'V4.8.6 STARTUP GRIPPER + CAMERAS + YMODEL + XFT CRASH FIX' NERO_V312_Console.py && grep -qF 'V4.8.6 CAMERA YMODEL MENU + STARTUP DEFAULTS' NERO_V472_Wrist_Calib.py || { echo "[FAIL] V4.8.6 markers missing"; exit 1; }
 grep -qF 'V4.8.7 CUROBO REAL IK + SMOLVLA VRAM RELEASE' NERO_V487_CuRobo_IK.py && grep -qF 'ensure_curobo_server' NERO_V313_Real_Robot.py && grep -qF '_release_curobo_vram' NERO_V4_Console_Tab.py || { echo "[FAIL] V4.8.7 markers missing"; exit 1; }
 grep -qF 'V3.81 YOLOE TRAIN' NERO_V381_Yolo_Train.py && grep -qF 'V3.81 PROFILE FILES + TRAIN PAGE' NERO_V379_Camera_Lab.py && grep -qF 'NERO_V381_Yolo_Train.py' start_nero.sh || { echo "[FAIL] V3.81 train marker missing"; exit 1; }
@@ -236,4 +237,5 @@ python3 tests/test_v4_10_3.py 2>&1 | tail -1   # V4.10.3 soft weld, short box wa
 python3 tests/test_v4_11.py 2>&1 | tail -1   # V4.11 facts only, truth check, task stats, bridge, DOE logic + runner
 python3 tests/test_v4_11_2.py 2>&1 | tail -1   # V4.11.2 final-state pictures + run trace
 python3 tests/test_v4_11_3.py 2>&1 | tail -1   # V4.11.3 sim Python for pictures, safety-stop records, retry, end-to-end rate
+python3 tests/test_v4_12.py 2>&1 | tail -1   # V4.12 = H1 V2 motion chunks, any approach direction, stability, lift probe, H6 / H7
 python3 tests/test_v4_6_1_gui.py | tail -1   # skips without tkinter / DISPLAY

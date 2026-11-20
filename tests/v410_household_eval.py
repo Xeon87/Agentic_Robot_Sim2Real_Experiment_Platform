@@ -40,7 +40,7 @@ def episode(spec, noise=None, verbose=False):
         outs.append({k: v for k, v in out.items() if k != "relations"})
         io.step(800)
     io.step(1500)
-    held = [f"obj_{io.hold}"] if getattr(io, "hold", None) else []
+    held = HS.held_bodies(io.m, io.d)                              # V4.12: the active hold equalities (was obj_<hold>)
     st = HS.goal_status(io.m, io.d, sc, held=held)
     n_ok = sum(g["ok"] for g in st)
     status = "success" if n_ok == len(st) else ("partial" if n_ok else "fail")

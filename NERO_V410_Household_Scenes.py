@@ -52,9 +52,17 @@ X_RANGE_CONT = (-0.50, -0.27)     # containers: only their opening has to be rea
 Y_RANGE = (-0.21, 0.21)
 GAP_M = 0.030                     # free space between footprints (room for the fingers)
 
-GRASPABLE = ("remote", "apple", "bottle", "mug", "bowl")
-CONTAINERS = ("bowl", "mug", "tray", "storage_box")
-MASS = {"remote": 0.12, "apple": 0.15, "bottle": 0.25, "mug": 0.30, "bowl": 0.30, "tray": 0.40, "storage_box": 0.35}
+GRASPABLE = ("remote", "apple", "bottle", "mug", "bowl", "tall_bottle", "book")
+CONTAINERS = ("bowl", "mug", "tray", "storage_box", "mat")
+MASS = {"remote": 0.12, "apple": 0.15, "bottle": 0.25, "mug": 0.30, "bowl": 0.30, "tray": 0.40, "storage_box": 0.35,
+        "tall_bottle": 0.35, "book": 0.30, "mat": 0.80}
+# V4.12 H1 V2 PRIMITIVE OBJECTS (no scan): a standing slim bottle (body / shoulder / neck / cap cylinders), a book (too
+# wide for the 70 mm stroke and only 30 mm high) and a thin target mat
+TALL_BOTTLE = {"r": 0.029, "body_h": 0.175, "shoulder_h": 0.205, "r_shoulder": 0.020, "r_neck": 0.0135, "h": 0.255,
+               "r_cap": 0.0155, "cap_h": 0.018}
+BOOK = {"hx": 0.075, "hy": 0.055, "h": 0.030}
+MAT = {"hx": 0.090, "hy": 0.090, "h": 0.003, "bevel": 0.008}   # V4.12: bevelled edge (20 deg), a pushed book rides up
+PRIMITIVE = ("remote", "tall_bottle", "book", "mat")
 ROLL_FRICTION = "1.0 0.02 0.005"      # condim 6 (V4.9.3 egg lesson): rolling objects stop
 FRICTION = "1.0 0.02 0.002"
 CONTACT = 'solref="0.004 1" solimp="0.95 0.99 0.0005"'
@@ -88,6 +96,12 @@ def dims(kind) -> dict:
     """the sizes the scene / success check use (m); computed from the scans"""
     if kind == "remote":
         return {"hx": 0.0875, "hy": 0.024, "h": 0.020}
+    if kind == "tall_bottle":
+        return dict(TALL_BOTTLE)
+    if kind == "book":
+        return dict(BOOK)
+    if kind == "mat":
+        return dict(MAT, t=0.0, floor=MAT["h"], hx_bot=MAT["hx"], hy_bot=MAT["hy"])
     sx, sy, h = _meta(kind)["size_m"]
     if kind == "apple":
         return {"r": max(sx, sy) / 2.0, "h": h}
@@ -118,6 +132,8 @@ def footprint(kind) -> Tuple[float, float, float, float]:
         return 0.0, 0.0, d["r"], d["r"]
     if kind == "bottle":
         return 0.0, 0.0, d["hx"], d["r"]
+    if kind == "tall_bottle":
+        return 0.0, 0.0, d["r"], d["r"]
     if kind == "mug":
         sx, sy, _h = _meta("mug")["size_m"]
         return -d["axis_x"], -d["axis_y"], sx / 2.0, sy / 2.0
@@ -131,7 +147,13 @@ def assets_xml(kinds, visual=True) -> str:
     """mesh / texture / material assets of these kinds (absolute paths: the backend writes its temp MJCF elsewhere)"""
     out = []
     for k in sorted(set(kinds)):
-        if k == "remote":
+        if k == "mat":                                            # V4.12: bevelled plate (convex mesh, inline)
+            hx, hy, h, bv = MAT["hx"], MAT["hy"], MAT["h"], MAT["bevel"]
+            v = [(sx * hx, sy * hy, 0.0) for sx in (-1, 1) for sy in (-1, 1)]
+            v += [(sx * (hx - bv), sy * (hy - bv), h) for sx in (-1, 1) for sy in (-1, 1)]
+            out.append(f'<mesh name="hh_mat_plate" vertex="{" ".join(f"{c:.5f}" for p_ in v for c in p_)}"/>')
+            continue
+        if k in PRIMITIVE:
             continue
         d = os.path.join(ASSET_DIR, k)
         if visual:
@@ -244,6 +266,35 @@ def body_xml(kind, oid, x, y, yaw_deg=0.0, visual=True) -> str:
         if visual:
             g.append(_visual(kind, name, (0, 0, -d["h"])))
         inertial = f'<inertial pos="0 0 {-0.7 * d["h"]:.5f}" mass="{m}" diaginertia="{_f(8e-4, 8e-4, 1.4e-3)}"/>'
+    elif kind == "tall_bottle":                                  # V4.12: origin = bottom centre, standing
+        z = 0.0
+        tb = d
+        glass = 'rgba="0.20 0.42 0.25 1"'
+        segs = ((tb["r"], 0.0, tb["body_h"]), ((tb["r"] + tb["r_shoulder"]) / 2.0, tb["body_h"], (tb["body_h"] + tb["shoulder_h"]) / 2.0),
+                (tb["r_shoulder"], (tb["body_h"] + tb["shoulder_h"]) / 2.0, tb["shoulder_h"]),
+                (tb["r_neck"], tb["shoulder_h"], tb["h"] - tb["cap_h"]), (tb["r_cap"], tb["h"] - tb["cap_h"], tb["h"]))
+        for i, (r_, z0, z1) in enumerate(segs):
+            col = 'rgba="0.85 0.80 0.70 1"' if i == 4 else glass
+            g.append(f'<geom name="{name}_part{i}" type="cylinder" pos="0 0 {(z0 + z1) / 2:.5f}" size="{_f(r_, (z1 - z0) / 2)}" '
+                     f'{col} friction="{FRICTION}" condim="4" {CONTACT} mass="0"/>')
+        if visual:
+            g.append(f'<geom name="{name}_label" type="cylinder" pos="0 0 {0.55 * tb["body_h"]:.5f}" '
+                     f'size="{_f(tb["r"] + 0.0004, 0.035)}" rgba="0.92 0.88 0.75 1" contype="0" conaffinity="0" group="1" mass="0"/>')
+        inertial = (f'<inertial pos="0 0 {0.36 * tb["body_h"]:.5f}" mass="{m}" '
+                    f'diaginertia="{_f(1.6e-3, 1.6e-3, 1.5e-4)}"/>')
+    elif kind == "book":                                         # V4.12: origin = centre
+        z = d["h"] / 2.0
+        g.append(f'<geom name="{name}_body" type="box" size="{_f(d["hx"], d["hy"], d["h"] / 2)}" rgba="0.62 0.18 0.16 1" '
+                 f'friction="{FRICTION}" condim="4" {CONTACT} mass="0"/>')
+        if visual:
+            g.append(f'<geom name="{name}_pages" type="box" pos="0.0015 0 0" size="{_f(d["hx"] - 0.001, d["hy"] + 0.0004, d["h"] / 2 - 0.003)}" '
+                     f'rgba="0.95 0.93 0.86 1" contype="0" conaffinity="0" group="1" mass="0"/>')
+        inertial = f'<inertial pos="0 0 0" mass="{m}" diaginertia="{_f(3.3e-4, 5.9e-4, 8.7e-4)}"/>'
+    elif kind == "mat":                                          # V4.12: thin target mat, origin = bottom centre
+        z = 0.0
+        g.append(f'<geom name="{name}_floor" type="mesh" mesh="hh_mat_plate" '
+                 f'rgba="0.16 0.33 0.62 1" friction="{FRICTION}" condim="4" {CONTACT} mass="0"/>')
+        inertial = f'<inertial pos="0 0 {d["h"] / 2:.5f}" mass="{m}" diaginertia="{_f(2e-3, 2e-3, 4e-3)}"/>'
     else:                                                        # tray / storage box: origin = floor centre
         z = 0.0005
         hx, hy = (d["hx"] + d["hx_bot"]) / 2.0, (d["hy"] + d["hy_bot"]) / 2.0
@@ -296,7 +347,7 @@ class HScene:
 
 
 def _task_text(goals) -> str:
-    parts = [f"put {s} {r} {t}" for s, r, t in goals]
+    parts = [f"put {s} upright on {t}" if r == "upright_on" else f"put {s} {r} {t}" for s, r, t in goals]
     s = "; then ".join(parts)
     return s[0].upper() + s[1:] + "."
 
@@ -323,6 +374,17 @@ FIXED = {
     "H5": {"label": "H5 关系：先把马克杯放到托盘上，再把苹果放进马克杯",
            "objects": [("mug_1", "mug"), ("apple_1", "apple"), ("tray_1", "tray")],
            "goals": [("mug_1", "onto", "tray_1"), ("apple_1", "into", "mug_1")], "seed": 505, "gap": GAP_M},
+    # V4.12 H1 V2 scenes (side grasp / pushing are possible, nothing in the task says how)
+    "H6": {"label": "H6 竖立的细长瓶子（高 255 mm）：放到托盘上并保持竖直",
+           "objects": [("tall_bottle_1", "tall_bottle"), ("tray_1", "tray"), ("apple_1", "apple")],
+           "goals": [("tall_bottle_1", "upright_on", "tray_1")], "seed": 606, "gap": 0.045,
+           # V4.12: placed by hand - the far half of the table, where the arm reaches with the fingers horizontal
+           # (checked with IK: grasp points x <= -0.46 m); the random placement uses the top-down band
+           "placed": [("tall_bottle_1", "tall_bottle", -0.53, 0.10, 0.0), ("tray_1", "tray", -0.53, -0.15, 0.0),
+                      ("apple_1", "apple", -0.36, 0.20, 30.0)]},
+    "H7": {"label": "H7 书（150×110×30 mm）比夹爪行程宽：把书移到垫子上",
+           "objects": [("book_1", "book"), ("mat_1", "mat"), ("mug_1", "mug")],
+           "goals": [("book_1", "onto", "mat_1")], "seed": 707, "gap": 0.045},
 }
 
 
@@ -331,6 +393,8 @@ def inner_size(kind) -> Tuple[float, float]:
     d = dims(kind)
     if kind in ("bowl", "mug"):
         return 2 * (d["r_top"] - d["t"]), 2 * (d["r_top"] - d["t"])
+    if kind == "mat":                      # V4.12: flat, no rim
+        return 2 * MAT["hx"], 2 * MAT["hy"]
     if kind == "tray":                     # shallow sloped rim: an object lies on the floor and over the slope
         a, b = 2 * (d["hx"] - d["t"]), 2 * (d["hy"] - d["t"])
     else:
@@ -387,11 +451,11 @@ def on_table(it: Item, margin=0.02) -> bool:
 def grasp_z(kind) -> float:
     d = dims(kind)
     return {"remote": 0.012, "apple": 0.036, "bottle": 0.033, "mug": d.get("h", 0.1) - 0.01,
-            "bowl": d.get("h", 0.08) - 0.008}.get(kind, 0.05)
+            "bowl": d.get("h", 0.08) - 0.008, "tall_bottle": 0.10, "book": 0.015}.get(kind, 0.05)
 
 
 def place_z(kind) -> float:
-    return {"bowl": 0.15, "mug": 0.20, "tray": 0.10, "storage_box": 0.15}.get(kind, 0.12)
+    return {"bowl": 0.15, "mug": 0.20, "tray": 0.10, "storage_box": 0.15, "mat": 0.06}.get(kind, 0.12)
 
 
 def reachable(it: Item, as_target=False) -> bool:
@@ -425,10 +489,10 @@ def check_layout(items: List[Item], goals, gap=GAP_M) -> List[str]:
 def _place(objects, rng, gap=GAP_M, tries=80) -> Optional[List[Item]]:
     items = []
     for oid, k in objects:
-        xr = X_RANGE_CONT if k in ("tray", "storage_box") else X_RANGE
+        xr = X_RANGE_CONT if k in ("tray", "storage_box", "mat") else X_RANGE
         for _t in range(tries):
             it = Item(oid, k, float(rng.uniform(*xr)), float(rng.uniform(*Y_RANGE)),
-                      float(rng.choice([0, 90]) if k in ("tray", "storage_box") else rng.uniform(-180, 180)))
+                      float(rng.choice([0, 90]) if k in ("tray", "storage_box", "mat") else rng.uniform(-180, 180)))
             if on_table(it) and not any(overlap(it, o, gap) for o in items):
                 break
         else:
@@ -451,13 +515,22 @@ def fixed_scene(sid: str) -> HScene:
     if sid not in cache:
         spec = FIXED[sid]
         rng = np.random.default_rng(int(spec["seed"]))
-        for _attempt in range(400):
+        if spec.get("placed"):                                    # V4.12: a hand-made layout (no search)
+            items = [Item(*t) for t in spec["placed"]]
+            bad = [i.oid for i in items if not on_table(i)] + [f"{a.oid}/{b.oid}" for n, a in enumerate(items)
+                                                                for b in items[n + 1:] if overlap(a, b, spec["gap"])]
+            if bad:
+                raise RuntimeError(f"{sid}: placed layout invalid: {bad}")
+            cache[sid] = HScene(sid, spec["label"], items, list(spec["goals"]), _task_text(spec["goals"]))
+        for _attempt in range(0 if sid in cache else 400):
             items = _place(spec["objects"], rng, spec["gap"])
             if items and _layout_ok(items, spec["goals"], spec["gap"]):
                 break
         else:
-            raise RuntimeError(f"{sid}: no valid layout")
-        cache[sid] = HScene(sid, spec["label"], items, list(spec["goals"]), _task_text(spec["goals"]))
+            if sid not in cache:
+                raise RuntimeError(f"{sid}: no valid layout")
+        if sid not in cache:
+            cache[sid] = HScene(sid, spec["label"], items, list(spec["goals"]), _task_text(spec["goals"]))
     sc = cache[sid]
     return HScene(sc.sid, sc.label, [Item(i.oid, i.kind, i.x, i.y, i.yaw_deg) for i in sc.items], list(sc.goals),
                   sc.task)
@@ -551,12 +624,23 @@ def goal_status(m, d, scene: HScene, held=()) -> List[dict]:
             okxy = math.hypot(rl[0], rl[1]) <= dt["r_top"] - 0.006
             okz = bot < pt[2] - 0.006
             det = f"{1000 * math.hypot(rl[0], rl[1]):.0f} mm from the {t} axis, bottom {1000 * (bot - pt[2]):+.0f} mm vs rim"
+        elif k == "mat":                                          # V4.12: the source's centre over the mat, lying on it
+            okxy = abs(rl[0]) <= dt["hx"] and abs(rl[1]) <= dt["hy"]
+            okz = abs(bot - (pt[2] + dt["h"])) <= 0.006
+            det = (f"rel ({1000 * rl[0]:.0f}, {1000 * rl[1]:.0f}) mm on {t} {2000 * dt['hx']:.0f}x{2000 * dt['hy']:.0f}, "
+                   f"bottom {1000 * (bot - pt[2] - dt['h']):+.0f} mm vs its top")
         else:
             okxy = abs(rl[0]) <= dt["hx"] - dt["t"] and abs(rl[1]) <= dt["hy"] - dt["t"]
             okz = bot < pt[2] + dt["h"] + (0.004 if k == "tray" else -0.004) and bot > pt[2] - 0.01
             det = (f"rel ({1000 * rl[0]:.0f}, {1000 * rl[1]:.0f}) mm in {t} {2000 * dt['hx']:.0f}x{2000 * dt['hy']:.0f}, "
                    f"bottom {1000 * (bot - pt[2]):.0f} mm above its floor")
-        out.append({"goal": f"{s} {rel} {t}", "ok": bool(okxy and okz), "detail": det})
+        ok = bool(okxy and okz)
+        if rel == "upright_on":                                   # V4.12: and standing (body z axis near vertical)
+            R = np.asarray(d.body(bs).xmat, float).reshape(3, 3)
+            tilt = float(np.degrees(np.arccos(np.clip(R[2, 2], -1.0, 1.0))))
+            ok = ok and tilt <= 15.0
+            det += f", tilt {tilt:.0f} deg (upright <= 15)"
+        out.append({"goal": f"{s} {rel} {t}", "ok": ok, "detail": det})
     return out
 
 
@@ -664,8 +748,8 @@ def parse_goals(text) -> List[Tuple[str, str, str]]:
     for part in [p.strip() for p in str(text or "").replace("\n", ";").replace("，", ";").replace("；", ";")
                  .replace(",", ";").split(";") if p.strip()]:
         w = part.split()
-        if len(w) != 3 or w[1] not in ("into", "onto"):
-            raise ValueError(f"goal {part!r}: expected '<object> into|onto <target>'")
+        if len(w) != 3 or w[1] not in ("into", "onto", "upright_on"):
+            raise ValueError(f"goal {part!r}: expected '<object> into|onto|upright_on <target>'")
         out.append((w[0], w[1], w[2]))
     return out
 

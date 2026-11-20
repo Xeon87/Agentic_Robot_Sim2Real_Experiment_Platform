@@ -129,7 +129,7 @@ class TestV4810GeneralPickPlaceSim(unittest.TestCase):
         import NERO_V312_Console as C
         import NERO_V343_Scenes as SC
 
-        self.assertIn(C.VERSION, ("V4.8.10", "V4.8.11", "V4.9", "V4.9.1", "V4.9.2", "V4.9.3", "V4.10", "V4.10.1", "V4.10.2", "V4.10.3", "V4.11", "V4.11.1", "V4.11.2", "V4.11.3"))
+        self.assertIn(C.VERSION, ("V4.8.10", "V4.8.11", "V4.9", "V4.9.1", "V4.9.2", "V4.9.3", "V4.10", "V4.10.1", "V4.10.2", "V4.10.3", "V4.11", "V4.11.1", "V4.11.2", "V4.11.3", "V4.12"))
         keys = [k for k, _lbl in C.SIM_SCENES]
         self.assertIn("general_pick_place", keys)
         self.assertIn("general_pick_place", SC.SCENES)

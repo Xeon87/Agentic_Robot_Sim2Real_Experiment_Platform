@@ -38,7 +38,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-VERSION = "V4.11.3"
+VERSION = "V4.12"
 EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")      # same list as the console / SimAgent panels
 MARKER = "V4.11 SIM DOE"
 MARKER_V4111 = "V4.11.1 DOE MODEL PICKER + FONT-SIZED ROWS"

@@ -273,9 +273,9 @@ class V4112(unittest.TestCase):
         import NERO_V489_General_Pick_Place as GP
         self.assertIn("SNAPSHOTS", D.MARKER_V4112)
         self.assertIn("SNAPSHOTS", GP.MARKER_V4112)
-        self.assertIn(SN.VERSION, ("V4.11.2", "V4.11.3"))
+        self.assertIn(SN.VERSION, ("V4.11.2", "V4.11.3", "V4.12"))
         with open(os.path.join(HERE, "VERSION")) as f:
-            self.assertIn(f.read().strip(), ("V4.11.2", "V4.11.3"))
+            self.assertIn(f.read().strip(), ("V4.11.2", "V4.11.3", "V4.12"))
 
 
 if __name__ == "__main__":

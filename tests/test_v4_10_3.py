@@ -175,9 +175,9 @@ class V4103(unittest.TestCase):
 
     def test_s4_versions(self):
         import NERO_V489_General_Pick_Place as GP
-        self.assertIn(GP.VERSION, ("V4.10.3", "V4.11", "V4.11.1", "V4.11.2", "V4.11.3"))
+        self.assertIn(GP.VERSION, ("V4.10.3", "V4.11", "V4.11.1", "V4.11.2", "V4.11.3", "V4.12"))
         self.assertIn("SOFT WELD", GP.MARKER_V4103)
-        self.assertIn(open(os.path.join(HERE, "VERSION")).read().strip(), ("V4.10.3", "V4.11", "V4.11.1", "V4.11.2", "V4.11.3"))
+        self.assertIn(open(os.path.join(HERE, "VERSION")).read().strip(), ("V4.10.3", "V4.11", "V4.11.1", "V4.11.2", "V4.11.3", "V4.12"))
         h = hashlib.sha256(open(os.path.join(HERE, "NERO_V2_7_1_Unified_Backend.py"), "rb").read()).hexdigest()
         self.assertEqual(h, "1a1da2c8c8a9836e335b42444f95b112b0839be9277af62871ba9f19cd24f2fa")
 

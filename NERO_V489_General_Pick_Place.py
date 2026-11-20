@@ -30,7 +30,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-VERSION = "V4.11.3"
+VERSION = "V4.12"
 MARKER_V493 = "V4.9.3 TASK-START RECOVERY + SAFETY STOP + SINGULARITY + EGG ROLL"
 MARKER_V4101 = "V4.10.1 PITCH CHANGE + RIGID TWIN HOLD + BRIDGE FIX"
 MARKER_V4102 = "V4.10.2 RIGID WELD HOLD IN THE GUI SIMULATION"
@@ -38,6 +38,7 @@ MARKER_V4103 = "V4.10.3 SOFT WELD + SHORT BOX WALLS + AUTO RESET AFTER A BLOW-UP
 MARKER_V411 = "V4.11 FACTS ONLY + SIM DOE TASK STATS"
 MARKER_V4112 = "V4.11.2 DOE FINAL-STATE SNAPSHOTS + RUN TRACE"
 MARKER_V4113 = "V4.11.3 SAFETY-STOP RECORD + SIM PYTHON FOR PICTURES + RETRY + END-TO-END RATE"
+MARKER_V412 = "H1 V2 MOTION CHUNKS + ANY APPROACH DIRECTION + STABILITY + LIFT PROBE"
 MARKER_V491 = "V4.9.1 DENSE LINES + REACHABILITY"
 MARKER_V492 = "V4.9.2 REAL-LIKE PERCEPTION + LLM EVAL + COMPACT OUTPUTS"
 MARKER = "V4.8.9 GENERAL PICK&PLACE CHUNK LLM"
@@ -48,6 +49,9 @@ GOOD_PLAN_MARGIN_DEG = 14.0
 SINGULAR_SIGMA_MIN = 0.08     # V4.9.3: smallest singular value of the Jacobian (position / 0.3 m); top-down poses >= 0.24
 DENSE_LINE_MARGIN_DEG = 5.0    # V4.9.1: every straight line the IO will execute, checked point by point (exec >= 4)
 MIN_PLACE_MARGIN_DEG = 5.0     # V4.9: release / above-target (the executed lowering line is checked at >= 4 deg)
+PLACE_MIN_CLEAR_MM = 3.0       # V4.12: at release the held object's bottom stays >= 3 mm above what is below it.
+                               # Evidence: 11-19 DOE 1.0 / 2.0 mm above the box floor -> hit while lowering -> blow-up;
+                               # 5.0 mm (mug into box) and 3.5 mm (cup nested into cup, twin T1) worked
 
 import NERO_V49_Geometry as G49  # noqa: E402
 
@@ -97,6 +101,7 @@ class GeneralPickPlaceSkills:
         self.picked_from: Optional[np.ndarray] = None
         self.grasp_plan: Optional[Dict[str, Any]] = None
         self.place_plan: Optional[Dict[str, Any]] = None
+        self.motion_plan: Optional[Dict[str, Any]] = None          # V4.12 H1 V2
         self.plan: Optional[Dict[str, Any]] = None
         self.cam: Dict[str, Dict[str, Any]] = {}
         self.last_obs: Optional[Dict[str, Any]] = None
@@ -417,6 +422,13 @@ class GeneralPickPlaceSkills:
         if hm is None:
             hm = G49.HeightMap.from_boxes(descs, zt)
         self.hm = hm
+        for d in descs:                                  # V4.12 H1 V2 STABILITY FACTS (estimates)
+            try:
+                st_ = G49.stability(hm, d["object_id"], float(d["bottom_z_m"]))
+                if st_:
+                    d["stability_estimate"] = st_
+            except Exception:
+                pass
         prev_desc = dict(getattr(self, "desc", None) or {})
         self.desc = {d["object_id"]: d for d in descs}
         self.cam = {oid: self._cam_entry(d) for oid, d in self.desc.items()}
@@ -496,16 +508,25 @@ class GeneralPickPlaceSkills:
         pv = G49.preview_grasp(self.hm, self._fingers(), p, float(closing_yaw_deg), float(pitch_deg or 0.0), om, object_id,
                                table_clear_m=self._tip_clear_m(), margin_m=self._meas_margin_m())
         pv["grasp_point_above_table_mm"] = round((p[2] - self.hm.table_z) * 1000.0, 1)
+        sw = G49.sweep_collisions(self.hm, self._fingers(), p, float(closing_yaw_deg), float(pitch_deg or 0.0), om,
+                                  0.08, margin_m=self._meas_margin_m())                    # V4.12 approach sweep
+        pv["approach_last_80mm"] = sw
+        com = self._com_relation(object_id, p)
+        if com:
+            pv["grasp_point_vs_estimated_center_of_mass_mm"] = com
         if float(open_mm) > om:
             pv["open_mm_clipped_to"] = om
         return self._res("preview_grasp", True, pv, nxt=["preview_grasp", "plan_grasp_chunk"])
 
     def plan_grasp_chunk(self, object_id="obj_1", xy_offset_mm=None, grasp_z_offset_from_top_mm=-20.0,
                          closing_yaw_deg=None, yaw_tolerance_deg=0.0, pitch_deg=0.0, open_mm=60.0,
-                         pregrasp_height_mm=80.0, lift_height_mm=100.0, yaw_deg=None, **_):
+                         approach_distance_mm=None, lift_height_mm=100.0, yaw_deg=None, pregrasp_height_mm=None, **_):
+        if approach_distance_mm is None:                 # V4.12: pregrasp_height_mm (V1 name) = the same at pitch 0
+            approach_distance_mm = pregrasp_height_mm if pregrasp_height_mm is not None else 80.0
         args = dict(object_id=object_id, xy_offset_mm=xy_offset_mm, grasp_z_offset_from_top_mm=grasp_z_offset_from_top_mm,
                     closing_yaw_deg=closing_yaw_deg, yaw_tolerance_deg=yaw_tolerance_deg, pitch_deg=pitch_deg,
-                    open_mm=open_mm, pregrasp_height_mm=pregrasp_height_mm, lift_height_mm=lift_height_mm, yaw_deg=yaw_deg)
+                    open_mm=open_mm, approach_distance_mm=approach_distance_mm, lift_height_mm=lift_height_mm,
+                    yaw_deg=yaw_deg)
         r = self._plan_grasp_core(**args)
         if not r.get("ok") and r.get("reason") == "GRASP_PLAN_FAILED":
             try:
@@ -546,14 +567,14 @@ class GeneralPickPlaceSkills:
                 else:
                     st = re.sub(r"^yaw [+-]?\d+: ", "", "; ".join(pv.get("rejects", [])[:1]))[:100] or str(r.get("reason"))
                     st = st.replace("no arm posture (IK) for pregrasp -> grasp -> lift", "no arm posture (IK)")
-                    pre0, lift0 = float(args.get("pregrasp_height_mm") or 80.0), float(args.get("lift_height_mm") or 100.0)
+                    pre0, lift0 = float(args.get("approach_distance_mm") or 80.0), float(args.get("lift_height_mm") or 100.0)
                     if "IK" in st or "line fails" in st or "joint" in st:   # lower pregrasp / lift?
                         for pre, lift in ((min(pre0, 40.0), round(lift0 * 0.6)), (30.0, 40.0)):
                             if time.time() > t_end or (pre >= pre0 and lift >= lift0):
                                 continue
-                            r2 = self._plan_grasp_core(**dict(a_turn, pregrasp_height_mm=pre, lift_height_mm=lift))
+                            r2 = self._plan_grasp_core(**dict(a_turn, approach_distance_mm=pre, lift_height_mm=lift))
                             if r2.get("ok"):
-                                st += f" | plans with pregrasp {pre:.0f} / lift {lift:.0f} mm"
+                                st += f" | plans with approach {pre:.0f} / lift {lift:.0f} mm"
                                 break
                 rows.append({"turn_deg": d, "xy_offset_mm": off, "closing_yaw_deg": round(yaw, 1), "status": st})
         finally:
@@ -563,7 +584,7 @@ class GeneralPickPlaceSkills:
 
     def _plan_grasp_core(self, object_id="obj_1", xy_offset_mm=None, grasp_z_offset_from_top_mm=-20.0,
                          closing_yaw_deg=None, yaw_tolerance_deg=0.0, pitch_deg=0.0, open_mm=60.0,
-                         pregrasp_height_mm=80.0, lift_height_mm=100.0, yaw_deg=None, **_):
+                         approach_distance_mm=80.0, lift_height_mm=100.0, yaw_deg=None, **_):
         if not self.last_obs:
             return self._res("plan_grasp_chunk", False, reason="OBSERVE_FIRST", nxt=["perceive_objects"])
         if object_id not in self.cam:
@@ -612,6 +633,7 @@ class GeneralPickPlaceSkills:
                 continue
             R_gr = G49.grasp_R(gyaw, float(pitch_deg or 0.0))
             p_g, R_g = self.prof.tcp_from_grasp(p_a, R_gr)
+            a_dir = R_gr[:, 2]                           # V4.12: approach direction = z_G (down at pitch 0)
             if tm is not None:
                 T_g = np.eye(4)
                 T_g[:3, :3], T_g[:3, 3] = R_g, p_g
@@ -619,7 +641,7 @@ class GeneralPickPlaceSkills:
                 if not ok_tm:
                     rej.append(f"yaw {gyaw:+.0f}: tool {part_tm} {dz_tm:.0f} mm above the table")
                     continue
-            p_pre = p_g + np.array([0.0, 0.0, float(pregrasp_height_mm) / 1000.0])
+            p_pre = p_g - a_dir * (float(approach_distance_mm) / 1000.0)   # V4.12: along the approach axis
             p_lift = p_g + np.array([0.0, 0.0, float(lift_height_mm) / 1000.0])
             qs, chk = self._solve_chain([("pregrasp", p_pre, R_g), ("grasp", p_g, R_g), ("lift", p_lift, R_g)],
                                         q_seed, deadline)
@@ -629,6 +651,18 @@ class GeneralPickPlaceSkills:
             ok_f, why_f = self._check_path_fence([list(q_seed)] + qs, zt)
             if not ok_f:
                 rej.append(f"yaw {gyaw:+.0f}: {why_f}")
+                continue
+            # V4.12: swept after IK (an unreachable pose fails fast)
+            sw = G49.sweep_collisions(self.hm, fm, p_a, gyaw, float(pitch_deg or 0.0), om,
+                                      float(approach_distance_mm) / 1000.0, margin_m=self._meas_margin_m())
+            if sw["first_collision"]:                    # V4.12 H1 V2: the approach along the tool axis, swept
+                fc = sw["first_collision"]
+                rej.append(f"yaw {gyaw:+.0f}: approach: {fc['part']} hits {fc['object']} ({fc['depth_mm']} mm) "
+                           f"{fc['distance_before_grasp_pose_mm']} mm before the grasp pose")
+                continue
+            if sw["lowest_gripper_point_above_table_mm"] < self._tip_clear_m() * 1000.0:
+                rej.append(f"yaw {gyaw:+.0f}: approach: lowest gripper point {sw['lowest_gripper_point_above_table_mm']} mm "
+                           f"above the table (the safety limit is {self._tip_clear_m() * 1000.0:.0f} mm)")
                 continue
             m = float(chk.get("min_margin_deg") or 0.0)
             if m < MIN_PLAN_MARGIN_DEG:
@@ -643,7 +677,8 @@ class GeneralPickPlaceSkills:
             qs = [qs[0], qd[-1], ql[-1]]
             m = min(m, float(chd.get("min_margin_deg") or 99.0), float(chl.get("min_margin_deg") or 99.0))
             chk = dict(chk, min_margin_deg=round(m, 1))
-            cand = {"yaw": gyaw, "pv": pv, "qs": qs, "chk": chk, "p_g": p_g, "R_g": R_g, "p_pre": p_pre, "p_lift": p_lift}
+            cand = {"yaw": gyaw, "pv": pv, "qs": qs, "chk": chk, "p_g": p_g, "R_g": R_g, "p_pre": p_pre, "p_lift": p_lift,
+                    "a": a_dir}
             if best is None or m > float(best["chk"].get("min_margin_deg") or 0.0):
                 best = cand
             if m >= GOOD_PLAN_MARGIN_DEG:
@@ -666,6 +701,9 @@ class GeneralPickPlaceSkills:
             "min_joint_margin_deg": chk.get("min_margin_deg"),
             "ik_solver": chk.get("ik_solver", "fast_ik"),
             "lift_height_mm": float(lift_height_mm),
+            "approach_direction_xyz": [round(float(v), 3) for v in best["a"]],
+            "approach_distance_mm": float(approach_distance_mm),
+            "_approach": best["a"],
             "_wps": {"pregrasp": (best["p_pre"], best["R_g"]), "grasp": (best["p_g"], best["R_g"]),
                      "lift": (best["p_lift"], best["R_g"])},
             "_q": {"pregrasp": qs[0], "grasp": qs[1], "lift": qs[2]},
@@ -678,6 +716,9 @@ class GeneralPickPlaceSkills:
         self.stage = "GRASP_PLANNED"
         out = {k: v for k, v in chosen.items() if not k.startswith("_")}
         out["finger_preview"] = best["pv"]
+        com = self._com_relation(object_id, p_a)
+        if com:
+            out["grasp_point_vs_estimated_center_of_mass_mm"] = com
         if rej:
             out["other_yaws_rejected"] = rej[:6]
         return self._res("plan_grasp_chunk", True, out, nxt=["execute_grasp_chunk"])
@@ -691,6 +732,66 @@ class GeneralPickPlaceSkills:
             return None if p is None else np.asarray(p, float)
         except Exception:
             return None
+
+    def _obj_in_tcp(self, oid):
+        """V4.12: (position, rotation) of the object in the TCP frame now, from the IO's object pose (None if the IO
+        cannot measure it)"""
+        f = getattr(self.io, "object_pose", None)
+        if f is None or not hasattr(self.io, "tcp_pose"):
+            return None
+        try:
+            po, Ro = f(oid)
+            pt, qt = self.io.tcp_pose()
+            Rt = self.CK.quat_xyzw_to_R(qt) if hasattr(self.CK, "quat_xyzw_to_R") else None
+            if po is None or Rt is None:
+                return None
+            dw = np.asarray(po, float) - np.asarray(pt, float)
+            return Rt.T @ dw, Rt.T @ np.asarray(Ro, float), dw
+        except Exception:
+            return None
+
+    def _com_relation(self, oid, p_grasp):
+        """V4.12: the grasp point relative to the object's estimated centre of mass (an estimate, see legend)"""
+        st = ((self.desc or {}).get(oid) or {}).get("stability_estimate")
+        if not st:
+            return None
+        c = np.asarray(st["estimated_center_of_mass_xyz_m"], float)
+        p = np.asarray(p_grasp, float)
+        return {"grasp_point_above_com": round(float(p[2] - c[2]) * 1000.0, 1),
+                "horizontal_offset_from_com": round(float(np.linalg.norm(p[:2] - c[:2])) * 1000.0, 1)}
+
+    def _center_on_one_pad(self, clamp, p_g, R_g, force_n, oid, step_mm=0.5, max_mm=4.0):
+        """V4.12 H1 V2 (simulation only): the simulated gripper closes with ~0.1 N until BOTH pads touch (backend
+        force logic), so a grasp point 1 mm off the object's axis leaves one pad touching and the other short of
+        the object, and a standing object is not pushed.  Then move the gripper along the closing line toward the
+        touching pad in small steps until both pads touch (stop condition), and clamp again.  The real gripper
+        closes by position and needs no such step.  Pad 1 ("left") is on the +y side of the grasp frame."""
+        if not self.is_sim or bool(clamp.get("hold_active")):
+            return None
+        lt, rt = bool(clamp.get("contact_left")), bool(clamp.get("contact_right"))
+        if lt == rt:
+            return None
+        gp = self.grasp_plan or {}
+        y_w = G49.grasp_R(float(gp.get("grasp_yaw_deg") or 0.0), float(gp.get("pitch_deg") or 0.0))[:, 1]
+        sgn = 1.0 if lt else -1.0
+        q = self.CK.R_to_quat_xyzw(R_g)
+        n = int(round(max_mm / step_mm))
+        st = clamp
+        for k in range(1, n + 1):
+            p = np.asarray(p_g, float) + sgn * y_w * (step_mm * k / 1000.0)
+            r = self.io.move_line(f"V4.12 center {oid}", p, q, 0.004)
+            if not r.get("ok"):
+                return {"shift_mm": round(step_mm * (k - 1), 1), "both_pads_touched": False, "clamp": st,
+                        "stopped": str(r.get("reason") or r.get("why") or "move refused")[:120]}
+            if hasattr(self.io, "sleep"):
+                self.io.sleep(0.15)
+            st = dict(self.io.gripper_state())
+            if st.get("contact_left") and st.get("contact_right") or st.get("hold_active"):
+                st = dict(self.io.gripper_clamp(force_n))
+                return {"shift_mm": round(step_mm * k, 1), "toward": "pad_pos_y" if lt else "pad_neg_y",
+                        "both_pads_touched": True, "clamp": st}
+        return {"shift_mm": round(step_mm * n, 1), "toward": "pad_pos_y" if lt else "pad_neg_y",
+                "both_pads_touched": False, "clamp": dict(self.io.gripper_state())}
 
     def _held_now(self, st) -> bool:
         if self.is_sim:
@@ -759,7 +860,8 @@ class GeneralPickPlaceSkills:
                 return self._safety_stop("execute_grasp_chunk", "pregrasp", r, n0)
             return self._res("execute_grasp_chunk", False, r, reason="PREGRASP_FAILED", nxt=["plan_grasp_chunk"])
         p_g, R_g = W["grasp"]
-        p_mid = np.asarray(p_g, float) + np.array([0.0, 0.0, 0.015])
+        a_dir = np.asarray(self.grasp_plan.get("_approach", [0.0, 0.0, -1.0]), float)
+        p_mid = np.asarray(p_g, float) - 0.015 * a_dir             # V4.12: along the approach axis
         r = self.io.move_line(f"V4.9 descend {oid}", p_mid, self.CK.R_to_quat_xyzw(R_g), 0.03)
         if r.get("ok"):
             r = self.io.move_line(f"V4.9 grasp {oid}", p_g, self.CK.R_to_quat_xyzw(R_g), 0.012, strict=True)
@@ -770,8 +872,14 @@ class GeneralPickPlaceSkills:
             return self._res("execute_grasp_chunk", False, r, reason="DESCENT_FAILED", nxt=["plan_grasp_chunk"])
         p_desc = self._obj_xyz(oid)
         clamp = dict(self.io.gripper_clamp(float(clamp_force_n)))
+        cen = self._center_on_one_pad(clamp, p_g, R_g, float(clamp_force_n), oid)
+        if cen:
+            clamp = cen.pop("clamp")
         p_clamp = self._obj_xyz(oid)
+        rel_clamp = self._obj_in_tcp(oid)                        # V4.12 LIFT PROBE: object pose in the gripper
         facts = {"object_id": oid, "clamp": clamp}
+        if cen:
+            facts["centering_after_one_pad_contact"] = cen
         if p_before is not None and p_desc is not None:
             facts["object_moved_during_descent_mm"] = round(float(np.linalg.norm(p_desc - p_before)) * 1000.0, 1)
         if p_desc is not None and p_clamp is not None:
@@ -805,6 +913,14 @@ class GeneralPickPlaceSkills:
         st = dict(self.io.gripper_state())
         p_lift = self._obj_xyz(oid)
         facts["gripper_after_lift"] = st
+        rel_lift = self._obj_in_tcp(oid)
+        if rel_clamp is not None and rel_lift is not None:          # V4.12 LIFT PROBE: measured, not predicted
+            dR = rel_clamp[1].T @ rel_lift[1]
+            facts["object_in_gripper_during_lift"] = {
+                "turned_deg": round(float(np.degrees(np.arccos(np.clip((np.trace(dR) - 1.0) / 2.0, -1.0, 1.0)))), 1),
+                "moved_mm": round(float(np.linalg.norm(rel_lift[0] - rel_clamp[0])) * 1000.0, 1),
+                "slid_down_mm": round(float(-(rel_lift[2][2] - rel_clamp[2][2])) * 1000.0, 1),
+                "basis": "object pose measured before and after the lift, relative to the gripper"}
         if p_clamp is not None and p_lift is not None:
             facts["object_rose_mm"] = round(float(p_lift[2] - p_clamp[2]) * 1000.0, 1)
         rose_ok = facts.get("object_rose_mm") is None or facts["object_rose_mm"] >= 0.5 * float(self.grasp_plan["lift_height_mm"])
@@ -1026,6 +1142,16 @@ class GeneralPickPlaceSkills:
                            f"{c['min_clearance_above_other_objects_mm']} mm)")
             if c["min_clearance_above_table_mm"] < 2.0:
                 bad.append(f"{key}: {c['min_clearance_above_table_mm']} mm above the table")
+            if key == "held_object_clearance" and not c.get("penetrates") and len(held_w) > 1:
+                # V4.12 release clearance: the held object's BOTTOM (its lowest 6 mm) stays >= 5 mm above whatever
+                # is below it; side walls may come closer (a cup nested into a cup)
+                zb = float(held_w[:, 2].min())
+                cb = G49.cloud_clearance(hm_wo, held_w[held_w[:, 2] <= zb + 0.006], margin_m=self._meas_margin_m())
+                v = cb.get("min_clearance_above_other_objects_mm")
+                facts["held_object_bottom_clearance_mm"] = v
+                if v is not None and v < PLACE_MIN_CLEAR_MM:
+                    bad.append(f"held object bottom {v} mm above {cb.get('closest_object_below')} at release (the "
+                               f"safety limit is {PLACE_MIN_CLEAR_MM:.0f} mm: the object is released, not pressed down)")
         if bad:
             facts["problems"] = bad
             return self._res("plan_place_chunk", False, facts, reason="PLACE_COLLISION",
@@ -1134,7 +1260,7 @@ class GeneralPickPlaceSkills:
             facts["note"] = "planned for the object of the planned grasp (not lifted yet)"
         return self._res("plan_place_chunk", True, facts, nxt=["execute_place_chunk"])
 
-    def execute_place_chunk(self, retreat_up_mm=80.0, release_open_mm=None, **_):
+    def execute_place_chunk(self, retreat_up_mm=80.0, release_open_mm=None, retreat_back_mm=0.0, **_):
         if not self.place_plan:
             return self._res("execute_place_chunk", False, reason="PLACE_NOT_PLANNED", nxt=["plan_place_chunk"])
         if not self.held:
@@ -1191,9 +1317,17 @@ class GeneralPickPlaceSkills:
         self.io.sleep(0.35)
         self.held = None
         self.stage = "RELEASED"
-        p_ret = np.asarray(W["release"][0], float) + np.array([0.0, 0.0, float(retreat_up_mm) / 1000.0])
-        self.io.move_line("V4.9 retreat up", p_ret, self.CK.R_to_quat_xyzw(W["release"][1]), 0.04)
+        p_rel_tcp, R_rel_tcp = np.asarray(W["release"][0], float), np.asarray(W["release"][1], float)
         facts = {"target": self.place_plan["target"], "released_open_mm": g_open}
+        if float(retreat_back_mm or 0.0) > 0.5:                 # V4.12: back along the approach axis first
+            a_dir = (R_rel_tcp @ self.prof.T_tcp_grasp[:3, :3])[:, 2]
+            p_back = p_rel_tcp - a_dir * (float(retreat_back_mm) / 1000.0)
+            rb = self.io.move_line("V4.12 retreat back", p_back, self.CK.R_to_quat_xyzw(R_rel_tcp), 0.04)
+            facts["retreat_back"] = {"ok": bool(rb.get("ok")), "direction_xyz": [round(float(-v), 3) for v in a_dir]}
+            if rb.get("ok"):
+                p_rel_tcp = p_back
+        p_ret = p_rel_tcp + np.array([0.0, 0.0, float(retreat_up_mm) / 1000.0])
+        self.io.move_line("V4.9 retreat up", p_ret, self.CK.R_to_quat_xyzw(R_rel_tcp), 0.04)
         p_after = self._obj_xyz(oid)
         if p_rel is not None and p_after is not None:
             facts["object_moved_after_release_mm"] = {"xy": round(float(np.linalg.norm(p_after[:2] - p_rel[:2])) * 1000.0, 1),
@@ -1253,6 +1387,171 @@ class GeneralPickPlaceSkills:
                                 for o in obs.get("objects", [])],
         })
 
+    # ============================================================================ V4.12 H1 V2 GENERIC MOTION
+    def plan_motion_chunk(self, path_xyz_m=None, closing_yaw_deg=0.0, pitch_deg=0.0, gripper_open_mm=0.0,
+                          speed_mm_s=30.0, may_touch=None, **_):
+        """V4.12 H1 V2 MOTION CHUNK (no motion): the empty gripper (fixed orientation and opening) moves to the first
+        point (joint-space move) and then along straight lines through the next points.  Checked like the other
+        chunks (IK, dense lines, joint margins, fence, singularity) and swept against the height map: touching an
+        object listed in may_touch is reported as a predicted contact, touching anything else (or coming below the
+        fingertip limit above the table) rejects the path."""
+        if not self.last_obs:
+            return self._res("plan_motion_chunk", False, reason="OBSERVE_FIRST")
+        if self.held:
+            return self._res("plan_motion_chunk", False, {"held_object": self.held,
+                             "note": "motion chunks are planned for an empty gripper; an object is held now"},
+                             reason="HOLDING")
+        pts = [np.asarray(p, float) for p in (path_xyz_m or []) if isinstance(p, (list, tuple)) and len(p) == 3]
+        if len(pts) < 2:
+            return self._res("plan_motion_chunk", False, {"note": "path_xyz_m needs at least two [x, y, z] points"},
+                             reason="BAD_PATH")
+        may = [m for m in (may_touch or []) if m in self.cam]
+        unknown = [m for m in (may_touch or []) if m not in self.cam]
+        fm = self._fingers()
+        om = max(0.0, min(float(gripper_open_mm or 0.0), fm.max_open_mm))
+        yaw, pitch = float(closing_yaw_deg or 0.0), float(pitch_deg or 0.0)
+        R_gr = G49.grasp_R(yaw, pitch)
+        zt = float(self.hm.table_z)
+        tip = self._tip_clear_m() * 1000.0
+        facts: Dict[str, Any] = {"closing_yaw_deg": yaw, "pitch_deg": pitch, "gripper_open_mm": om,
+                                 "may_touch": may, "segments": []}
+        if unknown:
+            facts["may_touch_not_seen"] = unknown
+        pv0 = G49.preview_grasp(self.hm, fm, pts[0], yaw, pitch, om, None, margin_m=self._meas_margin_m())
+        if pv0["collisions_at_grasp_pose"] or pv0["lowest_gripper_point_above_table_mm"] < tip:
+            facts["start_pose"] = {k: pv0[k] for k in ("collisions_at_grasp_pose", "lowest_gripper_point_above_table_mm")}
+            facts["problems"] = ["the gripper at the first point touches something or comes below the fingertip limit "
+                                 f"({tip:.0f} mm above the table)"]
+            return self._res("plan_motion_chunk", False, facts, reason="MOTION_COLLISION")
+        tm = self._tool_model()
+        Ti = np.linalg.inv(self.CK.T_L7_TCP)
+        q_seed = self.io.current_q()
+        deadline = time.time() + PLAN_BUDGET_S * 2
+        tcp = [self.prof.tcp_from_grasp(p, R_gr) for p in pts]
+        if tm is not None:
+            for i, (p_t, R_t) in enumerate(tcp):
+                T_g = np.eye(4)
+                T_g[:3, :3], T_g[:3, 3] = R_t, p_t
+                ok_tm, dz_tm, part_tm = tm.clear_of_table(T_g @ Ti, zt)
+                if not ok_tm:
+                    facts["problems"] = [f"point {i}: tool {part_tm} {dz_tm:.0f} mm above the table"]
+                    return self._res("plan_motion_chunk", False, facts, reason="MOTION_COLLISION")
+        qs0, chk0 = self._solve_chain([("start", tcp[0][0], tcp[0][1])], q_seed, deadline)
+        if not qs0 or not chk0:
+            facts["problems"] = ["no arm posture (IK) for the first point with this orientation"]
+            return self._res("plan_motion_chunk", False, facts, reason="MOTION_PLAN_FAILED")
+        ok_f, why_f = self._check_path_fence([list(q_seed)] + qs0, zt)
+        if not ok_f:
+            facts["problems"] = [why_f]
+            return self._res("plan_motion_chunk", False, facts, reason="MOTION_PLAN_FAILED")
+        q_cur, margins = list(qs0[0]), [float(chk0.get("min_margin_deg") or 99.0)]
+        qs_all = [q_cur]
+        names = {m: self.hm.index_of(m) for m in may}
+        for i in range(1, len(pts)):
+            a, b = pts[i - 1], pts[i]
+            L = float(np.linalg.norm(b - a))
+            u = (b - a) / L if L > 1e-9 else np.zeros(3)
+            seg = {"from": [round(float(v), 4) for v in a], "to": [round(float(v), 4) for v in b],
+                   "length_mm": round(L * 1000.0, 1), "direction_xyz": [round(float(v), 3) for v in u]}
+            n = max(1, int(math.ceil(L / 0.004)))
+            contact = None
+            for k in range(1, n + 1):
+                q = a + (b - a) * (k / n)
+                for name, lo, hi in fm.boxes(om):
+                    _g, P = G49._pts_world(q, R_gr, lo, hi, 0.005)
+                    low = (float(P[:, 2].min()) - zt) * 1000.0
+                    if low < tip:
+                        facts["segments"].append(seg)
+                        facts["problems"] = [f"segment {i}: {name} {low:.1f} mm above the table at "
+                                             f"{round(L * k / n * 1000.0)} mm (the fingertip limit is {tip:.0f} mm)"]
+                        return self._res("plan_motion_chunk", False, facts, reason="MOTION_COLLISION")
+                    pen, o = G49.penetration(self.hm, P)
+                    hit = pen > self._meas_margin_m()
+                    if not hit.any():
+                        continue
+                    ks = set(o[hit].tolist())
+                    bad = [self.hm.names[kk] for kk in ks if kk not in names.values()]
+                    if bad:
+                        facts["segments"].append(seg)
+                        facts["problems"] = [f"segment {i}: {name} hits {', '.join(bad)} at "
+                                             f"{round(L * k / n * 1000.0)} mm (not listed in may_touch)"]
+                        return self._res("plan_motion_chunk", False, facts, reason="MOTION_COLLISION")
+                    if contact is None:
+                        kk = int(np.bincount(o[hit]).argmax())
+                        contact = {"object": self.hm.names[kk], "part": name,
+                                   "first_contact_after_mm": round(L * (k - 1) / n * 1000.0, 1),
+                                   "path_after_contact_mm": round(L * (1.0 - (k - 1) / n) * 1000.0, 1)}
+            if contact:
+                contact["note"] = ("geometric prediction from the static height map: if the object slides along "
+                                   "without turning it would move about path_after_contact_mm; friction, rotation and "
+                                   "what it meets on the way are not predicted")
+                seg["predicted_contact"] = contact
+            p_t, R_t = tcp[i]
+            ql, chl = self._dense_line(q_cur, p_t, R_t)
+            if not ql:
+                facts["segments"].append(seg)
+                facts["problems"] = [f"segment {i}: the straight line fails: {chl.get('why')}"]
+                return self._res("plan_motion_chunk", False, facts, reason="MOTION_PLAN_FAILED")
+            margins.append(float(chl.get("min_margin_deg") or 99.0))
+            q_cur = list(ql[-1])
+            qs_all.append(q_cur)
+            facts["segments"].append(seg)
+        facts["min_joint_margin_deg"] = round(min(margins), 1)
+        if facts["min_joint_margin_deg"] < MIN_PLACE_MARGIN_DEG:
+            facts["problems"] = [f"a joint comes within {facts['min_joint_margin_deg']} deg of its limit"]
+            return self._res("plan_motion_chunk", False, facts, reason="MOTION_PLAN_FAILED")
+        facts["speed_mm_s"] = float(max(5.0, min(80.0, float(speed_mm_s or 30.0))))
+        self.motion_plan = {"tcp": tcp, "q": qs_all, "open_mm": om, "speed": facts["speed_mm_s"] / 1000.0,
+                            "may_touch": may}
+        return self._res("plan_motion_chunk", True, facts)
+
+    def execute_motion_chunk(self, **_):
+        """V4.12 H1 V2: run the planned motion chunk; report what the listed objects did (measured)"""
+        mp = getattr(self, "motion_plan", None)
+        if not mp:
+            return self._res("execute_motion_chunk", False, reason="MOTION_NOT_PLANNED")
+        if not getattr(self.io, "motion_allowed", True):
+            return self._res("execute_motion_chunk", True, {"dry_run": True})
+        self._unlatch_if_needed("V4.12 motion chunk")
+        n0 = self._trips()
+        before = {m: (self._obj_xyz(m), (self.io.object_pose(m) if hasattr(self.io, "object_pose") else (None, None))[1])
+                  for m in mp["may_touch"]}
+        self.io.gripper_open(max(0.0, float(mp["open_mm"])))
+        r = self.io.move_joints("V4.12 motion start", mp["q"][0])
+        done = 0
+        if r.get("ok"):
+            for i, (p_t, R_t) in enumerate(mp["tcp"][1:], start=1):
+                r = self.io.move_line(f"V4.12 motion segment {i}", p_t, self.CK.R_to_quat_xyzw(R_t), mp["speed"])
+                if not r.get("ok"):
+                    break
+                done = i
+        self.motion_plan = None
+        self.stage = "OBSERVED"
+        if not r.get("ok") and self._safety_hit(r, n0):
+            return self._safety_stop("execute_motion_chunk", f"segment {done + 1}", r, n0)
+        facts: Dict[str, Any] = {"segments_done": done, "segments_planned": len(mp["tcp"]) - 1}
+        if not r.get("ok"):
+            facts["stopped"] = {k: r.get(k) for k in ("error", "why") if r.get(k)}
+        moved = {}
+        for m, (p0, R0) in before.items():
+            p1 = self._obj_xyz(m)
+            R1 = (self.io.object_pose(m) if hasattr(self.io, "object_pose") else (None, None))[1]
+            if p0 is None or p1 is None:
+                moved[m] = "not measured"
+                continue
+            e = {"moved_xy_mm": [round(float(v) * 1000.0, 1) for v in (p1 - p0)[:2]],
+                 "moved_z_mm": round(float(p1[2] - p0[2]) * 1000.0, 1)}
+            if R0 is not None and R1 is not None:
+                y0 = math.degrees(math.atan2(R0[1, 0], R0[0, 0]))
+                y1 = math.degrees(math.atan2(R1[1, 0], R1[0, 0]))
+                e["turned_about_vertical_deg"] = round(((y1 - y0 + 180.0) % 360.0) - 180.0, 1)
+                e["tilt_deg"] = round(float(np.degrees(np.arccos(np.clip(R1[2, 2], -1.0, 1.0)))), 1)
+            moved[m] = e
+        facts["objects_listed_in_may_touch"] = moved
+        facts["note"] = "positions measured after the motion; the last perception is older than this motion"
+        return self._res("execute_motion_chunk", bool(r.get("ok")), facts,
+                         reason=None if r.get("ok") else "MOTION_STOPPED")
+
     def run_tool(self, name, args=None):
         fn = {
             "perceive_objects": self.perceive_objects,
@@ -1262,6 +1561,8 @@ class GeneralPickPlaceSkills:
             "plan_place_chunk": self.plan_place_chunk,
             "execute_place_chunk": self.execute_place_chunk,
             "verify_and_park_chunk": self.verify_and_park_chunk,
+            "plan_motion_chunk": self.plan_motion_chunk,                 # V4.12 H1 V2
+            "execute_motion_chunk": self.execute_motion_chunk,
         }.get(name)
         if fn is None:
             return {"ok": False, "tool": name, "reason": "UNKNOWN_TOOL"}
@@ -1308,7 +1609,9 @@ _GRASP_PROPS = {
     "xy_offset_mm": _XY,
     "grasp_z_offset_from_top_mm": {"type": "number", "description": "grasp point height relative to the object's top_z_m (mm)"},
     "closing_yaw_deg": {"type": "number", "description": "world direction of the pad-to-pad closing line (deg)"},
-    "pitch_deg": {"type": "number", "description": "tilt of the gripper from vertical about its jaw-width axis (deg)"},
+    "pitch_deg": {"type": "number", "description": "turn of the gripper about its pad-to-pad axis from pointing straight "
+                  "down (deg): 0 = fingers point down, +-90 = fingers point horizontally; the approach is along the "
+                  "fingers' direction"},
     "open_mm": {"type": "number", "description": "finger opening before the approach (mm)"},
 }
 GENERAL_TOOLS = [
@@ -1321,18 +1624,21 @@ GENERAL_TOOLS = [
         ["prompts", "use_finetuned"]),
     _fn("preview_grasp",
         "No motion. For a grasp point / closing direction / opening, report collisions of the gripper with any object "
-        "or the table at the grasp pose, where each pad first touches material while closing, how far the first "
-        "contact would push the object, and the pad gap when both touch.",
+        "or the table at the grasp pose and on the last 80 mm of the approach along the fingers' direction, where "
+        "each pad first touches material while closing, how far the first contact would push the object, the pad "
+        "gap when both touch, and the grasp point relative to the object's estimated centre of mass.",
         dict(_GRASP_PROPS), list(_GRASP_PROPS)),
     _fn("plan_grasp_chunk",
-        "No motion. Plan pregrasp -> vertical descent -> grasp -> vertical lift for these parameters (same meaning as "
+        "No motion. Plan pregrasp -> straight approach along the fingers' direction (approach_distance_mm; straight "
+        "down at pitch 0) -> grasp -> vertical lift (lift_height_mm) for these parameters (same meaning as "
         "preview_grasp). The planner may rotate the closing direction by up to yaw_tolerance_deg to find an arm "
         "posture. Returns the chosen pose and its finger preview, or the reasons each direction was rejected.",
-        dict(_GRASP_PROPS, yaw_tolerance_deg=_NUM, pregrasp_height_mm=_NUM, lift_height_mm=_NUM),
-        list(_GRASP_PROPS) + ["yaw_tolerance_deg", "pregrasp_height_mm", "lift_height_mm"]),
+        dict(_GRASP_PROPS, yaw_tolerance_deg=_NUM, approach_distance_mm=_NUM, lift_height_mm=_NUM),
+        list(_GRASP_PROPS) + ["yaw_tolerance_deg", "approach_distance_mm", "lift_height_mm"]),
     _fn("execute_grasp_chunk",
-        "Move: open, approach, descend, close with this force, lift. Reports the measured clamp (pad contacts, contact "
-        "forces, opening, hold), how far the object moved during descent / clamp and whether it rose with the gripper.",
+        "Move: open, pregrasp, approach, close with this force, lift. Reports the measured clamp (pad contacts, contact "
+        "forces, opening, hold), how far the object moved during approach / clamp, whether it rose with the "
+        "gripper and how much it turned / slid in the gripper during the lift.",
         {"clamp_force_n": _NUM}, ["clamp_force_n"]),
     _fn("plan_place_chunk",
         "No motion. With the held object, plan carry -> lower -> release over a target (object_id or '[x,y,z]' "
@@ -1349,9 +1655,24 @@ GENERAL_TOOLS = [
         ["target_id_or_xyz", "xy_offset_mm", "held_bottom_above_target_top_mm", "yaw_change_deg",
          "approach_height_mm", "release_open_mm", "carry_lift_mm", "pitch_change_deg"]),
     _fn("execute_place_chunk",
-        "Move: carry over the target, lower vertically, open the fingers, retreat up. Reports how the object moved "
-        "after release.",
-        {"retreat_up_mm": _NUM}, ["retreat_up_mm"]),
+        "Move: carry over the target, lower vertically, open the fingers, retreat back along the fingers' direction "
+        "(retreat_back_mm, 0 = none) and then up (retreat_up_mm). Reports how the object moved after release.",
+        {"retreat_up_mm": _NUM, "retreat_back_mm": _NUM}, ["retreat_up_mm", "retreat_back_mm"]),
+    _fn("plan_motion_chunk",
+        "No motion. A path for the EMPTY gripper with a fixed orientation (closing_yaw_deg, pitch_deg as for grasps) "
+        "and a fixed opening: a joint-space move to the first point, then straight lines through the next points "
+        "(path_xyz_m = grasp-point positions, world, m). Checked like the other plans; swept against every object: "
+        "touching an object listed in may_touch is reported per segment as a predicted contact, touching anything "
+        "else or coming below the fingertip limit rejects the path.",
+        {"path_xyz_m": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+         "closing_yaw_deg": _NUM, "pitch_deg": _NUM, "gripper_open_mm": _NUM,
+         "speed_mm_s": {"type": "number", "description": "speed along the straight segments (5 .. 80 mm/s)"},
+         "may_touch": {"type": "array", "items": {"type": "string"}}},
+        ["path_xyz_m", "closing_yaw_deg", "pitch_deg", "gripper_open_mm", "speed_mm_s", "may_touch"]),
+    _fn("execute_motion_chunk",
+        "Move along the planned motion chunk. Reports the segments done and, measured afterwards, how far each object "
+        "listed in may_touch moved and turned.",
+        {}, []),
     _fn("verify_and_park_chunk",
         "Move the arm to the camera-clear pose and (clear_view_and_perceive) look again: objects and their measured "
         "relations (inside / on).",
@@ -1360,11 +1681,11 @@ GENERAL_TOOLS = [
         ["action", "prompts"]),
 ]
 
-GENERAL_SYSTEM_INSTRUCTIONS = """You are the planner of a 7-DOF NERO arm with a parallel two-finger gripper doing pick-and-place tasks given in natural language.
+GENERAL_SYSTEM_INSTRUCTIONS = """You are the planner of a 7-DOF NERO arm with a parallel two-finger gripper doing manipulation tasks given in natural language.
 There are no object-specific skills or rules: every grasp and place parameter is your decision, made from the measured facts the tools return.
 - perceive_objects gives measured geometry (center, top, bottom, footprint axes, cross sections, side profile, open cavity, relations) and the gripper's geometry. Labels come from the detector and may be wrong; the geometry is measured.
-- preview_grasp, plan_grasp_chunk and plan_place_chunk never move the arm; they report collisions, where each pad would touch, how far an object would be pushed, clearances and rejections.
-- execute_grasp_chunk and execute_place_chunk move the arm and report what was measured.
+- preview_grasp, plan_grasp_chunk, plan_place_chunk and plan_motion_chunk never move the arm; they report collisions, where each pad would touch, how far an object would be pushed, clearances and rejections.
+- execute_grasp_chunk, execute_place_chunk and execute_motion_chunk move the arm and report what was measured.
 - If a required object is not detected, do not invent coordinates; report what is missing.
 - Finish with verify_and_park_chunk and report the outcome from its relations; do not claim more than it measured."""
 
@@ -1699,6 +2020,9 @@ DESC_LEGEND = {                        # V4.9.2: sent once per task instead of i
                     "+b, -b; a missing direction was not measured",
     "open_cavity": "the surface inside the footprint is lower than its rim (measured from above)",
     "unchanged": "the object has not moved since the previous look; its full description is in that result",
+    "stability_estimate": "from the seen shape assuming uniform density: estimated centre of mass, horizontal distance "
+                          "from it to the nearest footprint edge, the tilt at which the object would tip over, and "
+                          "height / narrowest footprint width",
     "enters_unobserved_space": "part of the gripper / held object would be in space the camera could not see (behind "
                                "an object), below the highest point anything hidden there could reach; collision "
                                "checks only use what was seen",
@@ -1828,6 +2152,20 @@ class ProbeVision:
                 p, _q = self._noisy_pose(b) if self.noise else self.pose_fn(b)
                 return p
         return None
+
+    def pose(self, oid):
+        """V4.12: (position, 3x3 rotation) of the object (noisy when the perception is noisy)"""
+        for b in self.probe.free:
+            if G49.object_id_for(b, "") == oid:
+                p, q = self._noisy_pose(b) if self.noise else self.pose_fn(b)
+                if p is None or q is None:
+                    return None, None
+                w, x, y, z = [float(v) for v in q]
+                return np.asarray(p, float), np.array([
+                    [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                    [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                    [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+        return None, None
 
 
 def _make_sim_io_class():
@@ -2009,6 +2347,10 @@ def _make_sim_io_class():
             self.emit(f"[V4.9 SIM GENERAL PERCEIVE] {tag} | count={len(obs['objects'])}")
             return obs
 
+        def object_pose(self, oid):                     # V4.12: from the probe vision's pose stream (TF)
+            v = getattr(self, "_vision", None)
+            return v.pose(oid) if v else (None, None)
+
         def finger_model(self):
             return G49.SIM_FINGERS
 
@@ -2125,6 +2467,9 @@ def _make_twin_io_class():
 
         def object_position(self, oid):
             return self._vision.position(oid)
+
+        def object_pose(self, oid):                     # V4.12
+            return self._vision.pose(oid)
 
         def describe_object(self, oid):
             return self._vision.describe_object(oid)

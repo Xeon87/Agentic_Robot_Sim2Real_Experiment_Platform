@@ -461,9 +461,9 @@ class V411(unittest.TestCase):
                   'if not doe411.get("auto") and not messagebox.askyesno("启动前检查（V3.77）"',
                   "env410.update(extra_env or {})", "pid = runner.start(extra_env=scene_env(scene))"):
             self.assertIn(k, cs)
-        self.assertIn(C.VERSION, ("V4.11", "V4.11.1", "V4.11.2", "V4.11.3"))
-        self.assertIn(GP.VERSION, ("V4.11", "V4.11.1", "V4.11.2", "V4.11.3"))
-        self.assertIn(D.VERSION, ("V4.11", "V4.11.1", "V4.11.2", "V4.11.3"))
+        self.assertIn(C.VERSION, ("V4.11", "V4.11.1", "V4.11.2", "V4.11.3", "V4.12"))
+        self.assertIn(GP.VERSION, ("V4.11", "V4.11.1", "V4.11.2", "V4.11.3", "V4.12"))
+        self.assertIn(D.VERSION, ("V4.11", "V4.11.1", "V4.11.2", "V4.11.3", "V4.12"))
         self.assertEqual(_src("VERSION").strip(), C.VERSION)
         self.assertIn("SIM DOE", GP.MARKER_V411)
         h = hashlib.sha256(open(os.path.join(HERE, "NERO_V2_7_1_Unified_Backend.py"), "rb").read()).hexdigest()

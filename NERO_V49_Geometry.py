@@ -63,7 +63,8 @@ class FingerModel:
         return {
             "type": "parallel_two_finger",
             "frame": "grasp point = midpoint between the two pad faces; closing_yaw_deg = world direction of the "
-                     "closing line (pad to pad); the gripper approaches vertically from above unless pitch_deg != 0",
+                     "closing line (pad to pad); pitch_deg turns the gripper about that line (0 = fingers pointing "
+                     "down, +-90 = horizontal); the approach runs along the fingers' direction",
             "max_opening_mm": self.max_open_mm,
             "pad_face_gap_mm": f"open_mm - {2000.0 * self.face_off:.0f}",
             "pad_width_mm": round(self.pad_w * 1000.0, 1),
@@ -679,6 +680,63 @@ def preview_grasp(hm: HeightMap, fm: FingerModel, p_grasp, yaw_deg: float, pitch
     if others:
         res["pads_touch_other_objects"] = others
     return res
+
+
+def sweep_collisions(hm: HeightMap, fm: FingerModel, p_grasp, yaw_deg: float, pitch_deg: float, open_mm: float,
+                     dist_m: float, step_m: float = 0.005, margin_m: float = 0.0005,
+                     may_touch: Sequence[str] = ()) -> Dict[str, Any]:
+    """V4.12 H1 V2 APPROACH SWEEP: the open gripper moving along its own approach axis (z_G) over the last dist_m
+    before the grasp point (the grasp pose itself excluded - preview_grasp checks it): the first collision met on the
+    way (part, object, depth, distance before the grasp pose) and the lowest point above the table.  A vertical
+    approach can only meet what the grasp pose itself meets (the height map is a top surface), a tilted or horizontal
+    one can hit the object or a neighbour on the way."""
+    R = grasp_R(yaw_deg, pitch_deg)
+    a = R[:, 2]
+    p = np.asarray(p_grasp, float)
+    may = {hm.index_of(n) for n in may_touch}
+    first, min_table = None, 1e9
+    n = max(1, int(math.ceil(float(dist_m) / step_m)))
+    for i in range(n, 0, -1):                         # from the start of the approach toward the grasp pose
+        s_ = float(dist_m) * i / n
+        q = p - s_ * a
+        for name, lo, hi in fm.boxes(open_mm):
+            _g, P = _pts_world(q, R, lo, hi, 2 * 0.0025)
+            min_table = min(min_table, float(P[:, 2].min()) - hm.table_z)
+            pen, o = penetration(hm, P)
+            hit = (pen > margin_m) & ~np.isin(o, list(may))
+            if hit.any() and first is None:
+                k = int(np.bincount(o[hit]).argmax())
+                first = {"part": name, "object": hm.names[k], "depth_mm": round(float(pen[hit & (o == k)].max()) * 1000.0, 1),
+                         "distance_before_grasp_pose_mm": round(s_ * 1000.0, 1)}
+    return {"approach_direction_xyz": [round(float(v), 3) for v in a], "first_collision": first,
+            "lowest_gripper_point_above_table_mm": round(min_table * 1000.0, 1)}
+
+
+def stability(hm: HeightMap, oid: str, bottom_z: float) -> Optional[Dict[str, Any]]:
+    """V4.12 H1 V2 STABILITY FACTS (estimates, stated as such): centre of mass of the object ASSUMING uniform density
+    in the volume between its bottom and the surface seen from above (each height-map cell = a solid column), and the
+    tip-over angle about the nearest edge of that footprint (atan(edge distance / centre-of-mass height))"""
+    cells = hm.cells_of(oid)
+    if len(cells) < 3:
+        return None
+    h = np.clip(cells[:, 2] - float(bottom_z), 0.0, None)
+    if h.sum() <= 1e-9:
+        return None
+    w = h / h.sum()
+    cx, cy = float((cells[:, 0] * w).sum()), float((cells[:, 1] * w).sum())
+    cz = float(bottom_z) + float((h * h).sum() / (2.0 * h.sum()))
+    xy = cells[:, :2] - np.array([cx, cy])
+    best = 1e9                                         # nearest support edge: smallest half extent over directions
+    for ang in np.radians(np.arange(0.0, 180.0, 10.0)):
+        u = np.array([math.cos(ang), math.sin(ang)])
+        proj = xy @ u
+        best = min(best, float(proj.max()) + hm.res / 2.0, float(-proj.min()) + hm.res / 2.0)
+    hcom = cz - float(bottom_z)
+    return {"estimated_center_of_mass_xyz_m": [round(cx, 4), round(cy, 4), round(cz, 4)],
+            "estimated_center_of_mass_height_mm": round(hcom * 1000.0, 1),
+            "nearest_footprint_edge_from_com_mm": round(best * 1000.0, 1),
+            "tip_over_angle_deg": round(math.degrees(math.atan2(best, max(hcom, 1e-6))), 1),
+            "height_to_narrowest_width": round(float((cells[:, 2].max() - bottom_z) / max(2 * best, 1e-6)), 2)}
 
 
 # ============================================================================================ held object model
