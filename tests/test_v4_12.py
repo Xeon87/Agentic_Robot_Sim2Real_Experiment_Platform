@@ -94,9 +94,9 @@ class V412(unittest.TestCase):
         import NERO_V411_Sim_DOE as D
         import NERO_V489_General_Pick_Place as GP
         for v in (C.VERSION, D.VERSION, GP.VERSION):
-            self.assertEqual(v, "V4.12")
+            self.assertIn(v, ("V4.12", "V4.13"))
         with open(os.path.join(HERE, "VERSION")) as f:
-            self.assertEqual(f.read().strip(), "V4.12")
+            self.assertIn(f.read().strip(), ("V4.12", "V4.13"))
 
     def test_k1_plan_mode_blocks_motion(self):
         import inspect
@@ -148,7 +148,7 @@ class V412(unittest.TestCase):
         import NERO_V489_General_Pick_Place as GP
         sc = HS.fixed_scene("H6")
         io = HS.make_twin(sc, log=lambda s: None)
-        sk = GP.GeneralPickPlaceSkills(io)
+        sk = GP.GeneralPickPlaceSkills(io, profile="V2")
         r = sk.run_tool("perceive_objects", PERCEIVE_H6)
         bt = [o for o in r["objects"] if isinstance(o, dict) and o.get("object_id") == "tall_bottle_1"][0]
         self.assertLess(bt["stability_estimate"]["tip_over_angle_deg"], 20.0)
@@ -181,7 +181,7 @@ class V412(unittest.TestCase):
         import NERO_V489_General_Pick_Place as GP
         sc = HS.fixed_scene("H7")
         io = HS.make_twin(sc, log=lambda s: None)
-        sk = GP.GeneralPickPlaceSkills(io)
+        sk = GP.GeneralPickPlaceSkills(io, profile="V2")
         r = sk.run_tool("perceive_objects", {"prompts": ["book", "mat", "mug"], "use_finetuned": True})
         ob = {o["object_id"]: o for o in r["objects"] if isinstance(o, dict) and "object_id" in o}
         path, ang = _push_path(ob["book_1"]["center_xyz_m"], ob["mat_1"]["center_xyz_m"], ob["book_1"]["axis_a_yaw_deg"])

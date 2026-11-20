@@ -268,7 +268,7 @@ class V4113(unittest.TestCase):
         self.assertIn("SAFETY-STOP RECORD", D.MARKER_V4113)
         self.assertIn("SAFETY-STOP RECORD", GP.MARKER_V4113)
         with open(os.path.join(HERE, "VERSION")) as f:
-            self.assertIn(f.read().strip(), ("V4.11.3", "V4.12"))
+            self.assertIn(f.read().strip(), ("V4.11.3", "V4.12", "V4.13"))
 
 
 if __name__ == "__main__":

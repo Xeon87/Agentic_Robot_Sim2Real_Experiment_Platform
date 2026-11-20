@@ -30,7 +30,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-VERSION = "V4.12"
+VERSION = "V4.13"
 MARKER_V493 = "V4.9.3 TASK-START RECOVERY + SAFETY STOP + SINGULARITY + EGG ROLL"
 MARKER_V4101 = "V4.10.1 PITCH CHANGE + RIGID TWIN HOLD + BRIDGE FIX"
 MARKER_V4102 = "V4.10.2 RIGID WELD HOLD IN THE GUI SIMULATION"
@@ -39,6 +39,7 @@ MARKER_V411 = "V4.11 FACTS ONLY + SIM DOE TASK STATS"
 MARKER_V4112 = "V4.11.2 DOE FINAL-STATE SNAPSHOTS + RUN TRACE"
 MARKER_V4113 = "V4.11.3 SAFETY-STOP RECORD + SIM PYTHON FOR PICTURES + RETRY + END-TO-END RATE"
 MARKER_V412 = "H1 V2 MOTION CHUNKS + ANY APPROACH DIRECTION + STABILITY + LIFT PROBE"
+MARKER_V413 = "V4.13 SIM2REAL: H1 V1 PROFILE ON THE REAL ARM + REAL HEIGHT MAP"
 MARKER_V491 = "V4.9.1 DENSE LINES + REACHABILITY"
 MARKER_V492 = "V4.9.2 REAL-LIKE PERCEPTION + LLM EVAL + COMPACT OUTPUTS"
 MARKER = "V4.8.9 GENERAL PICK&PLACE CHUNK LLM"
@@ -81,8 +82,9 @@ class GeneralPickPlaceSkills:
     """Atomic chunk skills for LLM-driven general pick-and-place on the real NERO arm."""
 
     STAGES = ("IDLE", "OBSERVED", "GRASP_PLANNED", "HOLDING", "PLACE_PLANNED", "RELEASED", "VERIFIED")
+    profile, v2 = "V1", False                            # V4.13: class defaults (instances set them in __init__)
 
-    def __init__(self, io, skill=None):
+    def __init__(self, io, skill=None, profile=None):
         import NERO_V362_Cup_Skills as CK
         import NERO_V365_Real_Cup_Task as RT
         import NERO_V372_Sort_Skills as SK72
@@ -106,6 +108,8 @@ class GeneralPickPlaceSkills:
         self.cam: Dict[str, Dict[str, Any]] = {}
         self.last_obs: Optional[Dict[str, Any]] = None
         self.try_harder = False
+        self.profile = normalize_profile(profile)          # V4.13: H1 V1 (default) / H1 V2
+        self.v2 = self.profile == "V2"
 
     def _tip_drop_m(self):
         if self.is_sim:
@@ -422,7 +426,7 @@ class GeneralPickPlaceSkills:
         if hm is None:
             hm = G49.HeightMap.from_boxes(descs, zt)
         self.hm = hm
-        for d in descs:                                  # V4.12 H1 V2 STABILITY FACTS (estimates)
+        for d in (descs if self.v2 else []):             # V4.12 H1 V2 STABILITY FACTS (estimates; V2 only)
             try:
                 st_ = G49.stability(hm, d["object_id"], float(d["bottom_z_m"]))
                 if st_:
@@ -448,10 +452,15 @@ class GeneralPickPlaceSkills:
         spec["min_fingertip_above_table_mm"] = round(self._tip_clear_m() * 1000.0, 1)
         spec["collision_margin_mm"] = round(self._meas_margin_m() * 1000.0, 1)
         spec["held_object_turns_with_gripper"] = self._held_turns()      # V4.10.1
+        if not self.v2:                                  # V4.13 H1 V1: the gripper approaches vertically
+            spec["frame"] = ("grasp point = midpoint between the two pad faces; closing_yaw_deg = world direction of "
+                             "the closing line (pad to pad); pitch_deg tilts the gripper about that line; the gripper "
+                             "always approaches and lifts vertically")
         extra = {"objects": seen, "other_objects": other, "relations": rel}
         # V4.9.2 COMPACT OUTPUTS: the gripper geometry and the field legend once per task, then a pointer
         if not getattr(self, "_spec_sent", False):
-            extra.update(gripper=spec, legend=DESC_LEGEND)
+            extra.update(gripper=spec, legend=({k: v for k, v in DESC_LEGEND.items() if k != "stability_estimate"}
+                                               if not self.v2 else DESC_LEGEND))
             self._spec_sent = True
         else:
             extra["gripper"] = "unchanged (see the first perceive_objects result)"
@@ -509,9 +518,10 @@ class GeneralPickPlaceSkills:
                                table_clear_m=self._tip_clear_m(), margin_m=self._meas_margin_m())
         pv["grasp_point_above_table_mm"] = round((p[2] - self.hm.table_z) * 1000.0, 1)
         sw = G49.sweep_collisions(self.hm, self._fingers(), p, float(closing_yaw_deg), float(pitch_deg or 0.0), om,
-                                  0.08, margin_m=self._meas_margin_m())                    # V4.12 approach sweep
+                                  0.08, margin_m=self._meas_margin_m(),
+                                  approach_dir=None if self.v2 else (0.0, 0.0, -1.0))      # V4.12 approach sweep
         pv["approach_last_80mm"] = sw
-        com = self._com_relation(object_id, p)
+        com = self._com_relation(object_id, p) if self.v2 else None
         if com:
             pv["grasp_point_vs_estimated_center_of_mass_mm"] = com
         if float(open_mm) > om:
@@ -633,7 +643,7 @@ class GeneralPickPlaceSkills:
                 continue
             R_gr = G49.grasp_R(gyaw, float(pitch_deg or 0.0))
             p_g, R_g = self.prof.tcp_from_grasp(p_a, R_gr)
-            a_dir = R_gr[:, 2]                           # V4.12: approach direction = z_G (down at pitch 0)
+            a_dir = R_gr[:, 2] if self.v2 else np.array([0.0, 0.0, -1.0])   # V4.12: z_G; V4.13 H1 V1: vertical
             if tm is not None:
                 T_g = np.eye(4)
                 T_g[:3, :3], T_g[:3, 3] = R_g, p_g
@@ -654,7 +664,8 @@ class GeneralPickPlaceSkills:
                 continue
             # V4.12: swept after IK (an unreachable pose fails fast)
             sw = G49.sweep_collisions(self.hm, fm, p_a, gyaw, float(pitch_deg or 0.0), om,
-                                      float(approach_distance_mm) / 1000.0, margin_m=self._meas_margin_m())
+                                      float(approach_distance_mm) / 1000.0, margin_m=self._meas_margin_m(),
+                                      approach_dir=a_dir)
             if sw["first_collision"]:                    # V4.12 H1 V2: the approach along the tool axis, swept
                 fc = sw["first_collision"]
                 rej.append(f"yaw {gyaw:+.0f}: approach: {fc['part']} hits {fc['object']} ({fc['depth_mm']} mm) "
@@ -716,7 +727,7 @@ class GeneralPickPlaceSkills:
         self.stage = "GRASP_PLANNED"
         out = {k: v for k, v in chosen.items() if not k.startswith("_")}
         out["finger_preview"] = best["pv"]
-        com = self._com_relation(object_id, p_a)
+        com = self._com_relation(object_id, p_a) if self.v2 else None
         if com:
             out["grasp_point_vs_estimated_center_of_mass_mm"] = com
         if rej:
@@ -872,7 +883,7 @@ class GeneralPickPlaceSkills:
             return self._res("execute_grasp_chunk", False, r, reason="DESCENT_FAILED", nxt=["plan_grasp_chunk"])
         p_desc = self._obj_xyz(oid)
         clamp = dict(self.io.gripper_clamp(float(clamp_force_n)))
-        cen = self._center_on_one_pad(clamp, p_g, R_g, float(clamp_force_n), oid)
+        cen = self._center_on_one_pad(clamp, p_g, R_g, float(clamp_force_n), oid) if self.v2 else None
         if cen:
             clamp = cen.pop("clamp")
         p_clamp = self._obj_xyz(oid)
@@ -914,7 +925,7 @@ class GeneralPickPlaceSkills:
         p_lift = self._obj_xyz(oid)
         facts["gripper_after_lift"] = st
         rel_lift = self._obj_in_tcp(oid)
-        if rel_clamp is not None and rel_lift is not None:          # V4.12 LIFT PROBE: measured, not predicted
+        if self.v2 and rel_clamp is not None and rel_lift is not None:   # V4.12 LIFT PROBE (V2): measured
             dR = rel_clamp[1].T @ rel_lift[1]
             facts["object_in_gripper_during_lift"] = {
                 "turned_deg": round(float(np.degrees(np.arccos(np.clip((np.trace(dR) - 1.0) / 2.0, -1.0, 1.0)))), 1),
@@ -1564,8 +1575,8 @@ class GeneralPickPlaceSkills:
             "plan_motion_chunk": self.plan_motion_chunk,                 # V4.12 H1 V2
             "execute_motion_chunk": self.execute_motion_chunk,
         }.get(name)
-        if fn is None:
-            return {"ok": False, "tool": name, "reason": "UNKNOWN_TOOL"}
+        if fn is None or name not in PROFILE_TOOL_NAMES[self.profile]:     # V4.13: only the profile's tools
+            return {"ok": False, "tool": name, "reason": "UNKNOWN_TOOL", "profile": f"H1 {self.profile}"}
         n0 = None
         if hasattr(self.io, "safety_trips"):
             try:
@@ -1681,6 +1692,48 @@ GENERAL_TOOLS = [
         ["action", "prompts"]),
 ]
 
+# V4.13 H1 V1 TOOLS (= V4.11.3) + the two V2 checks that only report (approach sweep, release bottom clearance)
+_GRASP_PROPS_V1 = dict(_GRASP_PROPS, pitch_deg={"type": "number", "description": "tilt of the gripper from "
+                       "vertical about its pad-to-pad closing line (deg); the approach and the lift stay vertical"})
+GENERAL_TOOLS_V1 = [
+    _fn("perceive_objects",
+        "Look at the table (RGB-D). Returns measured geometry per object: center, top, bottom, footprint axes and size, "
+        "top-surface cross sections, side profile (outer / inner half widths at several heights when measurable), "
+        "open cavity, geometric relations between objects, and the gripper geometry. Objects not matched by the "
+        "prompts are listed as other_objects (they are still obstacles).",
+        {"prompts": {"type": "array", "items": {"type": "string"}}, "use_finetuned": {"type": "boolean"}},
+        ["prompts", "use_finetuned"]),
+    _fn("preview_grasp",
+        "No motion. For a grasp point / closing direction / opening, report collisions of the gripper with any object "
+        "or the table at the grasp pose and on the last 80 mm of the vertical approach, where each pad first touches "
+        "material while closing, how far the first contact would push the object, and the pad gap when both touch.",
+        dict(_GRASP_PROPS_V1), list(_GRASP_PROPS_V1)),
+    _fn("plan_grasp_chunk",
+        "No motion. Plan pregrasp -> vertical descent -> grasp -> vertical lift for these parameters (same meaning as "
+        "preview_grasp). The planner may rotate the closing direction by up to yaw_tolerance_deg to find an arm "
+        "posture. Returns the chosen pose and its finger preview, or the reasons each direction was rejected.",
+        dict(_GRASP_PROPS_V1, yaw_tolerance_deg=_NUM, pregrasp_height_mm=_NUM, lift_height_mm=_NUM),
+        list(_GRASP_PROPS_V1) + ["yaw_tolerance_deg", "pregrasp_height_mm", "lift_height_mm"]),
+    _fn("execute_grasp_chunk",
+        "Move: open, approach, descend, close with this force, lift. Reports the measured clamp (pad contacts, contact "
+        "forces, opening, hold), how far the object moved during descent / clamp and whether it rose with the gripper.",
+        {"clamp_force_n": _NUM}, ["clamp_force_n"]),
+    None,                                                               # plan_place_chunk: the same as V2 (below)
+    _fn("execute_place_chunk",
+        "Move: carry over the target, lower vertically, open the fingers, retreat up. Reports how the object moved "
+        "after release.",
+        {"retreat_up_mm": _NUM}, ["retreat_up_mm"]),
+    None,                                                               # verify_and_park_chunk: the same as V2
+]
+
+GENERAL_SYSTEM_INSTRUCTIONS_V1 = """You are the planner of a 7-DOF NERO arm with a parallel two-finger gripper doing pick-and-place tasks given in natural language.
+There are no object-specific skills or rules: every grasp and place parameter is your decision, made from the measured facts the tools return.
+- perceive_objects gives measured geometry (center, top, bottom, footprint axes, cross sections, side profile, open cavity, relations) and the gripper's geometry. Labels come from the detector and may be wrong; the geometry is measured.
+- preview_grasp, plan_grasp_chunk and plan_place_chunk never move the arm; they report collisions, where each pad would touch, how far an object would be pushed, clearances and rejections.
+- execute_grasp_chunk and execute_place_chunk move the arm and report what was measured.
+- If a required object is not detected, do not invent coordinates; report what is missing.
+- Finish with verify_and_park_chunk and report the outcome from its relations; do not claim more than it measured."""
+
 GENERAL_SYSTEM_INSTRUCTIONS = """You are the planner of a 7-DOF NERO arm with a parallel two-finger gripper doing manipulation tasks given in natural language.
 There are no object-specific skills or rules: every grasp and place parameter is your decision, made from the measured facts the tools return.
 - perceive_objects gives measured geometry (center, top, bottom, footprint axes, cross sections, side profile, open cavity, relations) and the gripper's geometry. Labels come from the detector and may be wrong; the geometry is measured.
@@ -1690,9 +1743,13 @@ There are no object-specific skills or rules: every grasp and place parameter is
 - Finish with verify_and_park_chunk and report the outcome from its relations; do not claim more than it measured."""
 
 
-def run_general_pick_place(io, task, mode="execute", agent=None, llm_cfg=None, recorder=None):
-    """Run General Pick&Place in plan / hover / execute mode via LLM chunk orchestration."""
-    sk = GeneralPickPlaceSkills(io)
+def run_general_pick_place(io, task, mode="execute", agent=None, llm_cfg=None, recorder=None, profile=None):
+    """Run General Pick&Place in plan / hover / execute mode via LLM chunk orchestration.
+    V4.13: profile = "V1" (H1 V1 tools + the two V2 checks; default) or "V2" (motion chunks etc.)"""
+    sk = GeneralPickPlaceSkills(io, profile=profile)
+    if hasattr(io, "reset_object_memory"):              # V4.13: object ids start fresh with each task
+        io.reset_object_memory()
+    TOOLS, INSTR = tools_for(sk.profile), instructions_for(sk.profile)
     io.skills = sk
     if recorder is not None:
         recorder.wrap(sk, perception_fn=lambda: getattr(io, "last_perception", None))
@@ -1718,22 +1775,22 @@ def run_general_pick_place(io, task, mode="execute", agent=None, llm_cfg=None, r
     rounds, steps, final = 0, 0, ""
     u0 = dict(getattr(agent, "_usage_totals", {}) or {})
     TASK_STATS.clear()                       # V4.11 DOE: what happened in this task (read by the sim bridge)
-    TASK_STATS.update(task=str(task), model=model, effort=effort, mode=mode, t_start=time.time(), rounds=0, steps=0,
+    TASK_STATS.update(task=str(task), model=model, effort=effort, mode=mode, profile=sk.profile, t_start=time.time(), rounds=0, steps=0,
                       tools=[], texts=[], safety_stops=0, error=None, final="", ok=None, stage=None)
     try:
         ok, key_status = agent.api_key_status(api_key, model)
         if not ok:
             raise RuntimeError(key_status)
-        emit(f"[V4.8.9 GENERAL START] mode={mode} | model={model} | task={task!r}")
+        emit(f"[V4.8.9 GENERAL START] H1 {sk.profile} | mode={mode} | model={model} | task={task!r}")
         mode_note = ("\n[MODE=plan (dry_run): Call perceive_objects, plan_grasp_chunk, and plan_place_chunk ONLY; do NOT execute motion.]"
                      if mode == "plan" else
                      "\n[MODE=hover: Call perceive_objects, plan_grasp_chunk, and plan_place_chunk; physical hover motion will follow.]"
                      if mode == "hover" else "")
         payload = {
             "model": model,
-            "instructions": GENERAL_SYSTEM_INSTRUCTIONS + mode_note,
+            "instructions": INSTR + mode_note,
             "input": str(task),
-            "tools": GENERAL_TOOLS,
+            "tools": TOOLS,
             "tool_choice": "auto",
             "parallel_tool_calls": False,
             "reasoning": {"effort": effort},
@@ -1783,10 +1840,10 @@ def run_general_pick_place(io, task, mode="execute", agent=None, llm_cfg=None, r
                 })
             payload = {
                 "model": model,
-                "instructions": GENERAL_SYSTEM_INSTRUCTIONS + mode_note,
+                "instructions": INSTR + mode_note,
                 "previous_response_id": agent._last_response_id,
                 "input": outs,
-                "tools": GENERAL_TOOLS,
+                "tools": TOOLS,
                 "tool_choice": "auto",
                 "parallel_tool_calls": False,
                 "reasoning": {"effort": effort},
@@ -1818,6 +1875,26 @@ def run_general_pick_place(io, task, mode="execute", agent=None, llm_cfg=None, r
                           held=getattr(sk, "held", None),
                           usage={k: (u1.get(k, 0) or 0) - (u0.get(k, 0) or 0) for k in
                                  ("requests", "input_tokens", "output_tokens", "cached_input_tokens", "estimated_usd")})
+
+
+_V2_BY_NAME = {t["name"]: t for t in GENERAL_TOOLS}
+GENERAL_TOOLS_V1[4] = _V2_BY_NAME["plan_place_chunk"]
+GENERAL_TOOLS_V1[6] = _V2_BY_NAME["verify_and_park_chunk"]
+PROFILE_TOOL_NAMES = {"V1": {t["name"] for t in GENERAL_TOOLS_V1}, "V2": set(_V2_BY_NAME)}
+PROFILE_ENV = "NERO_H1_PROFILE"             # V4.13: H1 V1 unless this says V2
+
+
+def normalize_profile(p=None) -> str:
+    v = str(p if p not in (None, "") else os.environ.get(PROFILE_ENV, "V1")).strip().upper().replace("H1", "").strip(" _-")
+    return "V2" if v == "V2" else "V1"
+
+
+def tools_for(profile):
+    return GENERAL_TOOLS if normalize_profile(profile) == "V2" else GENERAL_TOOLS_V1
+
+
+def instructions_for(profile):
+    return GENERAL_SYSTEM_INSTRUCTIONS if normalize_profile(profile) == "V2" else GENERAL_SYSTEM_INSTRUCTIONS_V1
 
 
 TASK_STATS: Dict[str, Any] = {}             # V4.11 DOE: the last general pick & place task of this process
@@ -2117,19 +2194,7 @@ class ProbeVision:
                 d["measurement"] = ("simulated fixed depth camera: position / depth noise, unseen sides not "
                                     "measured, bottom not measured (table or the floor of the opening it is in)")
                 descs.append(d)
-        for d in descs:                        # bottom: the floor of an opening it stands in, else the table
-            for e in descs:
-                cav = e.get("open_cavity")
-                if e is d or not cav:
-                    continue
-                dxy = np.asarray(d["center_xyz_m"][:2]) - np.asarray(e["center_xyz_m"][:2])
-                r_open = min(v for v in cav["opening_half_width_mm"].values()) / 1000.0
-                if float(np.linalg.norm(dxy)) < r_open and float(d["top_z_m"]) < float(e["top_z_m"]) + 0.08:
-                    fz = table_z + float(cav["floor_z_above_table_mm"]) / 1000.0
-                    if fz < float(d["top_z_m"]) - 0.005:
-                        d["bottom_z_m"] = round(fz, 4)
-                        d["height_mm"] = round((float(d["top_z_m"]) - fz) * 1000.0, 1)
-                        d["center_xyz_m"][2] = round((float(d["top_z_m"]) + fz) / 2.0, 4)
+        G49.bottoms_in_openings(descs, table_z)      # bottom: the floor of an opening it stands in, else the table
         return hm, descs, G49.relations(descs)
 
     def perceive(self, prompts=None):

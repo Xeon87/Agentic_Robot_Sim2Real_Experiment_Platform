@@ -17,8 +17,9 @@ import numpy as np
 
 
 class GeometricReasoner:
-    def __init__(self, skills, log=print, max_grasp_attempts=3):
+    def __init__(self, skills, log=print, max_grasp_attempts=3, prompts=None):
         self.sk = skills
+        self.prompts = list(prompts or ["object"])     # V4.13: the real detector needs the object names
         self.log = log
         self.max_grasp_attempts = max_grasp_attempts
         self.calls: List[Tuple[str, Dict[str, Any], bool, Optional[str]]] = []
@@ -109,7 +110,7 @@ class GeometricReasoner:
 
     # ------------------------------------------------------------------ episode
     def run(self, source: str, target: str, relation: str) -> Dict[str, Any]:
-        perc = self.call("perceive_objects", prompts=["object"], use_finetuned=True)
+        perc = self.call("perceive_objects", prompts=list(self.prompts), use_finetuned=True)
         table_z = float(perc["physical_verification"]["table_z_m"])
         gripper = perc["gripper"]
         tallest = max([float(o["top_z_m"]) for o in perc["objects"]] + [table_z])
@@ -166,7 +167,7 @@ class GeometricReasoner:
                 sgn = 1.0 if cl.get("contact_left") else -1.0          # left = finger 1 = the +y_G pad
                 self._shift = (getattr(self, "_shift", (0.0, 0.0))[0] + sgn * 3.0 * math.cos(yaw),
                                getattr(self, "_shift", (0.0, 0.0))[1] + sgn * 3.0 * math.sin(yaw))
-            perc = self.call("perceive_objects", prompts=["object"], use_finetuned=True)
+            perc = self.call("perceive_objects", prompts=list(self.prompts), use_finetuned=True)
         if not held:
             return {"ok": False, "why": "grasp failed"}
         # ---- place
@@ -216,12 +217,12 @@ class GeometricReasoner:
             if placed:
                 break
         if not placed:
-            self.call("verify_and_park_chunk", action="return_home", prompts=["object"])
+            self.call("verify_and_park_chunk", action="return_home", prompts=list(self.prompts))
             return {"ok": False, "why": "no place could be planned"}
         r = self.call("execute_place_chunk", retreat_up_mm=60.0)
         if not r.get("ok"):
             return {"ok": False, "why": f"place failed: {r.get('reason')}"}
-        v = self.call("verify_and_park_chunk", action="clear_view_and_perceive", prompts=["object"])
+        v = self.call("verify_and_park_chunk", action="clear_view_and_perceive", prompts=list(self.prompts))
         rel = v.get("physical_verification", {}).get("relations", [])
         want = {"into": "inside", "on": "on"}[relation]
         seen = any(x["object"] == source and x["of"] == target and x["relation"] == want for x in rel)

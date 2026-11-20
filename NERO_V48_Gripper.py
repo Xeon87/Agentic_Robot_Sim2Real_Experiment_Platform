@@ -51,6 +51,7 @@ AGX = {
     "finger_origin_mm": 138.0,     # finger slides above gripper_base = the fingertips
     "tcp_l7_x_mm": 155.3,          # the URDF tool frame the planners use (pad centre, 20 mm inside the tips)
     "held_min_gap_mm": 1.5,        # stopped with at least this gap = something between the fingers
+    "held_min_travel_mm": 1.0,     # V4.13: ... and the fingers closed at least this far during the clamp
     "speed_mm_s": 80.0,            # for timeouts only (the SDK has no speed parameter)
     "can_ids": (0x51A, 0x52A),     # ID 10 (NERO); 0x517 / 0x518 = old ID 7: not usable
 }
@@ -636,6 +637,7 @@ class AgxGripper:
         if self.backend is None:
             return {"ok": False, "held": False, "error": "夹爪没有连接"}
         f = float(force) if force is not None else pct_to_force(torque_pct if torque_pct is not None else 20.0)
+        st0 = self.status()                              # V4.13: the gap before closing (the fingers must move)
         r = self.move(0.0, f)
         if not r.get("ok"):
             return {"ok": False, "held": False, "error": r.get("error")}
@@ -644,9 +646,14 @@ class AgxGripper:
             return {"ok": False, "held": False, "error": "no telemetry"}
         time.sleep(0.1)
         st = self.status() or st
-        held = bool(how != "reached" and st["gap_mm"] >= AGX["held_min_gap_mm"])
+        moved = None if st0 is None else round(float(st0["gap_mm"]) - float(st["gap_mm"]), 2)
+        # V4.13 HELD CHECK: stopped on something AND the fingers really closed some way - a status feed that stopped
+        # updating looks "stalled" at the old gap and used to report held (H6 todo #0)
+        held = bool(how != "reached" and st["gap_mm"] >= AGX["held_min_gap_mm"]
+                    and (moved is None or moved >= AGX["held_min_travel_mm"]))
         self.held = held
         self.last_clamp = {"ok": True, "held": held, "how": how, "gap_mm": st["gap_mm"], "open_deg": None,
+                           "gap_before_mm": None if st0 is None else st0["gap_mm"], "closed_by_mm": moved,
                            "force": st["force"], "force_setting": f, "torque_limit_pct": torque_pct,
                            "load_pct": None, "current_ma": None, "errors": st["errors"]}
         return dict(self.last_clamp)

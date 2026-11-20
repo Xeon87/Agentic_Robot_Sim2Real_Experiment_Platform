@@ -1,7 +1,7 @@
-# NERO 项目开发与交接文档（V4.12 · 交接版）
+# NERO 项目开发与交接文档（V4.13 · 交接版）
 
 > 本文件放在仓库根目录，名为 `AGENTS.md`（Codex 和其他开发 Agent 会自动读取）。
-> 更新时间：2026-11-20。当前交付版本：**V4.12 = H1 V2**（通用 pick & place harness 叫 H1；只给 LLM 测量事实，见 H8）。V4.8.6–V4.8.11 是用户在别的开发会话里做的，本文件按它们的 CHANGELOG 补录（第二部分第 0 节）。仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`，开发分支 `claude/charming-euler-eoqyme`。
+> 更新时间：2026-11-20。当前交付版本：**V4.13**（实机通用 pick & place 用 H1 V1 + 实机高度图；H1 V2 = V4.12 仍在代码里，用 `NERO_H1_PROFILE=V2` 选；只给 LLM 测量事实，见 H8）。V4.8.6–V4.8.11 是用户在别的开发会话里做的，本文件按它们的 CHANGELOG 补录（第二部分第 0 节）。仓库：`Xeon87/Agentic_Robot_Sim2Real_Experiment_Platform`，开发分支 `claude/charming-euler-eoqyme`。
 > “用户”指项目所有者 Jimmy。文件分两部分：
 > - **第一部分**：交接速览，给接手工程师先读，约 15 分钟。
 > - **第二部分**：详细规则、不变量和逐版本记录。原文档持续追加，第 1、2、4 节仍然有效。
@@ -121,7 +121,8 @@ V3.60 之前的模块见第二部分第 5 节。文件名里的版本号是该�
 | `NERO_V4_Dataset_Recorder.py` | 示教数据记录。夹爪名写 "AgxGripper" 或 "AgxGripper-Softfin" |
 | `NERO_GPU_Planner_Server.py` / `_Client.py`、`NERO_V71_Hybrid_GPU_Planner_Core.py` | cuRobo 规划服务（仿真；V4.8.7 起实机也用） |
 | `NERO_V487_CuRobo_IK.py` | 实机 cuRobo IK：`ensure/stop_curobo_server`、`solve_pose` / `solve_chain`（FK 复核 + 45 种子回退） |
-| `NERO_V489_General_Pick_Place.py` | 通用 pick & place：`GeneralPickPlaceSkills`（7 个工具）、`GENERAL_TOOLS` / `GENERAL_SYSTEM_INSTRUCTIONS`、`run_general_pick_place`（LLM 循环）、`SimGeneralIO`（后端）/ `TwinGeneralIO`（孪生，任意场景）、`ProbeVision` |
+| `NERO_V489_General_Pick_Place.py` | 通用 pick & place（H1）：`GeneralPickPlaceSkills(io, profile="V1"/"V2")`（V1 7 个工具 / V2 9 个）、`GENERAL_TOOLS_V1` / `GENERAL_TOOLS`（V2）及各自的系统提示、`run_general_pick_place`（LLM 循环）、`SimGeneralIO`（后端）/ `TwinGeneralIO`（孪生，任意场景）、`ProbeVision` |
+| `NERO_V413_Real_HeightMap.py` | V4.13 实机高度图：深度 + 掩膜 → `G49.HeightMap`（去机械臂、桌面平面、阴影上界、未识别障碍）、`side_fn_from_points`、`match_ids`（稳定编号）。由 `RealIO._general_heightmap` 调用 |
 | `NERO_V49_Geometry.py` | V4.9 测量几何：`FingerModel`、`HeightMap`、`MjProbe`、`describe`、`preview_grasp`、`cloud_clearance`、`relations`。**不认识任何物体类别** |
 | `NERO_V49_Random_Scenes.py` | V4.9 随机场景 + 任务 + 真值判成功（孪生用） |
 | `NERO_V410_Household_Scenes.py` | V4.10 家居场景（固定 H1–H5 / 随机种子）、孪生、复位钩子；V4.11 真值检查 `evaluate` / `eval_hook` / `request_eval`、`parse_goals` |
@@ -182,6 +183,12 @@ V3.60 之前的模块见第二部分第 5 节。文件名里的版本号是该�
 - 鸡蛋规划的回归场景是 `tests/test_v4_8_4.py` 的 `T13.user_scene()`，里面是用户的腕部手眼参数和真实槽位。
 
 ## H6. 未完成事项（按优先级）
+
+**V4.13 之后（上实机前后）**：
+- 第一次实机按 README「第一次上实机怎么做」：plan → hover → execute，先用乒乓球 / 塑料蛋。
+- 原装手指伸不进 95 mm 纸杯，鸡蛋会从杯口高度落下约 10 cm：要么用开口更大的容器，要么换 Softfin 手指再评估。
+- 实机跑完后，对比日志里 `[V4.13 REAL HEIGHT MAP]` 的倾角、未识别障碍，以及物体尺寸和实物是否一致。
+- 真实 LLM 在实机上的成功率要用 API key 的机器跑。
 
 **H1 V2（V4.12）之后**：
 - 抓取 / 放置还没改写成运动片段的组合（现在只共用扫掠、IK、密集直线和安全停止检查）。
@@ -396,6 +403,20 @@ NERO 7 自由度机械臂（AgileX）+ MuJoCo 仿真 + GPT Agent 做“鸡蛋放
 
 - **V4.10.1（2026-11-17）**：用户 GUI 实测 V4.10：苹果进马克杯、遥控器放杯上成功；「遥控器插进马克杯」LLM 判断做不到（工具不能转被夹物体，仿真球铰也转不动）。用户：「改这两个点」。放置工具加 `pitch_change_deg`（夹爪绕两指连线转，物体跟着转；夹爪说明加 `held_object_turns_with_gripper`；球铰时如实拒绝）；孪生刚性夹持（weld）；孪生实测遥控器竖插马克杯成功，验证识别为 inside（杯口被挡时改用轮廓判断）。顺带发现并修了被夹物体椭圆模型漏掉长方形角的问题（改为椭圆 + 测到的轮廓）；修了 V4.10 桥接 `delay_ms` bug（日志 `not attached`）。
 
+- **V4.13（2026-11-20）**：用户：「V2暂时还不稳定。先用V1版本的Harness，做sim2real……做相应的适配和完整的替身测试」；V1 带 V2 的两项检查，实机先做鸡蛋 + 杯子和家居物品，替身用规则推理。做了：
+  - `profile` 开关（默认 V1；`GENERAL_TOOLS_V1` / `GENERAL_SYSTEM_INSTRUCTIONS_V1`；V1 接近竖直）；
+  - 实机高度图 `NERO_V413_Real_HeightMap.py`：掩膜归属、去机械臂、桌面平面拟合、阴影上界、未识别障碍；描述用 G49 同一套函数，`RealIO._general_heightmap`；
+  - 稳定编号 `match_ids`；
+  - `AgxGripper.clamp` 要求合拢 ≥ 1 mm 才算夹住；
+  - 叠加层 KeyError 修复；
+  - 替身 `tests/v413_real_standin.py` + `tests/v413_standin_eval.py`。
+  - 替身结果见 CHANGELOG（鸡蛋 → 杯子 2/2；随机 7/2/1；有标定误差也接近）。
+  - **教训**：
+    - 实机原装手指 26.5 mm 厚，仿真布局和孪生的薄手指会掩盖碰撞；替身必须按实机手指对齐（指尖 −10.3 mm、开口 − 13.8 mm）；
+    - 0.3° 的手眼误差就会让桌面斜 3 mm，掩膜边缘的桌面点会被算进物体，必须按拟合平面算高度；
+    - 替身里把运动时间压缩到 1/4 会让 mocap 冲击把接触打乱，用规划时间；
+    - 真实 YOLOE 文本模式下 `cls` 恒为 0（`locate_objects` 会拒掉 cls ≠ 0 的检测）。
+  - **没验证的**：真实 YOLOE 识别率、真实深度（深色 / 反光 / 透明）、真实摩擦、手眼精度、夹爪 CAN 反馈。
 - **V4.12 = H1 V2（2026-11-20）**：用户把通用 harness 命名为 H1（V4.11.3 及以前 = V1），要求 V2 做：通用运动片段、任意接近方向的抓取和预演、稳定性事实、抬起试探、不抓的推动、V1 工具改在片段上实现、新场景（竖立酒瓶、推到指定位置），横向夹持和纯位置拨动；力控不需要。做了：`plan_motion_chunk` / `execute_motion_chunk`（`may_touch` 内的物体报预测接触，其他碰撞拒绝）；抓取预抓取点沿 z_G 后退 `approach_distance_mm`（旧名 `pregrasp_height_mm` 仍接受）+ 接近段扫掠（`G49.sweep_collisions`）；`execute_place_chunk.retreat_back_mm`；`G49.stability` → `stability_estimate`；抬起试探 `object_in_gripper_during_lift`；放置底部间隙 ≥ 3 mm；仿真单侧接触时居中（`_center_on_one_pad`，仅 is_sim）；家居 H6（`placed` 手工布局，`upright_on`）/ H7（斜边垫子凸网格）。孪生手写序列 H6 / H7 都成功（tests/test_v4_12.py K4 / K5）。**没做完**：抓取 / 放置还没改写成运动片段的组合（只共用检查）。教训：①仿真夹爪在两垫都碰到前只有 ~0.1 N，竖立重物 1 mm 偏心就夹不住——这是后端仿真的特性，真机按位置合拢；②近处水平手指没有 IK 解（x ≤ −0.46 m 才有），侧抓场景要放远端；③推上 4 mm 直边的垫子推不上去，要斜边。MuJoCo 4：没有 cp310 wheel，不升级。
 - **V4.11.3（2026-11-18）**：第一次 DOE（11-17，18 次，用户的报告）：可判定成功率 7/12，端到端 7/18；发散 5/18，只发生在「放进容器」的任务（H1、H3），H2 托盘没有；截图全失败（控制台的 Python 没有 mujoco）。用户要求只做第一组 4 项：截图用仿真的 Python（`HS.python_env`）；安全停止时刻记录（`GP._record_safety_moment` → `HS.request_safety_record` / `safety_hook`，接触 + 穿透 + 力 + 截图）；没开始重试一次（45 s）；报告加端到端成功率和 token。**待办**：用安全停止记录查清发散原因（蹭壁 / 时间空档 / 其他），再定改法（放置时留横向间隙、放置下降时调软 weld，或选项 E）。
 - **V4.11.2（2026-11-18）**：用户：「每个任务有最终判定失败或者成功时刻的截图吗？我需要后面追溯。」真值检查时物理进程额外写出 qpos，并存一次自己的模型（`HS.snapshot_state`，`mj_saveLastXML` 存在场景文件旁边）；控制台在单独进程里渲染斜视、俯视（和 D435i）三张图（`NERO_V411_Snapshot.py`）；`runs.html` 逐次运行的追溯页（截图、目标真值、工具调用参数 / 原因 / 结果摘录、LLM 文字）；DOE 页点运行灯打开这次运行。原则：**不在物理进程里渲染**（时间空档会让仿真失控，见 V4.10.3）。

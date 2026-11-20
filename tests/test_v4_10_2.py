@@ -132,7 +132,7 @@ class V4102(unittest.TestCase):
         self.assertLess(i, B.index("with mujoco.viewer.launch_passive(model, data) as viewer:"))
         with open(os.path.join(HERE, "VERSION")) as f:
             self.assertEqual(f.read().strip(), C.VERSION)
-        self.assertIn(GP.VERSION, ("V4.10.2", "V4.10.3", "V4.11", "V4.11.1", "V4.11.2", "V4.11.3", "V4.12"))
+        self.assertIn(GP.VERSION, ("V4.10.2", "V4.10.3", "V4.11", "V4.11.1", "V4.11.2", "V4.11.3", "V4.12", "V4.13"))
         self.assertEqual(GP.MARKER_V4102, "V4.10.2 RIGID WELD HOLD IN THE GUI SIMULATION")
 
 

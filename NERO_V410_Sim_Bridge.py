@@ -24,7 +24,7 @@ import json
 import os
 import time
 
-VERSION = "V4.12"
+VERSION = "V4.13"
 MARKER = "V4.10 SIM BRIDGE"
 HERE = os.path.dirname(os.path.realpath(__file__))
 

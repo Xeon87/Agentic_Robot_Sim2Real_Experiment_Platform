@@ -537,6 +537,24 @@ def describe(hm: HeightMap, oid: str, bottom_z: Optional[float] = None, side_fn=
     return d
 
 
+def bottoms_in_openings(descs: List[Dict[str, Any]], table_z: float) -> None:
+    """V4.9.2 (moved here in V4.13, used by the simulated and the real depth camera): a camera does not see an
+    object's bottom; it is the floor of an opening the object stands in, else the table (descs changed in place)"""
+    for d in descs:
+        for e in descs:
+            cav = e.get("open_cavity")
+            if e is d or not cav:
+                continue
+            dxy = np.asarray(d["center_xyz_m"][:2]) - np.asarray(e["center_xyz_m"][:2])
+            r_open = min(v for v in cav["opening_half_width_mm"].values()) / 1000.0
+            if float(np.linalg.norm(dxy)) < r_open and float(d["top_z_m"]) < float(e["top_z_m"]) + 0.08:
+                fz = table_z + float(cav["floor_z_above_table_mm"]) / 1000.0
+                if fz < float(d["top_z_m"]) - 0.005:
+                    d["bottom_z_m"] = round(fz, 4)
+                    d["height_mm"] = round((float(d["top_z_m"]) - fz) * 1000.0, 1)
+                    d["center_xyz_m"][2] = round((float(d["top_z_m"]) + fz) / 2.0, 4)
+
+
 def relations(descs: Sequence[Dict[str, Any]]) -> List[Dict[str, str]]:
     """geometric relations between objects: inside (A's centre within B's measured opening and A's bottom below
     B's rim) / on (A's bottom at B's top within B's footprint)"""
@@ -684,15 +702,15 @@ def preview_grasp(hm: HeightMap, fm: FingerModel, p_grasp, yaw_deg: float, pitch
 
 def sweep_collisions(hm: HeightMap, fm: FingerModel, p_grasp, yaw_deg: float, pitch_deg: float, open_mm: float,
                      dist_m: float, step_m: float = 0.005, margin_m: float = 0.0005,
-                     may_touch: Sequence[str] = ()) -> Dict[str, Any]:
+                     may_touch: Sequence[str] = (), approach_dir=None) -> Dict[str, Any]:
     """V4.12 H1 V2 APPROACH SWEEP: the open gripper moving along its own approach axis (z_G) over the last dist_m
     before the grasp point (the grasp pose itself excluded - preview_grasp checks it): the first collision met on the
     way (part, object, depth, distance before the grasp pose) and the lowest point above the table.  A vertical
     approach can only meet what the grasp pose itself meets (the height map is a top surface), a tilted or horizontal
     one can hit the object or a neighbour on the way."""
     R = grasp_R(yaw_deg, pitch_deg)
-    a = R[:, 2]
-    p = np.asarray(p_grasp, float)
+    a = R[:, 2] if approach_dir is None else np.asarray(approach_dir, float) / max(1e-9, float(np.linalg.norm(approach_dir)))
+    p = np.asarray(p_grasp, float)                    # V4.13: approach_dir = H1 V1's vertical approach (any pitch)
     may = {hm.index_of(n) for n in may_touch}
     first, min_table = None, 1e9
     n = max(1, int(math.ceil(float(dist_m) / step_m)))

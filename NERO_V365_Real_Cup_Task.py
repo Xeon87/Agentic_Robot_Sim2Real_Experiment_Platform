@@ -88,14 +88,14 @@ TASK_SCENES = (
     ("fill_egg_holder", "② 鸡蛋入蛋托 fill_egg_holder"),
     ("sort_items", "③ 物品分类 sort_items"),
     ("tidy_desk", "④ 桌面整理 tidy_desk（听懂弦外之音 · 原装夹爪）"),       # V4.8.3 TIDY DESK
-    ("general_pick_place", "⑤ General pick&place（通用抓放 · LLM实时规划）"),  # V4.8.9 GENERAL PICK&PLACE
+    ("general_pick_place", "⑤ General pick&place（通用抓放 · H1 V1 · LLM实时规划）"),  # V4.8.9 / V4.13 H1 V1
 )
 SCENE_DEFAULT_PROMPTS = {
     "stack_cups": "cup",
     "fill_egg_holder": "egg, egg carton",
     "sort_items": "banana, apple, mouse, marker",
     "tidy_desk": "banana, apple, crumpled paper, cookie pack, toy block, marker pen, computer mouse",
-    "general_pick_place": "egg, cup",
+    "general_pick_place": "egg, cup, apple, bottle, mug, bowl, remote control, tray, storage box",   # V4.13 household
 }
 SCENE_EXAMPLES = {
     "stack_cups": EXAMPLES,
@@ -106,6 +106,9 @@ SCENE_EXAMPLES = {
     "tidy_desk": (("妈妈要来", "我妈妈一会儿要来"), ("要开会", "等下要开会，帮我腾个地方"),
                   ("孩子要来", "孩子一会儿来玩"), ("清垃圾", "把垃圾扔了，别的别动")),
     "general_pick_place": (("egg → cup", "pick up the egg and put it into the cup"),
+                           ("apple → bowl", "put the apple into the bowl"),              # V4.13 household items
+                           ("remote → box", "put the remote control into the storage box"),
+                           ("bottle → tray", "put the bottle onto the tray"),
                            ("自由抓放", "把桌面上的物体抓起放到指定目标里")),
 }
 
@@ -748,10 +751,15 @@ class RealIO:
             lv = GG.force_level(float(force_n))
             r = self.grip.clamp(force=lv)
             held = bool(r.get("held"))
+            # V4.13: no per-pad sensing on the AgxGripper - both contact flags = "stopped on something"; the facts
+            # say how the fingers ended (stalled on an object / reached closed / timeout) and how far they closed
             return {"contact_left": held, "contact_right": held, "left_N": float(force_n) if held else 0.0,
-                    "right_N": float(force_n) if held else 0.0, "hold_active": held, "opening_mm": r.get("gap_mm"),
-                    "gap_mm": r.get("gap_mm"), "force_setting": lv, "force_reading": r.get("force"),
-                    "servo_errors": r.get("errors"), "force_note": "AgxGripper force setting (uncalibrated unless 力控标定)"}
+                    "right_N": float(force_n) if held else 0.0, "hold_active": held, "held": held,
+                    "opening_mm": r.get("gap_mm"), "gap_mm": r.get("gap_mm"), "fingers_stopped": r.get("how"),
+                    "closed_by_mm": r.get("closed_by_mm"), "force_setting": lv, "force_reading": r.get("force"),
+                    "servo_errors": r.get("errors"), "error": r.get("error"),
+                    "contact_note": "the AgxGripper has no pad contact sensors: both contact flags = the fingers stopped "
+                                    "on something before closing", "force_note": "AgxGripper force setting (uncalibrated unless 力控标定)"}
         pct = self.clamp_pct(force_n)
         r = self.grip.clamp(pct)
         held = bool(r.get("held"))
@@ -768,9 +776,15 @@ class RealIO:
         st = self.grip.status() if (self.grip is not None and self.grip.connected) else None
         held = bool(self.grip.held) if self.grip is not None else False
         if self._agx():                                                # V4.8
-            return {"opening_mm": st["gap_mm"] if st else None, "gap_mm": st["gap_mm"] if st else None,
-                    "hold_active": held, "contact_left": held, "contact_right": held, "force_mode": held,
-                    "connected": st is not None}
+            gap = st["gap_mm"] if st else None
+            lc = getattr(self.grip, "last_clamp", None) or {}
+            # V4.13: still holding = held at the clamp and the fingers have not closed further since (an object that
+            # slips out lets the position-controlled fingers close on toward 0)
+            still = bool(held and gap is not None and lc.get("gap_mm") is not None
+                         and float(lc["gap_mm"]) - float(gap) <= 3.0)
+            return {"opening_mm": gap, "gap_mm": gap, "hold_active": still, "held": still,
+                    "contact_left": still, "contact_right": still, "force_mode": held,
+                    "gap_at_clamp_mm": lc.get("gap_mm"), "connected": st is not None}
         return {"opening_mm": round(GR.virtual_mm_for_open_deg(st["open_deg"]), 1) if st else None,
                 "gap_mm": st["gap_mm"] if st else None, "hold_active": held, "contact_left": held,
                 "contact_right": held, "force_mode": held, "connected": st is not None}
@@ -1155,6 +1169,7 @@ class RealIO:
         import NERO_V366_Real_Cup_Yolo as YC
         import re
         import NERO_V483_Tidy as TD
+        import NERO_V413_Real_HeightMap as RHM
         t_p = time.perf_counter()
         cam = self.camera_fn()
         ycfg = dict(cam.get("yolo") or {})
@@ -1183,21 +1198,25 @@ class RealIO:
         objs, diag = YP.locate_objects(d2, depth, dict(cam["K"]), np.asarray(cam["T_base_cam"], float),
                                        table_z=zt_in, fence_poly=cam.get("fence_poly"), calib_note=cam.get("calib_note"))
         zt = float(diag.get("ground_z_m") if diag.get("ground_z_m") is not None else (zt_in or 0.0))
-        counts, dets, cups_compat = {}, [], []
+        dets, cups_compat, ents = [], [], []
         for o in objs:
             if o.get("status") == "rejected" or not o.get("xyz_m"):
                 continue
             c = [float(v) for v in o["xyz_m"]]
             oname = str(o.get("obj_name") or (o.get("yolo") or {}).get("name") or "object").strip().lower()
             slug = re.sub(r"[^a-z0-9]+", "_", oname).strip("_") or "obj"
-            counts[slug] = counts.get(slug, 0) + 1
-            oid = f"{slug}_{counts[slug]}"
             bx = (o.get("yolo") or {}).get("box")
-            contour = []
+            contour, mask = [], None
             for dm in d2:
                 if dm.get("mask") is not None and bx and sum(abs(a - b) for a, b in zip(bx, [round(v) for v in dm["box"]])) <= 8:
-                    contour = YC._contour(dm["mask"])
+                    contour, mask = YC._contour(dm["mask"]), dm["mask"]
                     break
+            ents.append({"o": o, "c": c, "oname": oname, "slug": slug, "xy": c[:2], "contour": contour, "mask": mask})
+        # V4.13 STABLE IDS: the same object keeps its id from look to look (nearest previous object of its label)
+        ids = RHM.match_ids(ents, getattr(self, "_gp_ids", None) or {})
+        for i, e in enumerate(ents):
+            o, c, oname, contour = e["o"], e["c"], e["oname"], e["contour"]
+            oid = ids[i]
             h_mm = float(o.get("height_mm") or max(15.0, (c[2] - zt) * 1000.0))
             top_z = zt + h_mm / 1000.0
             yaw_deg = None
@@ -1221,12 +1240,21 @@ class RealIO:
             )
             dets.append(it)
             cups_compat.append(it)
+        self._gp_ids = {it["det_id"]: {"slug": e["slug"], "xy": it["center_xyz_m"][:2]} for it, e in zip(dets, ents)}
+        hm, rel, hm_stats = None, None, None
+        try:                                              # V4.13 REAL HEIGHT MAP (NERO_V413_Real_HeightMap)
+            hm, rel, hm_stats = self._general_heightmap(cam, depths, dets, [e["mask"] for e in ents], zt)
+        except Exception as exc:
+            hm_stats = {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+            self.emit(f"[WARN] [V4.13 REAL HEIGHT MAP] 高度图失败，退回检测框（实心盒）：{hm_stats['error']}")
         out = {
             "ok": True, "scene": "general_pick_place", "table_z_m": round(zt, 4),
             "fence_z_table_m": (None if zt_in is None else round(float(zt_in), 4)),
             "n_2d": len(d2), "objects": dets, "dets": dets, "cups": cups_compat, "diag": diag,
             "device": (getattr(det, "info", {}) or {}).get("device") or getattr(det, "device", None),
         }
+        if hm is not None:                                # V4.13: H1 uses the measured map, not boxes
+            out["heightmap"], out["relations"], out["heightmap_stats"] = hm, rel, hm_stats
         self.last_perception, self.last_cam = out, cam
         self._table_check(out, cam)
         dt = time.perf_counter() - t_p
@@ -1240,6 +1268,76 @@ class RealIO:
             except Exception:
                 pass
         return out
+
+    def reset_object_memory(self):
+        """V4.13: a new task starts with fresh object ids"""
+        self._gp_ids = {}
+
+    def _general_heightmap(self, cam, depths, dets, masks, zt):
+        """V4.13 REAL HEIGHT MAP: fused depth + masks -> G49 height map; each det gets the measured descriptor
+        (footprint, cross sections, side profile, open cavity); the robot's own points are removed first.
+        -> (hm, relations, stats); dets are updated in place."""
+        import NERO_V308_Camera_Perception as P8
+        import NERO_V413_Real_HeightMap as RHM
+        import NERO_V49_Geometry as G49
+        depth = P8.temporal_fuse(depths) if len(depths) > 1 else depths[0]
+        origins, boxes = [], []
+        try:
+            q = self.current_q()
+            origins = RHM.joint_origins(self.fast, q)
+            boxes = self.gripper_boxes()
+        except Exception as exc:
+            self.emit(f"[WARN] [V4.13 REAL HEIGHT MAP] 没有关节反馈，不能从深度里去掉机械臂自身：{exc}")
+        names = [d["det_id"] for d in dets]
+        okm = [m if m is not None else np.zeros(np.asarray(depth).shape[:2], bool) for m in masks]
+        hm, pts, stats = RHM.build(depth, dict(cam["K"]), np.asarray(cam["T_base_cam"], float), okm, names, zt,
+                                   bounds=RHM.bounds_with_fence(cam.get("fence_poly")),
+                                   joint_origins=origins, robot_boxes=boxes)
+        side = RHM.side_fn_from_points(pts, np.asarray(cam["T_base_cam"], float)[:3, 3][:2])
+        descs, painted = [], []
+        for d in dets:
+            g = G49.describe(hm, d["det_id"], zt, side)
+            if g is None:                                  # seen by YOLOE, too few depth cells: its box as a block
+                RHM.paint_box(hm, d["det_id"], d["center_xyz_m"][:2], d.get("size_mm"), d.get("yaw_deg"), d["top_z_m"])
+                painted.append(d["det_id"])
+                g = G49.describe(hm, d["det_id"], zt, None)
+            if g is not None:
+                descs.append((d, g))
+        unid = []
+        for n in stats.get("unidentified") or []:
+            g = G49.describe(hm, n, zt, None)
+            if g is not None:
+                g["label"] = "unidentified"
+                g["note"] = "high points outside every detection mask (not the robot): an obstacle the detector did not name"
+                unid.append(g)
+        G49.bottoms_in_openings([g for _d, g in descs] + unid, zt)
+        for d, g in descs:
+            g["label"] = d["kind"]
+            g["measurement"] = ("fixed D435i depth: unseen sides not measured, bottom not measured (table or the floor "
+                                "of the opening it is in)" + ("; too few depth points: the detection box is used"
+                                                              if d["det_id"] in painted else ""))
+            for k in ("center_xyz_m", "top_z_m", "bottom_z_m", "height_mm", "axis_a_yaw_deg", "size_mm", "size_axes",
+                      "top_surface_segments_mm", "open_cavity", "side_profile", "_outline_ab", "_footprint_fill",
+                      "measurement"):
+                if k in g:
+                    d[k] = g[k]
+            d["yaw_deg"] = g.get("axis_a_yaw_deg", d.get("yaw_deg"))
+            c = d["center_xyz_m"]
+            d["center_base"], d["rim_xyz_m"] = c, [c[0], c[1], d["top_z_m"]]
+            d["base_xyz_m"] = [c[0], c[1], d["bottom_z_m"]]
+        for g in unid:
+            g["det_id"], g["kind"] = g["object_id"], "unidentified"
+            dets.append(g)
+        stats["box_fallback"] = painted
+        tp = stats.get("table_plane") or {}
+        if tp and float(tp.get("tilt_deg") or 0.0) > 0.5:
+            self.emit(f"[WARN] [V4.13 REAL HEIGHT MAP] 相机看到的桌面相对机械臂基座倾斜 {tp['tilt_deg']:.2f}°"
+                      f"（中心偏 {tp.get('offset_mm_at_center')} mm）：手眼标定或桌面 z 可能有偏差，高度已按局部桌面计算")
+        rel = G49.relations([g for _d, g in descs] + unid)
+        self.emit(f"[INFO] [V4.13 REAL HEIGHT MAP] 桌面倾斜 {tp.get('tilt_deg', '-')}°，{stats['points']} 点，去掉机械臂 {stats['robot_points_removed']}，"
+                  f"看不到的格子 {stats['cells_unseen']}，未识别障碍 {len(unid)}"
+                  + (f"，用检测框代替：{', '.join(painted)}" if painted else ""))
+        return hm, rel, stats
 
     def _table_check(self, res, cam):
         """V3.74 TABLE OFFSET CHECK: the table plane fitted next to the cups vs the safety fence z_table.  A large
@@ -4409,6 +4507,8 @@ class RealCupTaskTabUI:
         pl = self.overlay.get("plan")
         if pl:
             for key, col in (("grasp", "#ffeb3b"), ("release", "#76ff03")):
+                if pl.get(key) is None:
+                    continue
                 uv = proj(pl[key])
                 if uv:
                     u, v = uv
@@ -5043,7 +5143,9 @@ class RealCupTaskTabUI:
                     agent = AG.NeroLLMAgent(emit=self._log, tool_runner=None)
                     agent.provider = llm["provider"]
                     self.agent = agent
-                    out = GPP.run_general_pick_place(io, task, mode=mode, agent=agent, llm_cfg=llm, recorder=rec)
+                    # V4.13 SIM2REAL: the real arm runs H1 V1 (the 7 pick-and-place tools + the two V2 checks)
+                    out = GPP.run_general_pick_place(io, task, mode=mode, agent=agent, llm_cfg=llm, recorder=rec,
+                                                     profile="V1")
                 elif mode == "plan":
                     out = run_plan_preview(io, source, target, knobs, skill, recorder=rec, scene=scene)
                 elif mode == "hover":
@@ -5153,8 +5255,8 @@ class RealCupTaskTabUI:
             for i, c in enumerate(sorted(res.get("cups") or [], key=lambda c_: c_["base_xyz_m"][1])):
                 cups.append((f"cup_{i + 1}" if len(res.get("cups") or []) == 2 else f"#{i + 1}", c))
         pl = None
-        if plan and plan.get("_wps"):
-            pl = {"grasp": plan["_wps"]["grasp"][0], "release": plan["_wps"]["release"][0]}
+        if plan and plan.get("_wps"):           # V4.13: H1 grasp plans have no release point (and place plans no grasp)
+            pl = {k: plan["_wps"][k][0] for k in ("grasp", "release") if k in plan["_wps"]} or None
         dets = overlay_dets(res)
         t_ = time.time()                               # V3.71 LIVE OVERLAY: age of the perception on the monitor
         if now:
