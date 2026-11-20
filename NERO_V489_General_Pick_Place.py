@@ -1770,7 +1770,8 @@ def run_general_pick_place(io, task, mode="execute", agent=None, llm_cfg=None, r
                 except Exception:
                     args = {}
                 emit(f"[V4.8.9 CHUNK #{steps}] {name}({json.dumps(args, ensure_ascii=False)})")
-                if mode in ("plan", "hover") and name in ("execute_grasp_chunk", "execute_place_chunk"):
+                if mode in ("plan", "hover") and name in ("execute_grasp_chunk", "execute_place_chunk",
+                                                          "execute_motion_chunk"):          # V4.12: motion too
                     res = {"ok": True, "dry_run": True, "tool": name, "note": f"skipped physical execution in mode={mode}"}
                 else:
                     res = sk.run_tool(name, args)

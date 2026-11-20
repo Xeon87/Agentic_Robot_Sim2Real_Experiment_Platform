@@ -98,6 +98,13 @@ class V412(unittest.TestCase):
         with open(os.path.join(HERE, "VERSION")) as f:
             self.assertEqual(f.read().strip(), "V4.12")
 
+    def test_k1_plan_mode_blocks_motion(self):
+        import inspect
+        import NERO_V489_General_Pick_Place as GP
+        src = inspect.getsource(GP)
+        i = src.index('if mode in ("plan", "hover") and name in (')
+        self.assertIn("execute_motion_chunk", src[i:i + 200])                 # plan / hover never move
+
     def test_k2_geometry(self):
         import NERO_V49_Geometry as G49
         R0, R90 = G49.grasp_R(90.0, 0.0), G49.grasp_R(90.0, 90.0)
